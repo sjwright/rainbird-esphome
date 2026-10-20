@@ -6,7 +6,8 @@
 namespace esphome::rainbird {
 
 // 2400 bit/s Manchester. One bit is 416 µs, two halves of 208 µs.
-// Windows are ±30% using integer math. 271–290 µs is in neither window and ends the attempt.
+// Windows are ±30% using integer math. 271–290 µs is in neither window.
+// A pulse in neither window ends the attempt, unless it is the idle tail.
 static constexpr int32_t HALF_BIT_US = 208;
 static constexpr int32_t BIT_US = HALF_BIT_US * 2;
 static constexpr int32_t ONE_HALF_MIN_US = HALF_BIT_US * 70 / 100;   // 145
@@ -46,7 +47,7 @@ class PolarityLock {
 
 struct ManchesterBits {
   std::vector<uint8_t> bits;  // 1 or 0, MSB of each byte first once framed
-  bool ended_early{false};    // a width outside both windows, or two equal half-bits
+  bool ended_early{false};    // a mid-burst width outside both windows, or two equal half-bits
 };
 
 // EXTRA_HALF prepends one high half-bit before polarity is applied. Replies on the

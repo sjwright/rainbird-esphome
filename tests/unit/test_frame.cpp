@@ -131,6 +131,43 @@ TEST_CASE("unlocked decode finds inverted replies with a leading half-bit") {
   REQUIRE(straight.frames.size() == 1);
 }
 
+static std::vector<int32_t> receiver_tail(std::vector<int32_t> timings, bool append_opposite) {
+  int sign = timings.back() < 0 ? -1 : 1;
+  timings.back() = sign * 4000;
+  if (append_opposite) {
+    timings.push_back(-sign * 4000);
+  }
+  return timings;
+}
+
+TEST_CASE("remote_receiver-shaped bursts still decode") {
+  auto payload = from_hex("02");
+  uint8_t frame[MAX_FRAME_BYTES];
+  size_t n = encode_frame(payload.data(), payload.size(), false, frame, sizeof(frame));
+  REQUIRE(n > 0);
+
+  const Polarity polarities[] = {Polarity::NORMAL, Polarity::INVERTED};
+  for (Polarity polarity : polarities) {
+    auto clean = manchester_encode(frame, n, polarity, Phase::ALIGNED);
+    for (bool append_opposite : {false, true}) {
+      auto timings = receiver_tail(clean, append_opposite);
+      const char *which = polarity == Polarity::INVERTED ? "inverted" : "normal";
+      INFO(which);
+      auto burst = decode_burst(timings.data(), timings.size(), polarity, Phase::ALIGNED);
+      CHECK_FALSE(burst.ended_early);
+      REQUIRE(burst.frames.size() == 1);
+      check_payload(burst.frames[0], payload);
+    }
+  }
+
+  auto reply = manchester_encode(frame, n, Polarity::INVERTED, Phase::EXTRA_HALF);
+  auto timings = receiver_tail(reply, true);
+  auto burst = decode_burst(timings.data(), timings.size(), Polarity::INVERTED, Phase::EXTRA_HALF);
+  CHECK_FALSE(burst.ended_early);
+  REQUIRE(burst.frames.size() == 1);
+  check_payload(burst.frames[0], payload);
+}
+
 TEST_CASE("looped-back bytes decode and lock that receiver's polarity") {
   // send_raw emits a request at normal polarity. A jumper from the transmitter
   // pin to the receiver pin brings those same timings back.

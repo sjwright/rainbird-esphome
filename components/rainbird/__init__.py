@@ -157,10 +157,10 @@ PROGRAM_DECL_SCHEMA = cv.Schema(
 
 
 def _assign_hub_id(config) -> str:
-    """Give an omitted hub id the name ESPHome's ID pass would have chosen.
+    """Omitted hub ids are ``rainbird``, then ``rainbird_2``.
 
-    A single hub is wrapped into a list before this runs, so index 0 keeps the
-    base name and index 1 becomes ``<base>_2``.
+    Zone and program ids are ``<hub id>_zone<N>``. Those strings are config
+    API, so they stay on a fixed prefix instead of ESPHome's type name.
     """
     ident = config[CONF_ID]
     if ident.id is not None:
@@ -169,9 +169,7 @@ def _assign_hub_id(config) -> str:
 
     path = path_context.get()
     index = path[-1] if path and isinstance(path[-1], int) else 0
-    base = str(ident.type).replace("::", "_").lower()
-    base = "".join(char for char in base if char.isalnum() or char == "_")
-    ident.id = base if index == 0 else f"{base}_{index + 1}"
+    ident.id = "rainbird" if index == 0 else f"rainbird_{index + 1}"
     return ident.id
 
 

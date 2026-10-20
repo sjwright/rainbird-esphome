@@ -89,6 +89,42 @@ TEST_CASE("round trip survives jitter, inversion and a leading half-bit") {
   check(jitter(reply, true), Polarity::INVERTED, Phase::EXTRA_HALF);
 }
 
+static std::vector<uint8_t> bits_of(const std::vector<int32_t> &timings, Polarity polarity, Phase phase, bool *ended) {
+  auto decoded = manchester_decode_bits(timings.data(), timings.size(), polarity, phase);
+  *ended = decoded.ended_early;
+  return decoded.bits;
+}
+
+TEST_CASE("a remote_receiver idle tail keeps the last bit") {
+  auto payload = from_hex("39 00 01 06");
+  const Polarity polarities[] = {Polarity::NORMAL, Polarity::INVERTED};
+  const Phase phases[] = {Phase::ALIGNED, Phase::EXTRA_HALF};
+  for (Polarity polarity : polarities) {
+    for (Phase phase : phases) {
+      auto clean = manchester_encode(payload.data(), payload.size(), polarity, phase);
+      bool clean_ended = true;
+      auto expect = bits_of(clean, polarity, phase, &clean_ended);
+      CHECK_FALSE(clean_ended);
+      REQUIRE(expect.size() == payload.size() * 8);
+
+      // The last half-bit is the same level as the idle timeout, so it arrives as one long pulse.
+      auto merged = clean;
+      int sign = merged.back() < 0 ? -1 : 1;
+      merged.back() = sign * 4000;
+      bool ended = true;
+      auto bits = bits_of(merged, polarity, phase, &ended);
+      CHECK_FALSE(ended);
+      CHECK(bits == expect);
+
+      // decode_rmt_ also appends an idle sample at the opposite level.
+      merged.push_back(-sign * 4000);
+      bits = bits_of(merged, polarity, phase, &ended);
+      CHECK_FALSE(ended);
+      CHECK(bits == expect);
+    }
+  }
+}
+
 TEST_CASE("a width outside both windows ends the attempt") {
   auto payload = from_hex("40");
   auto timings = manchester_encode(payload.data(), payload.size(), Polarity::NORMAL, Phase::ALIGNED);

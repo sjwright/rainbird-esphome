@@ -118,16 +118,40 @@ std::vector<int32_t> manchester_encode(const uint8_t *data, size_t size, Polarit
   return emitter.take();
 }
 
+namespace {
+
+// remote_receiver times out on a steady level and reports that stretch as one
+// long pulse. The last Manchester half shares that level, so it is absorbed
+// into the pulse. decode_rmt_ then appends one more idle sample at the
+// opposite level. Every remaining entry is that tail, not another bit.
+bool trailing_idle(const int32_t *timings, size_t count, size_t at) {
+  if (at >= count) {
+    return false;
+  }
+  for (size_t i = at; i < count; i++) {
+    if (manchester_halves(timings[i]) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 ManchesterBits manchester_decode_bits(const int32_t *timings, size_t count, Polarity polarity, Phase phase) {
   ManchesterBits out;
   if (timings == nullptr || count == 0) {
     return out;
   }
   std::vector<uint8_t> levels;
+  bool stopped_on_idle = false;
   for (size_t i = 0; i < count; i++) {
     int halves = manchester_halves(timings[i]);
     if (halves == 0) {
-      out.ended_early = true;
+      stopped_on_idle = trailing_idle(timings, count, i);
+      if (!stopped_on_idle) {
+        out.ended_early = true;
+      }
       break;
     }
     bool high = timings[i] > 0;
@@ -155,6 +179,11 @@ ManchesterBits manchester_decode_bits(const int32_t *timings, size_t count, Pola
     }
     out.bits.push_back(first == 1 ? 1 : 0);
     index += 2;
+  }
+  // The idle swallowed the last half. The half still in hand is the first half
+  // of that bit, and Manchester's other half is the opposite level.
+  if (stopped_on_idle && !out.ended_early && index + 1 == levels.size()) {
+    out.bits.push_back(levels[index] == 1 ? 1 : 0);
   }
   return out;
 }

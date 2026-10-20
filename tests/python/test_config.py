@@ -114,6 +114,82 @@ def test_committed_configs(path: Path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_omitted_hub_id_is_rainbird(tmp_path: Path):
+    path = tmp_path / "auto-id.yaml"
+    path.write_text(_yaml())
+    result = _run(path, tmp_path)
+    blob = result.stdout + result.stderr
+    assert result.returncode == 0, blob
+    assert "rainbird_zone1_valve_switch" in blob
+    assert "rainbirdcomponent" not in blob
+
+
+def test_second_hub_id_is_rainbird_2(tmp_path: Path):
+    path = tmp_path / "two-hubs.yaml"
+    path.write_text(
+        f"""\
+esphome:
+  name: rainbird-two
+  min_version: 2026.9.0
+
+esp32:
+  variant: esp32c3
+
+logger:
+
+wifi:
+  ssid: test-ssid
+  password: test-password
+
+ota:
+  - platform: esphome
+
+external_components:
+  - source:
+      type: local
+      path: {COMPONENTS}
+    components:
+      - rainbird
+
+remote_receiver:
+  - id: rx_a
+    pin: GPIO4
+    idle: 4ms
+    filter: 50us
+    receive_symbols: 384
+    rmt_symbols: 64
+  - id: rx_b
+    pin: GPIO5
+    idle: 4ms
+    filter: 50us
+    receive_symbols: 384
+    rmt_symbols: 64
+
+rainbird:
+  - model: ESP-TM2
+    listen_only: true
+    receiver_id: rx_a
+    zones:
+      - zone: 1
+        name: Front
+    programs: []
+  - model: ESP-TM2
+    listen_only: true
+    receiver_id: rx_b
+    zones:
+      - zone: 1
+        name: Back
+    programs: []
+"""
+    )
+    result = _run(path, tmp_path)
+    blob = result.stdout + result.stderr
+    assert result.returncode == 0, blob
+    assert "rainbird_zone1_valve_switch" in blob
+    assert "rainbird_2_zone1_valve_switch" in blob
+    assert "rainbirdcomponent" not in blob
+
+
 def test_listen_only_without_transmitter(tmp_path: Path):
     path = tmp_path / "listen.yaml"
     path.write_text(_yaml(transmitter=False, listen_only=True))
