@@ -1365,6 +1365,84 @@ can be adopted once `min_version` reaches the release that ships it.
 
 ---
 
+## 12. Schedule of work
+
+Section 9's phases are the hardware gates. This section is the working order.
+
+**Principles**
+
+- All hardware-independent code is finished and tested on the host first.
+- Each visit to the controller tests exactly one new layer.
+- The code for the next step is written while hardware waits run: the
+  1-hour sniff, the 24-hour soak and the program run.
+
+There are three kinds of session:
+
+- **Desk:** code and CI. No hardware needed.
+- **Bench:** a dev board, or the interface board on the bench.
+- **On-site:** something physical at the controller: wiring, the rain-sensor
+  jumper, the OFF position, front-panel edits. Once the board is installed
+  and on WiFi, firmware updates (OTA) and logs (`esphome logs`) work over the
+  network. So on-site sessions are only for physical actions, and decoding
+  and analysis happen at the desk.
+
+### 12.1 Steps
+
+| Step | Kind | Work | Exit | Phase |
+|------|------|------|------|-------|
+| **S0 Foundation** | desk | First commit of the docs, GitHub repo, CI (host tests, pytest, `esphome compile` for both frameworks and the version matrix). Empty hub, final validation of `transmitter_id` / `receiver_id` against 6.1, `entity_kinds.py` rows for the default entities, `models.py`, `examples/minimal.yaml`. No protocol code. | CI green | 0 |
+| **S1 Codecs** | desk | `manchester`, `sip_frame`, `sip_commands` and the quirk helpers. Every SPEC frame and reply is a vector, plus a burst with two frames and no gap, a reply with the extra leading half-bit, and both polarities. | `make -C tests/unit test` passes | 0 |
+| **S2 Model and state** | desk | `ControllerState`, `EspTm2Model` (`apply_reply`, `locate`, codecs, short and slow poll from the set of fields in use). Tests cover the `CC`, `BB` and `A0` captures, `FF` = manual, big-endian seconds, zone-to-page offsets, a `1P` edit that leaves bytes 3 and 4 alone, and the no-`4C` fallback poll for `0005`. | Host tests pass | 0 |
+| **H1 Hardware** (alongside S0–S2) | bench | Order the parts (12.3). Build the **receive path first**: 24 V AC supply, optocoupler 1 to the receiver pin, and a tap lead so J2 and J4 can be heard with the LNK2 still fitted. The transmit path (optocoupler 2) is only needed from S5. | Both receive paths checked with a meter or logic analyser | – |
+| **S3 Bench loopback** | desk + bench | Receive adapter, per-receiver polarity lock, `listen_only`, `monitor_receiver_id`, `on_frame`, `examples/sniffer.yaml`. On one dev board, wire the transmitter pin to the receiver pin and send frames from `send_raw`. Then repeat through the optocouplers once they're built, to see the real inversion. | Looped-back frames decode with valid checksums | 1 |
+| **S4 Sniffer** | on-site, then desk | **Passive only.** The LNK2 stays connected. (a) Listen for 1 hour. (b) **App-driven capture:** in the Rain Bird app, run a zone, queue a zone, stop, run a program, advance, test all zones, set the rain delay, set seasonal adjust (including the lowest value the app allows), turn irrigation off and on, and edit one of each schedule field. Note the time of each action. Commit the `Received Raw:` bursts to `tests/captures/` and decode them at the desk. A checksum miss here is a codec bug; go back to S1 rather than starting the transmitter. | 100 % valid checksums in both directions. SPEC.md updated with every answer the captures give. | 1 |
+| **S5 Link** | desk, then on-site | `rainbird_link`: one request in flight, duplicate short requests in one transmit buffer, retries, model gate, `04` probes, diagnostics. Swap the LNK2 out. The TM2 keeps watering on its own programs, and the LNK2 can go back in at any time. Start the 24-hour soak, and write S6's publishers while it runs. | Soak passes. Timeout constant set from the measured turnaround. | 2 |
+| **S6 Status** | desk, then one on-site visit | Publish-on-change, `remaining_time` countdown, `queue`, `active_program`, `schedule_changed`. **Visit checklist:** run a program with zone times turned down; open the rain-sensor input; switch the controller to OFF; edit the schedule at the front panel at a noted time. That settles SPEC questions 1, 2, 10 and 11 in one visit. | Entities match the panel. SPEC.md updated before any control code is written. **v0.1.0** | 3 |
+| **S7 Control** | desk, then on-site | `submit()`, the five entity classes, the three actions, `packages/ha-actions.yaml`. Prove `39`, `4B`, `38`, `40`, `37`, `31`, `11` and `13` with follow-up reads. One experimental session covers only what S4's captures **didn't** settle about `49`, `3A`, `42` and the seasonal-adjust floor. Use the SPEC 5.4 order, a program with no start times, and record every NAK. | Every control confirmed by read-back. **v0.2.0** | 4 |
+| **S8 Schedule read** (can overlap S7) | desk, then on-site | The opt-in schedule rows in `entity_kinds.py`; the poll plan picks up their pages. Check all three programs against the panel. Set one odd and one even zone to a run time you'll recognise, and confirm the page and slot. No `21` writes. | Matches the panel; page-to-zone mapping confirmed. **v0.3.0** | 5 |
+| **S9 Schedule write** | desk, then on-site | `allow_writes` and the generic read-modify-write, with the encodings checked against the app writes captured in S4. **One page type per session, in this order:** `00` (station delay, rain-sensor bypass), `6P` (a start time), `1P` (one watering day), `8N` (one run time), `20` (one zone bypass). Read the hex log back before moving to the next page type. Stop if a confirming read differs. | Every page type written and confirmed; untouched bytes unchanged | 6 |
+| **S10 Release** | desk | README entity tables generated from `entity_kinds.py`, `examples/full.yaml`, wiring guide. | CI green → **v1.0.0** | 7 |
+
+S1 and S2 land as separate changes. S8 can overlap S7, because both sit on
+the same state layer. S4, S5, S6, S7 and S9 each need the controller, and
+each starts only after the previous step's exit line is true.
+
+### 12.2 Effort and calendar
+
+| Kind | Sessions |
+|------|----------|
+| Desk | about 17–20 |
+| Bench | about 3–4, including H1 |
+| On-site | about 8–11. S9 is the longest at one page type per session. |
+| Unattended waits | 1 h sniff, 24 h soak, parts shipping (3–10 days) |
+
+At a hobby pace of about three sessions a week, plan for **8–10 weeks** to
+v1.0.0. Parts shipping overlaps S0–S2, so it costs nothing. The calendar is
+set by on-site availability, not by coding: v0.1.0 (read-only status) is
+about 4 weeks in.
+
+### 12.3 Before starting
+
+- **Repository:** `sjwright/rainbird-esphome` created on GitHub, and an OK
+  for the first commit.
+- **Board:** an **ESP32-S3** dev board is recommended. It has RX ping-pong
+  and 4 receive channels, so the two-receiver sniffer setup has room to
+  spare. A C3 or C6 also works. The original ESP32 is tight for sniffing.
+  The S2 is unsupported (6.1). Pick a board with an external-antenna
+  connector if WiFi is weak where the controller is; the WIRE.md author
+  mentions LNK2 WiFi reception problems.
+- **Parts:**
+  - 2× VO617A optocouplers and resistors;
+  - a small 24 V AC → 5 V supply module;
+  - two 5-pin JST-compatible leads (one for the tap);
+  - strongly recommended: an inexpensive 8-channel USB logic analyser.
+- **Rain Bird app** working through the existing LNK2, for S4.
+- **Safety for S7 and S9:** work at a time when watering does no harm, or
+  disconnect the valve common wire. Before S9's first write, save the full
+  schedule dump from the log as a backup.
+
+---
+
 ## Appendix: review notes
 
 The plan has been through three rounds of external review. Some suggestions
@@ -1434,3 +1512,19 @@ were changed or declined, and the reasons are recorded here. Rows marked
 | Replace custom actions and conditions with entity ones | Adopted (D13, 4.5): 3 custom actions remain, down from 11, and there are no custom conditions |
 | Derive the poll plan from configured entities; `04` as the only capability source | Adopted (6.3, 6.4) |
 | Option count | Reduced: timeouts, retries, duplicates, fast poll and polarity are internal constants (4.1) |
+
+### Round 4: schedule of work
+
+| Suggestion | Outcome |
+|------------|---------|
+| Split the host work into scaffold, codecs, and model/state, each a separate change (Agent 1) | Adopted (S0–S2) |
+| Write the next step's code during the hardware waits (both agents) | Adopted (12, principles) |
+| "A checksum miss in the sniffer is a codec bug, not a reason to start the transmitter" (Agent 1) | Adopted (S4) |
+| One status visit settles questions 1, 2, 10 and 11, with a short program run (Agent 1) | Adopted (S6 checklist) |
+| Schedule writes one page type per session, in the order `00`, `6P`, `1P`, `8N`, `20` (Agent 1) | Adopted (S9) |
+| Build the receive path first; transmit can wait until the link step (Agent 2) | Adopted (H1) |
+| Hobby-pace estimate of 8–9 weeks (Agent 2) | Adopted as 8–10 weeks. My earlier 5–6 weeks assumed near-daily sessions. |
+| The controller must be within reach of the bench (Agent 2) | **Changed.** Once installed and on WiFi, OTA and network logs make most work remote. Only physical actions need a visit. |
+| Removing the LNK2 removes the household's irrigation control (Agent 2) | **Corrected.** Only app control is lost: the TM2 keeps running its own programs, and the LNK2 can be refitted at any time. |
+| Probe `49`, `3A`, `42` and the seasonal floor on the controller (Agent 1) | **Changed.** S4's app-driven capture records the official app sending these, so S7's experimental session only covers what that didn't settle. |
+| Bench loopback before the first controller visit (mine) | Kept (S3): RMT round trips are cheaper to debug on the bench. |
