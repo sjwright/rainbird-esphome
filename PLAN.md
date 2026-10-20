@@ -37,14 +37,14 @@ These are open for review. Each one shapes the YAML in section 3.
 | # | Decision | Why |
 |---|----------|-----|
 | D1 | **`model: ESP-TM2`, not `type:`** | ESPHome uses `model:` for hardware variants (`dht`, `ili9xxx`, `ssd1306`). The value is case-insensitive, so `esp-tm2` also works. The TM2 sub-variant (`0005` / `000A` / `010A` / `0014` / `0015`) is detected at runtime with command `02`, and optional commands are enabled to match. |
-| D2 | **Zones and programs are declared on the hub**, and their entities are generated from `zone_defaults` / `program_defaults` | This follows core's `sprinkler` component (`valves:` with `valve_switch`, `run_duration_number`, …). Naming a zone once gives you its switch, duration, run times and so on, which is the efficiency asked for. |
+| D2 | **Zones and programs are declared on the hub**, and their entities are generated from `zone_defaults` / `program_defaults` | This follows core's `sprinkler` component (`valves:` with `valve_switch`, `run_duration_number`, …). Naming a zone once gives you its switch, duration, run times and so on, which is the efficiency asked for. Sprinkler's keys take only a name string. Ours take either a name string (`valve_switch: "Front lawn"`) or a full entity schema, using `cv.maybe_simple_value(..., key=CONF_NAME)`. |
 | D3 | **Controller-wide entities use normal platform blocks** (`sensor: - platform: rainbird`) with one key per entity | This follows core hub components such as `ld2410`. Users can split them into packages, and they look like any other ESPHome entity. |
 | D4 | **Entity keys are named `<thing>_<domain>`.** A singular key (`valve_switch`) creates one entity. A plural key (`run_time_numbers`, `watering_day_switches`, `start_time_datetimes`) creates one entity per program, day or slot. | The same convention as `sprinkler`. The key name tells you both the entity type and how many entities it creates. |
 | D5 | **Zone valves are `switch` entities** | Matches `sprinkler` and the existing Home Assistant Rain Bird integration. ESPHome's `valve` domain is an option to revisit later. |
 | D6 | **Schedule fields use typed entities, never free text.** Watering days are 7 switches per program. Each start-time slot is a `datetime` time entity plus an "enabled" switch, since `FFFF` (off) can't be shown as a time. | Nothing on the write path parses text, and each entity maps to one byte or one u16 on the page. All of them are opt-in, so the entity count stays low unless asked for. |
 | D7 | **Names can contain the placeholders `{zone}`, `{program}`, `{day}` and `{slot}`** | One template in `zone_defaults` or `program_defaults` names the same entity everywhere. Single braces don't clash with ESPHome's `${substitutions}`. |
 | D8 | **IDs are generated predictably**: `<zone id>_<key>`, e.g. `front_lawn_valve_switch` | Lambdas and automations can reference any generated entity without declaring it. |
-| D9 | **ESP32 only**, with RMT for transmit and a GPIO interrupt for receive | RMT gives exact Manchester timing at no CPU cost. Interrupt-based receive handles frames of any length on every ESP32 variant (section 6.1). |
+| D9 | **ESP32 only** (variants with RMT), with RMT for transmit and a GPIO interrupt for receive | RMT gives exact Manchester timing at no CPU cost. Interrupt-based receive handles frames of any length on every ESP32 variant (section 6.1). Variants without RMT (ESP32-C2, ESP32-C61) are rejected at config validation, using the same list `remote_transmitter` uses. |
 | D10 | **Unverified commands are off by default**: `schedule: allow_writes: false`, `experimental: false`. `rainbird.send_raw` also needs `experimental: true`. | SPEC.md section 8 lists unverified commands. Until they are confirmed, the matching entities can be read but not written. A raw-send action left in a config would bypass both gates. |
 | D11 | **An unrecognised model ID makes the hub read-only** | If `02` returns an ID outside the model's list, status polling continues but every control and write command is refused. That stops a TM2 page map from being written to a different controller. `accept_model_ids:` overrides this for TM2 variants missing from the list. |
 
@@ -52,13 +52,49 @@ These are open for review. Each one shapes the YAML in section 3.
 
 ## 2. Using the component
 
+The repository is **https://github.com/sjwright/rainbird-esphome**. It uses
+the layout ESPHome expects for external components: the component lives in
+`components/rainbird/`, next to a README and example configs.
+
+**Recommended: a pinned release.** A tag never moves, so there is nothing to
+re-check:
+
 ```yaml
 external_components:
   - source: github://sjwright/rainbird-esphome@v0.1.0
     components: [rainbird]
+    refresh: never
 ```
 
-Pin a release tag for stable builds. Track `main` with `refresh: 1d`.
+**The same, written out in full.** Use this form for a fork or a private
+mirror:
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/sjwright/rainbird-esphome
+      ref: v0.1.0
+    components: [rainbird]
+    refresh: never
+```
+
+**Tracking development.** This uses the default branch, checked for updates
+once a day (ESPHome's default `refresh`):
+
+```yaml
+external_components:
+  - source: github://sjwright/rainbird-esphome@main
+    components: [rainbird]
+    refresh: 1d
+```
+
+**Working on the component itself:**
+`source: { type: local, path: ../rainbird-esphome/components }`.
+
+Every release is tagged `vMAJOR.MINOR.PATCH`. The release notes state the
+minimum ESPHome version, which also appears as `esphome: min_version` in the
+examples.
 
 The smallest working config:
 
@@ -105,11 +141,12 @@ substitutions:
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
+  min_version: 2026.9.0      # the oldest release CI builds against (section 11)
 
 esp32:
-  board: esp32dev
-  framework:
-    type: esp-idf            # arduino also supported
+  variant: esp32             # `board:` is no longer recommended; any ESP32 with RMT works
+  # framework:               # ESP-IDF is the default; Arduino is opt-in
+  #   type: arduino
 
 logger:
   level: DEBUG
@@ -130,6 +167,7 @@ time:
 external_components:
   - source: github://sjwright/rainbird-esphome@v0.1.0
     components: [rainbird]
+    refresh: never
 
 # ---------------------------------------------------------------------------
 # Hub
@@ -471,12 +509,16 @@ keys):
    `zone_defaults` entry. A zone that sets a key absent from `zone_defaults`
    gets that entity anyway.
 3. The placeholders in the name are filled in.
-4. If no `id` is given, the generated ID is `<zone id>_<key>`. Plural keys
+4. A key may be given as a plain string, as in core's `sprinkler`. It is then
+   read as `{name: <string>}`, so `valve_switch: "{zone} valve"` works.
+5. If no `id` is given, the generated ID is `<zone id>_<key>`. Plural keys
    add a suffix: the program letter, day or slot number, e.g.
-   `front_lawn_run_time_numbers_a`.
-5. The result is checked against the platform's normal entity schema, so
+   `front_lawn_run_time_numbers_a`. These are ESPHome config IDs for
+   lambdas, not the deprecated entity `object_id`, which the component never
+   sets or reads.
+6. The result is checked against the platform's normal entity schema, so
    every standard option (`icon`, `internal`, `entity_category`,
-   `disabled_by_default`, `on_turn_on`, `filters`, …) works.
+   `disabled_by_default`, `device_id`, `on_turn_on`, `filters`, …) works.
 
 ### 4.3 Programs
 
@@ -595,34 +637,99 @@ rainbird-esphome/
 │   │   └── vectors.h            # every example in SPEC.md as a test vector
 │   ├── captures/                # real pulse-timing captures from phase 1 onwards
 │   └── components/rainbird/
-│       ├── common.yaml
-│       ├── test.esp32-idf.yaml
-│       └── test.esp32-ard.yaml
+│       ├── common.yaml          # the component config, pins as substitutions
+│       ├── test.esp32-idf.yaml  # core naming: test.<platform>-<framework>.yaml
+│       ├── test.esp32-ard.yaml
+│       ├── test.esp32-c3-idf.yaml   # RISC-V variant with smaller RMT memory
+│       └── validate.esp32-idf.yaml  # config-only checks, never compiled
 └── .github/workflows/ci.yaml
 ```
 
+The test files follow core's component-test layout: a shared `common.yaml`,
+included as a package from one file per platform and framework, with pins
+passed in as substitutions. Each one loads the component from the checkout
+with `external_components: [{ source: { type: local, path: ../../../components } }]`,
+so CI tests the code in the PR rather than a published tag.
+
 ### 5.1 Style conventions (as core uses them)
 
+These conventions were checked against the ESPHome developer docs and the
+2026.9.1 source on 2026-10-20 (section 11).
+
 **C++**
-- Namespace `esphome::rainbird`.
-- Log tags `rainbird`, `rainbird.phy`, `rainbird.sip`.
+- Namespace `esphome::rainbird`. The namespace must match the component name.
 - `this->` everywhere, members with a trailing underscore, `snake_case`
-  methods.
-- `ESP_LOGCONFIG` in `dump_config()`, `LOG_PIN`, `LOG_UPDATE_INTERVAL`.
-- `SUB_SENSOR(...)`-style setters for platform entities.
+  methods, and `final` on concrete classes, as core does.
+- **Log tags** are declared with `ESPHOME_LOG_TAG(TAG, "rainbird.phy");` at
+  namespace scope in each `.cpp`. That macro arrives in 2026.10.0, so a shared
+  header carries core's documented fallback for older releases:
+  ```cpp
+  #ifndef ESPHOME_LOG_TAG
+  #define ESPHOME_LOG_TAG(name, tag) static const char *const name = tag
+  #endif
+  ```
+  `TAG` is only passed to log macros; it is never used as a scheduler name or
+  to build strings.
+- **`dump_config()`** combines related fields into one `ESP_LOGCONFIG` call
+  with `\n` separators, within the 512-byte buffer. It uses `LOG_PIN` and
+  `LOG_UPDATE_INTERVAL`, and sets up no strings with `str_sprintf`.
+- **Logging levels.** No logging for entity state changes; the base classes
+  already log published states at VERBOSE. No logging in the interrupt
+  handler or on every loop pass. Frame dumps are VERBOSE, through
+  `format_hex_pretty_to` into a stack buffer. They move to `ESP_LOGV_HEX`
+  once `min_version` includes it.
+- `SUB_SENSOR(...)`, `SUB_BINARY_SENSOR`, `SUB_TEXT_SENSOR`, `SUB_SWITCH`,
+  `SUB_NUMBER`, `SUB_BUTTON` and `SUB_SELECT` setters, each with its include
+  inside `#ifdef USE_SENSOR` (etc.) guards, exactly as `ld2410` does. Domains
+  the user doesn't configure then cost nothing.
 - `Parented<RainbirdComponent>` for writeable entities.
+- **Status** uses `status_set_warning()` / `status_clear_warning()` while the
+  link is down. The named form of `status_momentary_warning` is deprecated
+  (removal in 2027.5.0) and is not used.
+- **Timekeeping** in `loop()` uses `App.get_loop_component_start_time()`, not
+  `millis()`. Any timer IDs are `static constexpr uint32_t`, never strings.
+- **Persisted state** (the remembered time of a start-time slot that is off)
+  uses `global_preferences->make_preference<T>()`. Its key is a hash of hub
+  ID, program and slot, so it stays stable across builds. A failed `load()`
+  is handled as the normal case.
 - clang-format using ESPHome's `.clang-format`.
 
 **Python**
+- `DOMAIN = "rainbird"`. Core CI is starting to require it, and it's harmless
+  on older releases.
 - `CONF_*` constants from `esphome.const` wherever one exists (`CONF_MODEL`,
   `CONF_TX_PIN`, `CONF_RX_PIN`, `CONF_TIME_ID`, `CONF_ZONE`, …).
-- `CONF_RAINBIRD_ID = "rainbird_id"` for platforms.
+- `CONF_RAINBIRD_ID = "rainbird_id"` for platforms, with
+  `cv.GenerateID(CONF_RAINBIRD_ID): cv.use_id(RainbirdComponent)`.
 - `CODEOWNERS = ["@sjwright"]`, `MULTI_CONF = True`.
-- `AUTO_LOAD` for every entity domain the hub generates.
-- `cv.only_on_esp32`.
+- `AUTO_LOAD` for every entity domain the hub can generate: `switch`,
+  `number`, `button`, `binary_sensor`, `select`, `datetime`.
+- **Validation:** `cv.only_on_esp32`, plus a check against
+  `esp32_rmt.VARIANTS_NO_RMT`, the list `remote_transmitter` uses.
+- **Entity schemas** come from the domain helpers: `switch.switch_schema(...)`,
+  `number.number_schema(..., unit_of_measurement=...)`,
+  `button.button_schema(...)`, `select.select_schema(...)`,
+  `datetime.time_schema(...)` / `datetime.datetime_schema(...)`. The entities
+  are created with `new_switch`, `new_number(config, min_value=, max_value=,
+  step=)` and so on, and parented with `cg.register_parented()`.
+- **RMT driver:** `to_code` calls
+  `esp32.include_builtin_idf_component("esp_driver_rmt")`. ESPHome now leaves
+  that driver out of builds by default, and `remote_transmitter` re-enables
+  it the same way.
+- **Pins** are wired with `cg.gpio_pin_expression()` and `cg.add()` for now.
+  Core's newer `cg.add_pin()` / `cg.add_variable()` helpers need 2026.11.0.
+- **Not used yet, to adopt later:** core's `sub_switches(...)` and
+  `ApplySwitch` / `ApplyNumber` / `ApplyButton` / `ApplySelect` helpers. They
+  let a simple child entity call one hub method without its own C++ class, but
+  they are only on ESPHome's `dev` branch. Section 11 lists when to adopt
+  them.
+- **No PlatformIO-specific hooks** (`cg.add_library`, `platformio_options`).
+  ESPHome is deprecating the PlatformIO toolchain (removal in 2027.2.0), and
+  this component needs no libraries.
 - ruff formatting.
 
 **Entities:** names in sentence case, matching current ESPHome guidance.
+Names never repeat the device name; ESPHome and Home Assistant add it.
 
 ### 5.2 Main C++ classes
 
@@ -678,8 +785,10 @@ other models.
 
 ### 6.1 Physical layer (`phy_esp32`)
 
-**Transmit, using RMT** through the ESP-IDF 5 API (`driver/rmt_tx.h`). That
-API exists in both the esp-idf framework and Arduino-ESP32 3.x.
+**Transmit, using RMT** through the RMT TX driver API (`driver/rmt_tx.h`). It
+is the only RMT API in ESP-IDF 5.x and 6.x, and it is what Arduino-ESP32 3.x
+builds on. The current ESPHome defaults are ESP-IDF 5.5.5 and Arduino 3.3.11.
+The driver component has to be added back explicitly (see 5.1).
 
 - Resolution is 1 MHz. Each bit becomes one RMT symbol of 208 + 208 µs:
   high then low for 1, low then high for 0.
@@ -691,9 +800,14 @@ API exists in both the esp-idf framework and Arduino-ESP32 3.x.
 
 **Receive, using a GPIO interrupt** (one per receive pin).
 
-- The interrupt handler is `IRAM_ATTR`. It timestamps edges with
-  `esp_timer_get_time()`, which is IRAM-safe, rather than Arduino `micros()`,
-  which may not be.
+- The interrupt is attached the way core's `pulse_meter` does it:
+  `this->rx_isr_ = this->rx_pin_->to_isr();` and
+  `this->rx_pin_->attach_interrupt(&RainbirdPhyEsp32::rx_isr, this, gpio::INTERRUPT_ANY_EDGE);`.
+- The handler is `static void IRAM_ATTR`. It reads the level with
+  `isr_pin.digital_read()` and timestamps the edge with
+  `esp_timer_get_time()`. ESPHome's own `micros()`, which core ISRs use, is
+  also IRAM-safe on ESP32. `esp_timer_get_time()` is preferred because it is
+  the ESP-IDF primitive and doesn't depend on which framework is in use.
 - Each edge is stored as a `uint32_t` (timestamp with the level in the low
   bit) in a lock-free single-producer, single-consumer ring of
   `rx_buffer_size` entries (8 KB at the default).
@@ -706,6 +820,11 @@ API exists in both the esp-idf framework and Arduino-ESP32 3.x.
 - **Receive is never paused while transmitting.** TX and RX are separate
   wires. The controller starts replying about 30 ms after the first copy of
   a request, while the duplicate copy is still going out.
+- **Waking the main loop.** On the first edge after an idle period, the
+  handler calls the hub's `enable_loop_soon_any_context()`, ESPHome's
+  documented ISR-safe wake, and nothing else. The PHY belongs to the hub, so
+  this is the hub controlling its own loop, as the docs require. It doesn't call it on every
+  edge, which would flood the main loop with wake-ups.
 
 **Decoding** (pure `manchester.cpp` + `sip_frame.cpp`):
 
@@ -744,6 +863,18 @@ for the replay tests (section 8).
   flight.
 - **Switching to the fast poll** while watering and back uses
   `set_update_interval()` and restarts the poller. There is no second timer.
+- **`loop()` only runs when there is work.** It is enabled while a request is
+  queued or in flight, or while received edges are waiting to be decoded.
+  When the queue and both receive rings are empty, it calls `disable_loop()`.
+  `update()`, the control API and the interrupt handler turn it back on with
+  `enable_loop()` or `enable_loop_soon_any_context()`. This is the pattern the
+  developer docs recommend for interrupt-fed components.
+- **Nothing blocks.** Transmit is a non-blocking RMT transaction, and
+  decoding works through whatever edges are buffered. Every `loop()` pass
+  stays far below ESPHome's 50 ms blocking warning.
+- The `remaining_time` countdown uses `set_interval` with a `constexpr`
+  numeric ID. It runs only while a zone is running and is cancelled when
+  watering stops.
 - **One request in flight at a time.** Each step is: send, then wait up to
   `request_timeout` after the end of the first copy, then match the reply. A
   reply matches if its opcode is the request opcode + `0x80`, or an ACK/NAK
@@ -941,7 +1072,7 @@ class LegacyProgramModel : public Model {
 | Manchester codec | Host tests. Synthesise duration streams from bytes, add ±20 % jitter, invert them, add the leading half-bit, then decode. Also round-trip with the encoder. |
 | Replay | `test_replay.cpp` feeds every file in `tests/captures/` (real pulse timings from `log_raw_edges`) through the full pipeline. Expected payloads are stored beside each capture. This catches assumptions the synthetic tests share with the encoder. |
 | SIP parsers | Host tests using every `[test]` and `[wire]` example in SPEC.md, such as the `CC`, `BB` page 0 and page 1, `A0` pages and `CA` timestamp captures. Also tests that schedule edits preserve the bytes they don't touch. Vectors taken from pyrainbird's raw `decode_schedule` output have 1 added to the zone numbers (SPEC 5.6). |
-| Schema and codegen | `esphome config` and `esphome compile` on `tests/components/rainbird/test.esp32-idf.yaml` and `test.esp32-ard.yaml`, plus `examples/*.yaml`. A negative test checks that `send_raw` without `experimental` is rejected. |
+| Schema and codegen | `esphome compile` on every `tests/components/rainbird/test.*.yaml`, and `esphome config` on `validate.*.yaml` and `examples/*.yaml`. Negative tests check that `send_raw` without `experimental`, an unimplemented model, and an ESP32-C2 target are all rejected. |
 | Lint | ruff, clang-format check, yamllint |
 | Hardware | Phases 1–2 below, on the real controller |
 
@@ -960,8 +1091,18 @@ make -C tests/unit test
 
 CI runs the same command.
 
-GitHub Actions runs every row except hardware on each push and PR. Release
-tags (`v0.x.y`) are created only when CI passes.
+GitHub Actions runs every row except hardware on each push and PR.
+
+**ESPHome version matrix:**
+- `min_version` (currently 2026.9.0) and the latest stable release. Both must
+  pass.
+- A weekly scheduled build against ESPHome `dev`. It may fail, but each
+  failure is an early warning of upcoming API changes.
+
+The ESPHome version is installed with `pip install esphome==<version>`. Builds
+use ESPHome's default toolchain; PlatformIO is not invoked directly.
+
+Release tags (`v0.x.y`) are created only when CI passes.
 
 ---
 
@@ -996,8 +1137,73 @@ tag becomes `[wire]`, and the default or `experimental` gate is adjusted.
 | Edges are lost during WiFi or OTA activity | IRAM interrupt handler using `esp_timer_get_time()`, an 8 KB ring per pin, and overflow counting, so losses show as `link_errors` rather than mystery checksum failures. Retries cover the rest. |
 | A bad schedule write corrupts the controller's programs | Writes are off by default. The model gate (D11) applies. Writes are read-modify-write with confirmation and logged in hex before sending, and each page type is tested on its own. |
 | Generated entity count is high (12 zones × up to 7, 3 programs × up to 21) | Only valve and duration per zone, and run button and seasonal adjust per program, are generated by default. Everything else is opt-in. |
-| ESPHome API churn, especially the `datetime` platform and the RMT driver | Compile against the latest stable release in CI, and declare `esphome: min_version` in the examples. Free-text `text` entities are not used at all. |
+| ESPHome API churn, especially the `datetime` platform, the RMT driver and code generation helpers | CI builds against both `min_version` and the latest stable release, plus a weekly build against `dev` that is allowed to fail (section 11). Compatibility shims are used where the docs give one (`ESPHOME_LOG_TAG`). Free-text `text` entities are not used at all. |
 | Two hubs or an LNK2 on the same controller | Not supported while transmitting. `listen_only` is the only supported way to share the bus. |
+
+---
+
+## 11. ESPHome compatibility
+
+This section was checked on **2026-10-20** against the user docs at
+esphome.io, the developer docs at developers.esphome.io, and the ESPHome
+source at tag `2026.9.1`, the latest stable release at that date. Re-check it
+before each minor release of this component.
+
+### 11.1 Baseline
+
+- **ESPHome `min_version: 2026.9.0`.** CI tests nothing older, so nothing
+  older is claimed. It can be lowered later if a user needs it and CI passes.
+- **ESP32 with ESP-IDF by default.** ESP-IDF is now ESPHome's default
+  framework for every ESP32 variant (recommended version 5.5.5). Arduino
+  (3.3.11) is opt-in and only exists for ESP32, -S2, -S3 and -C3, so it is
+  tested but secondary.
+- **`esp32: variant:`** in every example. The docs say `board:` is "no longer
+  recommended".
+
+### 11.2 Current practices this plan follows
+
+| Area | Current practice | Where in this plan |
+|------|------------------|--------------------|
+| External components | `components/<name>/` layout. `github://user/repo@ref` shorthand or the full `type: git` form. `refresh` defaults to `1day`; `never` suits a pinned tag. | 2, 5 |
+| HA actions | `api: actions:` with `action:` keys. `services:` still works but is the old name. Array variable types such as `int[]` are supported. | 3 |
+| OTA | `ota: - platform: esphome` (list form) | 3 |
+| Sub-devices | `esphome: devices:` / `areas:`, with `device_id` on each entity | 4.2 (`device_id` per zone) |
+| Loop control | `disable_loop()` when idle, `enable_loop_soon_any_context()` from interrupts | 6.1, 6.2 |
+| Scheduler | `App.get_loop_component_start_time()` instead of `millis()`; numeric timer IDs; nothing that blocks for 50 ms or more | 5.1, 6.2 |
+| Logging | `ESPHOME_LOG_TAG` with fallback; combined `dump_config` lines; no state-change logs | 5.1 |
+| Status | `status_set_warning()` without a name argument | 5.1 |
+| RMT | `include_builtin_idf_component("esp_driver_rmt")`; RMT TX driver API; reject variants without RMT | 5.1, 6.1 |
+| GPIO interrupts | `to_isr()` + `attach_interrupt(..., gpio::INTERRUPT_ANY_EDGE)` with an `IRAM_ATTR` static handler | 6.1 |
+| Entity IDs | No use of entity `object_id` (deprecated in 2026) | 4.2 |
+| Optional domains | `#ifdef USE_<DOMAIN>` guards around `SUB_*` members | 5.1 |
+| Tests | `tests/components/<name>/test.<platform>-<framework>.yaml` plus `common.yaml` and `validate.*.yaml` | 5, 8 |
+| Toolchain | Nothing PlatformIO-specific; ESPHome's PlatformIO toolchain is deprecated (removal in 2027.2.0) | 5.1 |
+
+### 11.3 Newer APIs deliberately not used yet
+
+These exist only in releases newer than `min_version`, or only on `dev`. Each
+can be adopted once `min_version` reaches the release that ships it.
+
+| API | Available from | Adopt when |
+|-----|----------------|------------|
+| `ESPHOME_LOG_TAG` | 2026.10.0 | Used now through the documented `#ifndef` fallback. Drop the fallback when `min_version` ≥ 2026.10.0. |
+| `cg.add_pin()` / `cg.add_variable()` | 2026.11.0 | Replace `cg.gpio_pin_expression()` + `cg.add()` |
+| `sub_switches()` / `ApplySwitch` etc. | `dev` only (not in 2026.9.1) | Possibly for simple child entities such as buttons that make one hub call. Zone entities keep their own classes, because they carry zone state. |
+| `DOMAIN` lint requirement | `dev` | Already defined, so nothing to change |
+| `ESP_LOGV_HEX` | Not stated in the docs; check the release notes | Replace `format_hex_pretty_to` buffers once `min_version` includes it |
+
+### 11.4 Sources
+
+- [External components](https://esphome.io/components/external_components/)
+- [ESP32 platform](https://esphome.io/components/esp32/) (default framework, `variant` vs `board`, toolchain deprecation)
+- [Core configuration](https://esphome.io/components/esphome/) (`min_version`, `devices`, `areas`)
+- [Native API](https://esphome.io/components/api/) (`actions:`)
+- [Datetime](https://esphome.io/components/datetime/)
+- [Sprinkler](https://esphome.io/components/sprinkler/)
+- [Component architecture](https://developers.esphome.io/architecture/components/) and [advanced topics](https://developers.esphome.io/architecture/components/advanced) (loop control, scheduler, preferences)
+- [Logging best practices](https://developers.esphome.io/architecture/logging/best_practices/)
+- [Component tests](https://developers.esphome.io/architecture/ci/component_tests/)
+- ESPHome source at `2026.9.1`: `remote_transmitter/__init__.py` (RMT driver include), `pulse_meter/pulse_meter_sensor.cpp` (interrupt pattern), `esp32/__init__.py` (framework versions), `switch/__init__.py` (no `sub_switches` in the release), `ld2410/ld2410.h` (`SUB_*` with `#ifdef` guards)
 
 ---
 
