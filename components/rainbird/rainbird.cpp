@@ -5,6 +5,11 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#ifdef USE_ESP32
+#include <driver/gpio.h>
+#include <driver/rtc_io.h>
+#endif
+
 #include "entity_values.h"
 #include "log_tag.h"
 #include "rainbird_entities.h"
@@ -81,7 +86,24 @@ void RainbirdComponent::setup() {
   this->session_ = std::make_unique<Session>(this->model_, config);
   this->session_->start(millis());
   this->last_stage_ = this->session_->stage();
+  this->release_receiver_pads_();
   this->after_activity_();
+}
+
+void RainbirdComponent::release_receiver_pads_() {
+#ifdef USE_ESP32
+  // On the original ESP32 these pads (GPIO26, GPIO27, and the other RTC pins)
+  // stay on the RTC mux until something calls rtc_gpio_deinit. remote_receiver
+  // never does, so its RMT input can miss a real signal. This runs after that
+  // setup because the hub's priority is just below DATA.
+  for (uint8_t pin : this->receiver_pins_) {
+    auto gpio = static_cast<gpio_num_t>(pin);
+    if (rtc_gpio_is_valid_gpio(gpio)) {
+      rtc_gpio_deinit(gpio);
+    }
+    gpio_input_enable(gpio);
+  }
+#endif
 }
 
 void RainbirdComponent::loop() {
@@ -157,7 +179,7 @@ void RainbirdComponent::transmit_(const Transmission &tx) {
     return;
   }
   char pretty[format_hex_pretty_size(MAX_PAYLOAD)];
-  ESP_LOGV(TAG, "Send %s", format_hex_pretty_to(pretty, tx.bytes + 4, tx.bytes[3]));
+  ESP_LOGD(TAG, "Send %s", format_hex_pretty_to(pretty, tx.bytes + 4, tx.bytes[3]));
   // The transmitter pin's inverted: flag is the electrical polarity. Bytes stay normal.
   std::vector<int32_t> timings = manchester_encode(tx.bytes, tx.size, Polarity::NORMAL, Phase::ALIGNED);
   auto call = this->transmitter_->transmit();
@@ -231,6 +253,9 @@ bool RainbirdComponent::send_raw(const uint8_t *data, size_t size) {
     return false;
   }
   this->after_activity_();
+  // loop() is off while the link is idle. The action runs from the scheduler,
+  // outside the component phase, so send the queued frame in this turn.
+  this->loop();
   return true;
 }
 

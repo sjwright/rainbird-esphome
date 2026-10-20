@@ -1,8 +1,10 @@
 # Bench loopback, and the starting point for a passive sniff.
-# Jumper GPIO26 to GPIO27, flash this, and press "Send model query".
-# The log line "Frame 02" is that payload. A bad checksum never reaches on_frame.
-# `update_interval: never` keeps the hub from identifying or polling, so the
-# button is the only thing that transmits.
+# Jumper GPIO26 to GPIO27 and flash this. One second after boot it sends a
+# model query. The link repeats a request that gets no reply, so that is three
+# frames, enough for the polarity lock. The button does the same send once an
+# API can press it. The log line "Frame 02" is that payload. A bad checksum
+# never reaches on_frame. `update_interval: never` keeps the hub from
+# identifying or polling.
 #
 # Save the log and run tools/raw_to_fixture.py on it to turn the
 # `Received Raw:` lines into a replay fixture.
@@ -15,6 +17,12 @@
 esphome:
   name: rainbird-sniffer
   min_version: 2026.9.0
+  on_boot:
+    priority: -100
+    then:
+      - delay: 1s
+      - logger.log: "Sending model query"
+      - rainbird.send_raw: [0x02]
 
 esp32:
   variant: esp32

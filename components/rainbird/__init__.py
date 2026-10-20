@@ -32,11 +32,13 @@ from esphome.const import (
     CONF_INITIAL_VALUE,
     CONF_MODEL,
     CONF_NAME,
+    CONF_NUMBER,
+    CONF_PIN,
     CONF_RESTORE_VALUE,
     CONF_TIME_ID,
     CONF_TRIGGER_ID,
 )
-from esphome.core import ID
+from esphome.core import CORE, ID
 
 from .entity_kinds import KINDS_BY_ID, EntityKind, Write
 from .errors import ConfigError
@@ -396,6 +398,20 @@ async def send_raw_to_code(config, action_id, template_arg, args):
     return var
 
 
+def _receiver_gpio(receiver_id):
+    """GPIO number for a remote_receiver id, if this config declares it."""
+    wanted = getattr(receiver_id, "id", receiver_id)
+    for conf in CORE.config.get("remote_receiver", []):
+        found = conf.get(CONF_ID)
+        if getattr(found, "id", found) != wanted:
+            continue
+        pin = conf.get(CONF_PIN)
+        if isinstance(pin, dict):
+            return pin.get(CONF_NUMBER)
+        return pin
+    return None
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -410,9 +426,13 @@ async def to_code(config):
     if not config[CONF_LISTEN_ONLY]:
         cg.add(var.set_transmitter(await cg.get_variable(config[CONF_TRANSMITTER_ID])))
     cg.add(var.set_receiver(await cg.get_variable(config[CONF_RECEIVER_ID])))
+    if (pin := _receiver_gpio(config[CONF_RECEIVER_ID])) is not None:
+        cg.add(var.add_receiver_pin(pin))
     await _add_listener(var, config[CONF_ID].id, config[CONF_RECEIVER_ID], "rx", "Receiver", True)
     if CONF_MONITOR_RECEIVER_ID in config:
         cg.add(var.set_monitor_receiver(await cg.get_variable(config[CONF_MONITOR_RECEIVER_ID])))
+        if (pin := _receiver_gpio(config[CONF_MONITOR_RECEIVER_ID])) is not None:
+            cg.add(var.add_receiver_pin(pin))
         await _add_listener(
             var, config[CONF_ID].id, config[CONF_MONITOR_RECEIVER_ID], "monitor", "Monitor", False
         )

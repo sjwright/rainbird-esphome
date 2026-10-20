@@ -87,6 +87,9 @@ class RainbirdComponent final : public PollingComponent {
  public:
   void setup() override;
   void loop() override;
+  // After remote_receiver (DATA). Its setup claims the pin; release_receiver_pads_
+  // has to run once that is done.
+  float get_setup_priority() const override { return setup_priority::DATA - 1.0f; }
   void update() override;
   void dump_config() override;
 
@@ -108,6 +111,7 @@ class RainbirdComponent final : public PollingComponent {
   void set_refresh_interval(uint32_t refresh_interval_ms) { this->refresh_interval_ms_ = refresh_interval_ms; }
   void set_transmitter(remote_base::RemoteTransmitterBase *transmitter) { this->transmitter_ = transmitter; }
   void set_receiver(remote_base::RemoteReceiverBase *receiver) { this->receiver_ = receiver; }
+  void add_receiver_pin(uint8_t pin) { this->receiver_pins_.push_back(pin); }
   void set_monitor_receiver(remote_base::RemoteReceiverBase *receiver) { this->monitor_receiver_ = receiver; }
   void add_accept_model_id(uint16_t model_id) { this->accept_ids_.push_back(model_id); }
   void add_zone(RainbirdZone *zone) { this->zones_.push_back(zone); }
@@ -142,6 +146,7 @@ class RainbirdComponent final : public PollingComponent {
   friend class RainbirdReceiver;
   void deliver_frame_(const Frame &frame, const char *which, bool controller);
   void transmit_(const Transmission &tx);
+  void release_receiver_pads_();
   void after_activity_();
   void publish_changed_();
   void publish_countdown_();
@@ -159,6 +164,7 @@ class RainbirdComponent final : public PollingComponent {
   const char *model_name_{""};
   remote_base::RemoteTransmitterBase *transmitter_{nullptr};
   remote_base::RemoteReceiverBase *receiver_{nullptr};
+  std::vector<uint8_t> receiver_pins_{};
   remote_base::RemoteReceiverBase *monitor_receiver_{nullptr};
   std::vector<RainbirdZone *> zones_{};
   std::vector<RainbirdProgram *> programs_{};
