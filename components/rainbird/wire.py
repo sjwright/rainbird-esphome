@@ -137,6 +137,34 @@ def _rmt_users(full) -> list[tuple[str, int]]:
     return users
 
 
+def _collect_send_raw(node, found: list) -> None:
+    if isinstance(node, dict):
+        action = node.get("rainbird.send_raw")
+        if isinstance(action, dict):
+            found.append(action)
+        for value in node.values():
+            _collect_send_raw(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_send_raw(item, found)
+
+
+def _check_send_raw(config: dict) -> None:
+    """send_raw skips the model gate, so the config has to opt in."""
+    hub_id = config.get(CONF_ID)
+    found: list = []
+    _collect_send_raw(fv.full_config.get(), found)
+    for action in found:
+        if action.get(CONF_ID) != hub_id:
+            continue
+        if config.get("listen_only"):
+            raise cv.Invalid(
+                "rainbird.send_raw needs a transmitter. listen_only does not have one."
+            )
+        if not config.get("experimental"):
+            raise cv.Invalid("rainbird.send_raw needs experimental: true on the rainbird hub.")
+
+
 def validate_hub(config: dict) -> None:
     """Check the referenced transmitter and receiver against the wire rules."""
     variant = None
@@ -162,6 +190,7 @@ def validate_hub(config: dict) -> None:
 
     if not config.get("listen_only") and "transmitter_id" in config:
         _check_transmitter(_declaring(config["transmitter_id"]))
+    _check_send_raw(config)
 
     if variant is None:
         return

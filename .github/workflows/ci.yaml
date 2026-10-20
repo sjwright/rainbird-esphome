@@ -57,6 +57,7 @@ jobs:
       - name: Check configs
         run: |
           esphome config examples/minimal.yaml
+          esphome config examples/sniffer.yaml
           esphome config tests/components/rainbird/validate.esp32-idf.yaml
       - name: Compile
         run: esphome compile ${{ matrix.config }}

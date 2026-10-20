@@ -12,6 +12,7 @@ pytestmark = pytest.mark.skipif(ESPHOME is None, reason="esphome is not installe
 
 COMMITTED = [
     REPO / "examples/minimal.yaml",
+    REPO / "examples/sniffer.yaml",
     REPO / "tests/components/rainbird/test.esp32-idf.yaml",
     REPO / "tests/components/rainbird/test.esp32-ard.yaml",
     REPO / "tests/components/rainbird/test.esp32-c3-idf.yaml",
@@ -46,6 +47,7 @@ def _yaml(
     zones: str = "    - zone: 1\n      name: Front",
     programs: str = "",
     rainbird_extra: str = "",
+    extra: str = "",
 ) -> str:
     # C2 and C61 reject RMT keys in the receiver schema, before our check.
     receiver = ["  pin: GPIO4", f"  idle: {idle}", f"  filter: {filter_us}"]
@@ -94,7 +96,7 @@ rainbird:
   model: {model}
 {listen}{rainbird_extra}  zones:
 {zones}
-{program_yaml}"""
+{program_yaml}{extra}"""
 
 
 def _expect_fail(tmp_path: Path, needle: str, **kwargs) -> None:
@@ -165,6 +167,34 @@ def test_unsupported_variants(tmp_path: Path, variant: str, needle: str):
             "non_blocking": None,
         }
     _expect_fail(tmp_path, needle, variant=variant, **kwargs)
+
+
+SEND_RAW = """
+interval:
+  - interval: 60s
+    then:
+      - rainbird.send_raw: [0x02]
+"""
+
+
+def test_send_raw_needs_experimental(tmp_path: Path):
+    _expect_fail(tmp_path, "experimental: true", extra=SEND_RAW)
+    path = tmp_path / "raw.yaml"
+    path.write_text(_yaml(rainbird_extra="  experimental: true\n", extra=SEND_RAW))
+    result = _run(path, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    path.write_text(
+        _yaml(
+            transmitter=False,
+            listen_only=True,
+            rainbird_extra="  experimental: true\n",
+            extra=SEND_RAW,
+        )
+    )
+    result = _run(path, tmp_path)
+    blob = result.stdout + result.stderr
+    assert result.returncode != 0, blob
+    assert "listen_only" in blob, blob
 
 
 def test_unimplemented_and_unknown_model(tmp_path: Path):

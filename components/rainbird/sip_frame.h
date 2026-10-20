@@ -60,4 +60,16 @@ BurstDecode decode_burst(const int32_t *timings, size_t count, Polarity polarity
 // A tie keeps the earlier pair: normal polarity, no extra half-bit.
 BurstDecode decode_burst_unlocked(const int32_t *timings, size_t count);
 
+// One of these per receiver. While locked, only that polarity and phase are tried.
+// A frame at the other polarity must count as a miss, so searching all four again
+// would hide the misses that are supposed to unlock it.
+class ReceiverDecoder {
+ public:
+  BurstDecode decode(const int32_t *timings, size_t count);
+  const PolarityLock &lock() const { return this->lock_; }
+
+ private:
+  PolarityLock lock_{};
+};
+
 }  // namespace esphome::rainbird

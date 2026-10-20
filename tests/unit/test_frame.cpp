@@ -130,3 +130,42 @@ TEST_CASE("unlocked decode finds inverted replies with a leading half-bit") {
   CHECK(straight.phase == Phase::ALIGNED);
   REQUIRE(straight.frames.size() == 1);
 }
+
+TEST_CASE("looped-back bytes decode and lock that receiver's polarity") {
+  // send_raw emits a request at normal polarity. A jumper from the transmitter
+  // pin to the receiver pin brings those same timings back.
+  auto payload = from_hex("02");
+  uint8_t frame[MAX_FRAME_BYTES];
+  size_t n = encode_frame(payload.data(), payload.size(), false, frame, sizeof(frame));
+  REQUIRE(n > 0);
+  auto timings = manchester_encode(frame, n, Polarity::NORMAL, Phase::ALIGNED);
+
+  ReceiverDecoder decoder;
+  for (int i = 0; i < 3; i++) {
+    BurstDecode decoded = decoder.decode(timings.data(), timings.size());
+    REQUIRE(decoded.frames.size() == 1);
+    check_payload(decoded.frames[0], payload);
+  }
+  CHECK(decoder.lock().locked());
+  CHECK(decoder.lock().polarity() == Polarity::NORMAL);
+  CHECK(decoder.lock().phase() == Phase::ALIGNED);
+
+  auto inverted = manchester_encode(frame, n, Polarity::INVERTED, Phase::ALIGNED);
+  BurstDecode missed = decoder.decode(inverted.data(), inverted.size());
+  CHECK(missed.frames.empty());
+  CHECK(decoder.lock().locked());
+
+  ReceiverDecoder other;
+  for (int i = 0; i < 3; i++) {
+    BurstDecode decoded = other.decode(inverted.data(), inverted.size());
+    REQUIRE(decoded.frames.size() == 1);
+    check_payload(decoded.frames[0], payload);
+  }
+  CHECK(other.lock().polarity() == Polarity::INVERTED);
+  for (int i = 0; i < 4; i++) {
+    other.decode(timings.data(), timings.size());
+    CHECK(other.lock().locked());
+  }
+  other.decode(timings.data(), timings.size());
+  CHECK_FALSE(other.lock().locked());
+}

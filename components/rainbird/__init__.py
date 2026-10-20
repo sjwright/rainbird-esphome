@@ -17,12 +17,14 @@ from esphome.components.remote_base import (
     CONF_RECEIVER_ID,
     CONF_TRANSMITTER_ID,
     RemoteReceiverBase,
+    RemoteReceiverListener,
     RemoteTransmitterBase,
 )
 import esphome.components.switch as switch_comp
 import esphome.components.time as time_comp
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_DATA,
     CONF_ID,
     CONF_INITIAL_VALUE,
     CONF_MODEL,
@@ -31,6 +33,7 @@ from esphome.const import (
     CONF_TIME_ID,
     CONF_TRIGGER_ID,
 )
+from esphome.core import ID
 
 from .entity_kinds import KINDS_BY_ID, EntityKind, Write
 from .errors import ConfigError
@@ -80,6 +83,10 @@ RainbirdNumber = rainbird_ns.class_(
 )
 RainbirdButton = rainbird_ns.class_(
     "RainbirdButton", button_comp.Button, cg.Parented.template(RainbirdComponent)
+)
+RainbirdReceiver = rainbird_ns.class_("RainbirdReceiver", RemoteReceiverListener)
+RainbirdSendRawAction = rainbird_ns.class_(
+    "RainbirdSendRawAction", automation.Action, cg.Parented.template(RainbirdComponent)
 )
 NakTrigger = rainbird_ns.class_("NakTrigger", automation.Trigger.template(cg.uint8, cg.uint8))
 FrameTrigger = rainbird_ns.class_(
@@ -309,6 +316,52 @@ async def build_entity(parent, kind: EntityKind, entity_config, zone, program, i
     return var
 
 
+def _payload(value):
+    if isinstance(value, list):
+        data = cv.Schema([cv.hex_uint8_t])(value)
+    else:
+        raise cv.Invalid("data must be a list of bytes")
+    if len(data) > 64:
+        raise cv.Invalid("data is longer than 64 bytes")
+    return data
+
+
+async def _add_listener(parent, parent_id: str, receiver_id, suffix: str, name: str):
+    listener = cg.new_Pvariable(
+        ID(f"{parent_id}_{suffix}", is_declaration=True, type=RainbirdReceiver)
+    )
+    cg.add(listener.set_parent(parent))
+    cg.add(listener.set_name(name))
+    receiver = await cg.get_variable(receiver_id)
+    cg.add(receiver.register_listener(listener))
+
+
+@automation.register_action(
+    "rainbird.send_raw",
+    RainbirdSendRawAction,
+    cv.maybe_simple_value(
+        {
+            cv.GenerateID(): cv.use_id(RainbirdComponent),
+            cv.Required(CONF_DATA): cv.templatable(_payload),
+        },
+        key=CONF_DATA,
+    ),
+    synchronous=True,
+)
+async def send_raw_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    data = config[CONF_DATA]
+    if cg.is_template(data):
+        templ = await cg.templatable(data, args, cg.std_vector.template(cg.uint8))
+        cg.add(var.set_data_template(templ))
+    else:
+        arr_id = ID(f"{action_id}_data", is_declaration=True, type=cg.uint8)
+        arr = cg.static_const_array(arr_id, cg.ArrayInitializer(*data))
+        cg.add(var.set_data_static(arr, len(data)))
+    return var
+
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -322,8 +375,12 @@ async def to_code(config):
     if not config[CONF_LISTEN_ONLY]:
         cg.add(var.set_transmitter(await cg.get_variable(config[CONF_TRANSMITTER_ID])))
     cg.add(var.set_receiver(await cg.get_variable(config[CONF_RECEIVER_ID])))
+    await _add_listener(var, config[CONF_ID].id, config[CONF_RECEIVER_ID], "rx", "Receiver")
     if CONF_MONITOR_RECEIVER_ID in config:
         cg.add(var.set_monitor_receiver(await cg.get_variable(config[CONF_MONITOR_RECEIVER_ID])))
+        await _add_listener(
+            var, config[CONF_ID].id, config[CONF_MONITOR_RECEIVER_ID], "monitor", "Monitor"
+        )
     if CONF_TIME_ID in config:
         cg.add(var.set_time(await cg.get_variable(config[CONF_TIME_ID])))
     for model_id in config.get(CONF_ACCEPT_MODEL_IDS, []):

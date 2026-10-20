@@ -5,6 +5,7 @@
 #include "esphome/core/defines.h"
 
 #include "automation.h"
+#include "sip_frame.h"
 
 #ifdef USE_TIME
 #include "esphome/components/time/real_time_clock.h"
@@ -55,6 +56,21 @@ class RainbirdProgram {
   uint8_t program_{0};
 };
 
+class RainbirdComponent;
+
+// One listener per remote_receiver, each with its own polarity lock.
+class RainbirdReceiver : public remote_base::RemoteReceiverListener {
+ public:
+  void set_parent(RainbirdComponent *parent) { this->parent_ = parent; }
+  void set_name(const char *name) { this->name_ = name; }
+  bool on_receive(remote_base::RemoteReceiveData data) override;
+
+ private:
+  RainbirdComponent *parent_{nullptr};
+  const char *name_{"Receiver"};
+  ReceiverDecoder decoder_{};
+};
+
 class RainbirdComponent final : public PollingComponent {
  public:
   void setup() override;
@@ -63,6 +79,9 @@ class RainbirdComponent final : public PollingComponent {
   void dump_config() override;
 
   bool submit(const WriteIntent &intent);
+  // Experimental. Encodes a request and transmits it with the carrier off.
+  bool send_raw(const uint8_t *data, size_t size);
+  bool send_raw(const std::vector<uint8_t> &data) { return this->send_raw(data.data(), data.size()); }
 
   void set_model_name(const char *model_name) { this->model_name_ = model_name; }
   void set_listen_only(bool listen_only) { this->listen_only_ = listen_only; }
@@ -85,6 +104,9 @@ class RainbirdComponent final : public PollingComponent {
 #endif
 
  protected:
+  friend class RainbirdReceiver;
+  void deliver_frame_(const Frame &frame, const char *which);
+
   const char *model_name_{""};
   remote_base::RemoteTransmitterBase *transmitter_{nullptr};
   remote_base::RemoteReceiverBase *receiver_{nullptr};
@@ -103,6 +125,28 @@ class RainbirdComponent final : public PollingComponent {
 #ifdef USE_TIME
   time::RealTimeClock *time_{nullptr};
 #endif
+};
+
+template<typename... Ts> class RainbirdSendRawAction final : public Action<Ts...>, public Parented<RainbirdComponent> {
+ public:
+  void set_data_template(std::vector<uint8_t> (*func)(Ts...)) { this->func_ = func; }
+  void set_data_static(const uint8_t *data, size_t length) {
+    this->data_ = data;
+    this->length_ = length;
+  }
+
+  void play(const Ts &...x) override {
+    if (this->func_ != nullptr) {
+      this->parent_->send_raw(this->func_(x...));
+      return;
+    }
+    this->parent_->send_raw(this->data_, this->length_);
+  }
+
+ protected:
+  std::vector<uint8_t> (*func_)(Ts...){nullptr};
+  const uint8_t *data_{nullptr};
+  size_t length_{0};
 };
 
 }  // namespace esphome::rainbird

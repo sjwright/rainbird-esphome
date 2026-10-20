@@ -17,6 +17,7 @@ esp32:
 
 # Proves the trigger parameter names compile. The package's on_nak list is replaced.
 rainbird:
+  experimental: true
   on_nak:
     - logger.log:
         format: "Controller NAK %u %u"
@@ -47,3 +48,9 @@ button:
     start:
       id: run_drip
       name: Run drip
+  - platform: template
+    name: Send model query
+    on_press:
+      - rainbird.send_raw:
+          id: rainbird_controller
+          data: [0x02]

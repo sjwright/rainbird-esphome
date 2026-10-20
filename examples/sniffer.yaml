@@ -1,0 +1,66 @@
+# Bench loopback, and the starting point for a passive sniff.
+# Jumper GPIO26 to GPIO27, flash this, and press "Send model query".
+# The log line "Frame 02" is that payload. A bad checksum never reaches on_frame.
+#
+# Passive sniff, LNK2 still fitted: delete the transmitter, the button and
+# send_raw, set listen_only: true, and add a second remote_receiver as
+# monitor_receiver_id. An ESP32-S3 has room for both. On the original ESP32
+# the two hardware blocks have to share 512 symbols, so use an S3 for that.
+
+esphome:
+  name: rainbird-sniffer
+  min_version: 2026.9.0
+
+esp32:
+  variant: esp32
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: example
+  password: example-password
+
+ota:
+  - platform: esphome
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components:
+      - rainbird
+
+remote_transmitter:
+  id: rb_tx
+  pin: GPIO26
+  carrier_duty_percent: 100%
+  non_blocking: true
+
+remote_receiver:
+  id: rb_rx
+  pin: GPIO27
+  idle: 4ms
+  filter: 50us
+  receive_symbols: 384
+  rmt_symbols: 384
+  dump: raw
+
+rainbird:
+  id: rainbird_controller
+  model: ESP-TM2
+  transmitter_id: rb_tx
+  receiver_id: rb_rx
+  experimental: true
+  update_interval: never
+  zones: []
+  programs: []
+  on_frame:
+    - lambda: |-
+        ESP_LOGI("rainbird", "Frame %s", format_hex_pretty(payload).c_str());
+
+button:
+  - platform: template
+    name: Send model query
+    on_press:
+      - rainbird.send_raw: [0x02]

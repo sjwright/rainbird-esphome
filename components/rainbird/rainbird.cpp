@@ -1,5 +1,6 @@
 #include "rainbird.h"
 
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
 #include "log_tag.h"
@@ -10,7 +11,70 @@ ESPHOME_LOG_TAG(TAG, "rainbird");
 
 void RainbirdComponent::setup() {
   // The link enables loop() while a request is queued. Nothing is queued yet.
+  // Received frames are decoded from the receiver's own loop, so this stays off.
   this->disable_loop();
+}
+
+bool RainbirdReceiver::on_receive(remote_base::RemoteReceiveData data) {
+  if (this->parent_ == nullptr) {
+    return false;
+  }
+  const remote_base::RawTimings &raw = data.get_raw_data();
+  bool was_locked = this->decoder_.lock().locked();
+  BurstDecode decoded = this->decoder_.decode(raw.data(), raw.size());
+  const PolarityLock &lock = this->decoder_.lock();
+  if (!was_locked && lock.locked()) {
+    ESP_LOGD(TAG, "%s polarity locked: %s, %s", this->name_,
+             lock.polarity() == Polarity::INVERTED ? "inverted" : "normal",
+             lock.phase() == Phase::EXTRA_HALF ? "extra half-bit" : "aligned");
+  } else if (was_locked && !lock.locked()) {
+    ESP_LOGD(TAG, "%s polarity unlocked", this->name_);
+  }
+  if (decoded.frames.empty()) {
+    return false;
+  }
+  for (const Frame &frame : decoded.frames) {
+    this->parent_->deliver_frame_(frame, this->name_);
+  }
+  return true;
+}
+
+void RainbirdComponent::deliver_frame_(const Frame &frame, const char *which) {
+  char pretty[format_hex_pretty_size(MAX_PAYLOAD)];
+  ESP_LOGV(TAG, "%s %s", which, format_hex_pretty_to(pretty, frame.payload, frame.length));
+  std::vector<uint8_t> payload(frame.payload, frame.payload + frame.length);
+  for (FrameTrigger *trigger : this->frame_triggers_) {
+    trigger->trigger(payload);
+  }
+}
+
+bool RainbirdComponent::send_raw(const uint8_t *data, size_t size) {
+  if (!this->experimental_) {
+    ESP_LOGW(TAG, "send_raw needs experimental: true");
+    return false;
+  }
+  if (this->transmitter_ == nullptr) {
+    ESP_LOGW(TAG, "send_raw needs a transmitter");
+    return false;
+  }
+  if (size > MAX_PAYLOAD) {
+    ESP_LOGW(TAG, "send_raw payload is %u bytes; the maximum is %u", static_cast<unsigned>(size),
+             static_cast<unsigned>(MAX_PAYLOAD));
+    return false;
+  }
+  uint8_t frame[MAX_FRAME_BYTES];
+  size_t framed = encode_frame(data, size, false, frame, sizeof(frame));
+  if (framed == 0) {
+    return false;
+  }
+  // The transmitter pin's inverted: flag is the electrical polarity. Bytes stay normal.
+  std::vector<int32_t> timings = manchester_encode(frame, framed, Polarity::NORMAL, Phase::ALIGNED);
+  auto call = this->transmitter_->transmit();
+  remote_base::RemoteTransmitData *tx = call.get_data();
+  tx->set_carrier_frequency(0);
+  tx->set_data(timings);
+  call.perform();
+  return true;
 }
 
 void RainbirdComponent::loop() {
@@ -34,7 +98,8 @@ bool RainbirdComponent::submit(const WriteIntent &intent) {
 void RainbirdComponent::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "Rain Bird %s\n"
-                "  Link: not implemented yet\n"
+                "  Receive: listening\n"
+                "  Commands: not implemented yet\n"
                 "  Listen only: %s\n"
                 "  Valve mode: %s\n"
                 "  Schedule writes: %s\n"
@@ -61,7 +126,7 @@ void RainbirdComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Triggers: %u NAK, %u frame", static_cast<unsigned>(this->nak_triggers_.size()),
                   static_cast<unsigned>(this->frame_triggers_.size()));
   }
-  // The wire pointers are unused until the link exists. Read them so the fields stay live.
+  // send_raw uses the transmitter. The receivers are registered separately, in to_code.
   if (!this->listen_only_ && this->transmitter_ == nullptr) {
     ESP_LOGE(TAG, "No transmitter");
   }

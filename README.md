@@ -4,9 +4,9 @@ An [ESPHome](https://esphome.io) external component for controlling a Rain Bird
 ESP-TM2 irrigation controller by talking to it directly over its TX/RX serial
 interface. No Rain Bird LNK WiFi module or cloud service is needed.
 
-> Work in progress. Configuration is validated and the default zone and program
-> entities are created, but the firmware does not talk to the controller yet.
-> Flashing it will not run irrigation.
+> Work in progress. The firmware decodes frames from `remote_receiver` and can
+> transmit a raw payload (`rainbird.send_raw`, and only with `experimental: true`).
+> It does not poll the controller or run irrigation yet.
 
 ## Usage
 

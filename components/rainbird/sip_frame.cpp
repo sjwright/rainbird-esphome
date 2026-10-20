@@ -156,6 +156,23 @@ BurstDecode decode_burst(const int32_t *timings, size_t count, Polarity polarity
   return out;
 }
 
+BurstDecode ReceiverDecoder::decode(const int32_t *timings, size_t count) {
+  BurstDecode decoded;
+  if (this->lock_.locked()) {
+    decoded = decode_burst(timings, count, this->lock_.polarity(), this->lock_.phase());
+  } else {
+    decoded = decode_burst_unlocked(timings, count);
+  }
+  if (decoded.frames.empty()) {
+    this->lock_.note_bad();
+    return decoded;
+  }
+  for (size_t i = 0; i < decoded.frames.size(); i++) {
+    this->lock_.note_good(decoded.polarity, decoded.phase);
+  }
+  return decoded;
+}
+
 BurstDecode decode_burst_unlocked(const int32_t *timings, size_t count) {
   const Polarity polarities[] = {Polarity::NORMAL, Polarity::NORMAL, Polarity::INVERTED, Polarity::INVERTED};
   const Phase phases[] = {Phase::ALIGNED, Phase::EXTRA_HALF, Phase::ALIGNED, Phase::EXTRA_HALF};
