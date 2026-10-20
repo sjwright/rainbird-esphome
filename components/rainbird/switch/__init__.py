@@ -20,7 +20,7 @@ CONFIG_SCHEMA = cv.Schema(
 )
 
 # Model limits need the hub config, which is only available in final validation.
-FINAL_VALIDATE_SCHEMA = validate_entity_platform
+FINAL_VALIDATE_SCHEMA = validate_entity_platform("switch")
 
 
 async def to_code(config):

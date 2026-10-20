@@ -28,6 +28,11 @@ def _one_number(config):
         raise cv.Invalid("run_duration needs zone")
     if has_seasonal and CONF_PROGRAM not in config:
         raise cv.Invalid("seasonal_adjust needs program")
+    # Reject a key the entity would ignore rather than build something else silently.
+    if has_duration and CONF_PROGRAM in config:
+        raise cv.Invalid("run_duration is per zone. Remove program.")
+    if has_seasonal and CONF_ZONE in config:
+        raise cv.Invalid("seasonal_adjust is per program. Remove zone.")
     return config
 
 
@@ -48,7 +53,7 @@ CONFIG_SCHEMA = cv.All(
     _one_number,
 )
 
-FINAL_VALIDATE_SCHEMA = validate_entity_platform
+FINAL_VALIDATE_SCHEMA = validate_entity_platform("number")
 
 
 async def to_code(config):

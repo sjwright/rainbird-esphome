@@ -18,11 +18,13 @@ struct ModelLimits {
 
 // Probe results. The model id is not a feature table (PLAN 6.3).
 struct Capabilities {
-  bool combined{false};         // 4C
-  bool event_timestamp{false};  // 4A
-  bool advance{false};          // 42
-  bool queue_run{false};        // 4B
-  bool station_error{false};    // 3D
+  bool combined{false};          // 4C
+  bool event_timestamp{false};   // 4A
+  bool advance{false};           // 42
+  bool queue_run{false};         // 4B
+  bool station_error{false};     // 3D
+  bool controller_state{false};  // 49, irrigation on/off
+  bool test_stations{false};     // 3A
 };
 
 struct RequestList {
@@ -44,6 +46,10 @@ enum class CodecKind : uint8_t {
   U8,
   U16_BE,
   START_SLOT,  // minutes after midnight, negative means the slot is off (FFFF)
+  // The enabled switch of a start slot. 0 writes FFFF. Nonzero keeps a slot that is
+  // already on and refuses one that is off: enabling needs a time, so the caller
+  // writes START_TIME with the minutes instead.
+  SLOT_ENABLED,
   BIT,
   GLOBAL_BYPASS,  // logical on (bypassed) is wire 0x01
   ZONE_BYPASS,    // logical on (ignores the sensor) is wire 0x00, the opposite of page 00

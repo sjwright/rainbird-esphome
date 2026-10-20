@@ -107,7 +107,8 @@ def entity_schema(kind: EntityKind):
 def program_letter(value):
     """A–D covers every model in the registry. The hub's model narrows it later."""
     text = cv.string(value).upper()
-    if text not in "ABCD":
+    # Exact match: `in` on a string is a substring test, so "AB" or "" would pass.
+    if len(text) != 1 or text not in "ABCD":
         raise cv.Invalid(f"Program {text} is not a program letter (A–D)")
     return text
 
@@ -126,6 +127,15 @@ def _optional_mapping(value):
     if not isinstance(value, dict):
         raise cv.Invalid("Expected a mapping")
     return value
+
+
+def _bare_mapping(schema):
+    """Accept `key:` with no value as an empty mapping, like zone_defaults."""
+
+    def validator(value):
+        return schema({} if value is None else value)
+
+    return validator
 
 
 CLOCK_SCHEMA = cv.Schema(
@@ -186,10 +196,9 @@ def _apply_wire_ids(config):
 
 
 def _validate(config):
-    clock_set = CONF_CLOCK_SYNC in config
-    if not clock_set:
-        config[CONF_CLOCK_SYNC] = CLOCK_SCHEMA({})
-    elif CONF_TIME_ID not in config:
+    # Clock sync writes the controller's clock, so it runs only when the block is
+    # present. time_id alone is also used to convert schedule timestamps.
+    if CONF_CLOCK_SYNC in config and CONF_TIME_ID not in config:
         raise cv.Invalid("clock_sync needs time_id")
     if CONF_SCHEDULE not in config:
         config[CONF_SCHEDULE] = SCHEDULE_SCHEMA({})
@@ -263,13 +272,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_TRANSMITTER_ID): cv.use_id(RemoteTransmitterBase),
             cv.Optional(CONF_RECEIVER_ID): cv.use_id(RemoteReceiverBase),
             cv.Optional(CONF_MONITOR_RECEIVER_ID): cv.use_id(RemoteReceiverBase),
-            cv.Optional(CONF_ACCEPT_MODEL_IDS): cv.ensure_list(cv.hex_int),
+            cv.Optional(CONF_ACCEPT_MODEL_IDS): cv.ensure_list(cv.hex_uint16_t),
             cv.Optional(CONF_VALVE_SWITCH_MODE, default="start"): cv.one_of(
                 "start", "queue", lower=True
             ),
             cv.Optional(CONF_TIME_ID): cv.use_id(time_comp.RealTimeClock),
-            cv.Optional(CONF_CLOCK_SYNC): CLOCK_SCHEMA,
-            cv.Optional(CONF_SCHEDULE): SCHEDULE_SCHEMA,
+            cv.Optional(CONF_CLOCK_SYNC): _bare_mapping(CLOCK_SCHEMA),
+            cv.Optional(CONF_SCHEDULE): _bare_mapping(SCHEDULE_SCHEMA),
             cv.Optional(CONF_EXPERIMENTAL, default=False): cv.boolean,
             cv.Optional(CONF_ZONE_DEFAULTS): _optional_mapping,
             cv.Optional(CONF_ZONES): _mapping_or_list,
@@ -368,7 +377,8 @@ async def to_code(config):
     cg.add(var.set_experimental(config[CONF_EXPERIMENTAL]))
     cg.add(var.set_valve_queue(config[CONF_VALVE_SWITCH_MODE] == "queue"))
     cg.add(var.set_allow_writes(config[CONF_SCHEDULE][CONF_ALLOW_WRITES]))
-    cg.add(var.set_max_drift(config[CONF_CLOCK_SYNC][CONF_MAX_DRIFT]))
+    if CONF_CLOCK_SYNC in config:
+        cg.add(var.set_clock_sync(config[CONF_CLOCK_SYNC][CONF_MAX_DRIFT]))
     cg.add(var.set_refresh_interval(config[CONF_SCHEDULE][CONF_REFRESH_INTERVAL]))
     if not config[CONF_LISTEN_ONLY]:
         cg.add(var.set_transmitter(await cg.get_variable(config[CONF_TRANSMITTER_ID])))

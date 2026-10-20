@@ -219,7 +219,8 @@ def _programs(
         if not isinstance(letter, str):
             raise ConfigError("program must be a letter")
         letter = letter.upper()
-        if letter not in model.letters:
+        # Exact match: `in` on a string is a substring test, so "AB" or "" would pass.
+        if len(letter) != 1 or letter not in model.letters:
             raise ConfigError(
                 f"Program {letter} is not valid for {model.name} "
                 f"(programs {', '.join(model.letters)})"

@@ -38,12 +38,14 @@ class FrameParser {
 
  private:
   void pump();
-  bool find_preamble(size_t *at) const;
+  bool find_preamble(size_t *at);
   uint8_t byte_at(size_t bit) const;
-  void erase_at(size_t index);
 
   std::vector<uint8_t> bits_;
   std::vector<Frame> ready_;
+  // Offsets before scan_from_ cannot start a preamble. Each new bit therefore
+  // costs one rolling-window step, not a rescan of the whole buffer.
+  size_t scan_from_{0};
   bool finishing_{false};
 };
 

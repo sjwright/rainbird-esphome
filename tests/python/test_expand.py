@@ -160,6 +160,13 @@ def test_zone_outside_model_and_bad_program():
         run(programs=[{"program": "D"}], zones=[])
 
 
+@pytest.mark.parametrize("letter", ["AB", "BC", "ABC", ""])
+def test_program_must_be_one_letter(letter):
+    # `in` on a string is a substring test. These used to alias programs A and B.
+    with pytest.raises(ConfigError, match="is not valid for ESP-TM2"):
+        run(programs=[{"program": letter}], zones=[])
+
+
 def test_unknown_key_and_bool_zone():
     with pytest.raises(ConfigError, match="Unknown zone setting 'colour'"):
         run(zones=[{"zone": 1, "colour": "green"}], programs=[])

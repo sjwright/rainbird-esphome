@@ -26,7 +26,7 @@ CONFIG_SCHEMA = cv.Schema(
     }
 )
 
-FINAL_VALIDATE_SCHEMA = validate_entity_platform
+FINAL_VALIDATE_SCHEMA = validate_entity_platform("button")
 
 
 async def to_code(config):

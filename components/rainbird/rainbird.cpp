@@ -4,6 +4,7 @@
 #include "esphome/core/log.h"
 
 #include "log_tag.h"
+#include "sip_commands.h"
 
 namespace esphome::rainbird {
 
@@ -45,6 +46,12 @@ void RainbirdComponent::deliver_frame_(const Frame &frame, const char *which) {
   std::vector<uint8_t> payload(frame.payload, frame.payload + frame.length);
   for (FrameTrigger *trigger : this->frame_triggers_) {
     trigger->trigger(payload);
+  }
+  Nak nak;
+  if (parse_nak(frame.payload, frame.length, &nak)) {
+    for (NakTrigger *trigger : this->nak_triggers_) {
+      trigger->trigger(nak.echo, nak.code);
+    }
   }
 }
 
@@ -106,12 +113,15 @@ void RainbirdComponent::dump_config() {
                 "  Experimental: %s\n"
                 "  Zones: %u\n"
                 "  Programs: %u\n"
-                "  Max drift: %u ms\n"
                 "  Schedule refresh: %u ms",
                 this->model_name_, YESNO(this->listen_only_), this->valve_queue_ ? "queue" : "start",
                 YESNO(this->allow_writes_), YESNO(this->experimental_), static_cast<unsigned>(this->zones_.size()),
-                static_cast<unsigned>(this->programs_.size()), static_cast<unsigned>(this->max_drift_ms_),
-                static_cast<unsigned>(this->refresh_interval_ms_));
+                static_cast<unsigned>(this->programs_.size()), static_cast<unsigned>(this->refresh_interval_ms_));
+  if (this->clock_sync_) {
+    ESP_LOGCONFIG(TAG, "  Clock sync: max drift %u ms", static_cast<unsigned>(this->max_drift_ms_));
+  } else {
+    ESP_LOGCONFIG(TAG, "  Clock sync: off");
+  }
   LOG_UPDATE_INTERVAL(this);
 #ifdef USE_TIME
   ESP_LOGCONFIG(TAG, "  Time: %s", YESNO(this->time_ != nullptr));

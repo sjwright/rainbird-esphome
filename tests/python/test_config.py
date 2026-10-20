@@ -151,19 +151,20 @@ external_components:
     components:
       - rainbird
 
+# The C3 has two 48-symbol receive blocks. Two receivers get one each.
 remote_receiver:
   - id: rx_a
     pin: GPIO4
     idle: 4ms
     filter: 50us
     receive_symbols: 384
-    rmt_symbols: 64
+    rmt_symbols: 48
   - id: rx_b
     pin: GPIO5
     idle: 4ms
     filter: 50us
     receive_symbols: 384
-    rmt_symbols: 64
+    rmt_symbols: 48
 
 rainbird:
   - model: ESP-TM2
@@ -294,3 +295,94 @@ def test_zone_and_program_limits(tmp_path: Path):
         "Program D",
         programs="    - program: D\n      name: Missing",
     )
+
+
+@pytest.mark.parametrize("letter", ["AB", "BC", '""'])
+def test_platform_program_must_be_one_letter(tmp_path: Path, letter: str):
+    extra = f"""
+button:
+  - platform: rainbird
+    program: {letter}
+    start:
+      name: Run it
+"""
+    _expect_fail(tmp_path, "program letter", programs="    []", extra=extra)
+
+
+def test_hand_written_entity_cannot_repeat_the_hubs(tmp_path: Path):
+    extra = """
+switch:
+  - platform: rainbird
+    zone: 1
+    valve:
+      name: Front again
+"""
+    _expect_fail(tmp_path, "already creates this switch valve for zone 1", extra=extra)
+
+
+def test_hand_written_entities_cannot_repeat_each_other(tmp_path: Path):
+    extra = """
+switch:
+  - platform: rainbird
+    zone: 3
+    valve:
+      name: Side
+  - platform: rainbird
+    zone: 3
+    valve:
+      name: Side again
+"""
+    _expect_fail(tmp_path, "defined more than once", extra=extra)
+
+
+def test_number_platform_rejects_keys_it_would_ignore(tmp_path: Path):
+    extra = """
+number:
+  - platform: rainbird
+    zone: 3
+    program: A
+    run_duration:
+      name: Side duration
+"""
+    _expect_fail(tmp_path, "Remove program", programs="    []", extra=extra)
+
+
+def test_controller_numbers_have_no_initial_or_restored_value(tmp_path: Path):
+    programs = "    - program: A\n      seasonal_adjust_number:\n        restore_value: true"
+    _expect_fail(tmp_path, "restore_value", programs=programs)
+
+
+def test_accept_model_ids_are_16_bit(tmp_path: Path):
+    _expect_fail(tmp_path, "accept_model_ids", rainbird_extra="  accept_model_ids: [0x10000]\n")
+
+
+def test_clock_sync_is_off_unless_configured(tmp_path: Path):
+    path = tmp_path / "clock.yaml"
+    time = "time:\n  - platform: sntp\n    id: ha_time\n"
+    path.write_text(_yaml(rainbird_extra="  time_id: ha_time\n", extra=time))
+    result = _run(path, tmp_path)
+    blob = result.stdout + result.stderr
+    assert result.returncode == 0, blob
+    assert "clock_sync:" not in blob, blob
+    # A bare `clock_sync:` and `schedule:` mean "use the defaults".
+    path.write_text(
+        _yaml(rainbird_extra="  time_id: ha_time\n  clock_sync:\n  schedule:\n", extra=time)
+    )
+    result = _run(path, tmp_path)
+    blob = result.stdout + result.stderr
+    assert result.returncode == 0, blob
+    assert "max_drift: 30s" in blob, blob
+
+
+def test_rmt_blocks_round_up(tmp_path: Path):
+    # 390 + 120 symbols is under 512, but ESP-IDF needs 7 + 2 blocks of 64, and there are 8.
+    _expect_fail(tmp_path, "RMT symbol memory", rx_rmt=390, tx_rmt=120)
+
+
+def test_c3_receiver_fits_the_receive_blocks(tmp_path: Path):
+    # 128 symbols is 3 blocks. A C3 receiver can use only its 2 (96 symbols).
+    _expect_fail(tmp_path, "at most 2 blocks", variant="esp32c3", rx_rmt=128)
+    path = tmp_path / "c3.yaml"
+    path.write_text(_yaml(variant="esp32c3", rx_rmt=96))
+    result = _run(path, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr

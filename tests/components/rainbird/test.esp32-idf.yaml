@@ -18,6 +18,10 @@ esp32:
 # Proves the trigger parameter names compile. The package's on_nak list is replaced.
 rainbird:
   experimental: true
+  # The hand-written start button below is program C's only one.
+  programs:
+    - program: C
+      start_button: false
   on_nak:
     - logger.log:
         format: "Controller NAK %u %u"

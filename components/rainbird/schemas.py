@@ -9,7 +9,7 @@ from esphome.const import (
     UNIT_PERCENT,
 )
 
-from .entity_kinds import EntityKind
+from .entity_kinds import EntityKind, Write
 
 
 def build_entity_schema(kind: EntityKind, cls):
@@ -29,8 +29,13 @@ def build_entity_schema(kind: EntityKind, cls):
                     raise cv.Invalid(f"initial_value must be between {minimum} and {maximum}")
             return config
 
+        schema = number.number_schema(cls, unit_of_measurement=unit)
+        if kind.write is not Write.LOCAL:
+            # A controller-backed number shows only what the controller reports.
+            # initial_value or restore_value would show a value nobody read.
+            return schema
         return cv.All(
-            number.number_schema(cls, unit_of_measurement=unit).extend(
+            schema.extend(
                 {
                     cv.Optional(CONF_INITIAL_VALUE): cv.float_,
                     cv.Optional(CONF_RESTORE_VALUE): cv.boolean,

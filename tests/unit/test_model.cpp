@@ -366,3 +366,95 @@ TEST_CASE("slow poll and schedule pages follow the fields in use") {
   model.schedule_pages(frequency, 0, 0x1, &programs);
   expect_requests(programs, {"20 00 10"});
 }
+
+TEST_CASE("a non-FFFF 4C budget is not program A's") {
+  EspTm2Model model;
+  ControllerState state;
+  APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 00 50 00 00 00", &state);
+  uint16_t percent = 0;
+  CHECK_FALSE(state.seasonal(0, &percent));
+  APPLY(model, "B0 00 00 64", &state);
+  REQUIRE(state.seasonal(0, &percent));
+  CHECK(percent == 100);
+  state.clear_changed();
+  APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 00 50 00 00 00", &state);
+  REQUIRE(state.seasonal(0, &percent));
+  CHECK(percent == 100);
+  CHECK_FALSE(state.changed(Field::SEASONAL_ADJUST, 0, 0));
+}
+
+TEST_CASE("page 20 fills each zone's rain-sensor bypass") {
+  EspTm2Model model;
+  ControllerState state;
+  // Zone 1 obeys the sensor (01), zone 2 bypasses it (00), the rest obey.
+  APPLY(model, "A0 00 20 01 00 01 01 01 01 01 01 01 01 01 01", &state);
+  uint8_t wire = 0xAA;
+  REQUIRE(state.zone_bypass(1, &wire));
+  CHECK(wire == 0x01);
+  REQUIRE(state.zone_bypass(2, &wire));
+  CHECK(wire == 0x00);
+  REQUIRE(state.zone_bypass(12, &wire));
+  CHECK(wire == 0x01);
+  CHECK(state.changed(Field::ZONE_SENSOR_BYPASS, 2));
+
+  // A shorter reply sets only the zones it carries.
+  ControllerState partial;
+  APPLY(model, "A0 00 20 00 01", &partial);
+  REQUIRE(partial.zone_bypass(2, &wire));
+  CHECK(wire == 0x01);
+  CHECK_FALSE(partial.zone_bypass(3, &wire));
+}
+
+TEST_CASE("the start-slot switch turns a slot off but never writes a time") {
+  EspTm2Model model;
+  // Slot 1 starts at 04:00, slot 2 is off.
+  const uint8_t starts[8] = {0x00, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  uint8_t edited[8];
+  size_t edited_size = sizeof(edited);
+
+  REQUIRE(model.patch(0x60, starts, 8, Field::START_ENABLED, 0, 0, 0, 0, edited, &edited_size));
+  CHECK(edited[0] == 0xFF);
+  CHECK(edited[1] == 0xFF);
+
+  // Turning on a slot that is already on keeps its time.
+  edited_size = sizeof(edited);
+  REQUIRE(model.patch(0x60, starts, 8, Field::START_ENABLED, 0, 0, 0, 1, edited, &edited_size));
+  CHECK(edited[0] == 0x00);
+  CHECK(edited[1] == 0xF0);
+
+  // Turning on an off slot needs a time, so it is refused. Before, this wrote 00:01.
+  edited_size = sizeof(edited);
+  CHECK_FALSE(model.patch(0x60, starts, 8, Field::START_ENABLED, 0, 0, 1, 1, edited, &edited_size));
+
+  // START_TIME is how a slot gets a time.
+  edited_size = sizeof(edited);
+  REQUIRE(model.patch(0x60, starts, 8, Field::START_TIME, 0, 0, 1, 360, edited, &edited_size));
+  CHECK(edited[2] == 0x01);
+  CHECK(edited[3] == 0x68);
+}
+
+TEST_CASE("the queue field polls both queue pages") {
+  EspTm2Model model;
+  Capabilities caps;
+  FieldSet queue;
+  queue.add(Field::QUEUE);
+  RequestList list;
+  model.short_poll(caps, queue, &list);
+  expect_requests(list, {"3B 00", "3B 01"});
+}
+
+TEST_CASE("probes for 49 and 3A are recorded") {
+  EspTm2Model model;
+  Capabilities caps;
+  CommandSupport support;
+  support.supported = true;
+  support.command = 0x49;
+  model.note_support(support, &caps);
+  support.command = 0x3A;
+  model.note_support(support, &caps);
+  CHECK(caps.controller_state);
+  CHECK(caps.test_stations);
+  support.supported = false;
+  model.note_support(support, &caps);
+  CHECK_FALSE(caps.test_stations);
+}

@@ -484,7 +484,7 @@ bool parse_reply(const uint8_t *payload, size_t size, Reply *out) {
       if (!parse_serial(payload, size, &out->serial)) {
         return false;
       }
-      out->kind = ReplyKind::SERIAL;
+      out->kind = ReplyKind::SERIAL_NUMBER;
       return true;
     case 0x8B:
       if (!parse_firmware(payload, size, &out->firmware)) {

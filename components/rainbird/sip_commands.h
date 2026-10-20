@@ -293,7 +293,7 @@ enum class ReplyKind : uint8_t {
   MODEL,
   STATIONS,
   SUPPORT,
-  SERIAL,
+  SERIAL_NUMBER,  // not SERIAL: Arduino.h defines SERIAL as 0x0
   FIRMWARE,
   TIME,
   DATE,

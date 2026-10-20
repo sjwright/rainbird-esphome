@@ -206,3 +206,31 @@ TEST_CASE("looped-back bytes decode and lock that receiver's polarity") {
   other.decode(timings.data(), timings.size());
   CHECK_FALSE(other.lock().locked());
 }
+
+TEST_CASE("a frame after thousands of junk bits still decodes, without rescanning them") {
+  // The parser keeps a scan position, so junk is skipped once and then trimmed.
+  // Junk is alternating bits, which never contain F5 F5 1C.
+  std::vector<uint8_t> stream(700, 0x55);
+  auto payload = from_hex("40");
+  uint8_t frame[MAX_FRAME_BYTES];
+  size_t n = encode_frame(payload.data(), payload.size(), false, frame, sizeof(frame));
+  REQUIRE(n > 0);
+  stream.insert(stream.end(), frame, frame + n);
+  auto frames = frames_from_bytes(stream.data(), stream.size());
+  REQUIRE(frames.size() == 1);
+  check_payload(frames[0], payload);
+}
+
+TEST_CASE("a preamble inside a rejected frame is still found") {
+  // The first frame claims more payload than follows and fails its checksum. The
+  // second frame starts inside the bytes the first one claimed.
+  auto second = from_hex("12");
+  uint8_t good[MAX_FRAME_BYTES];
+  size_t n = encode_frame(second.data(), second.size(), false, good, sizeof(good));
+  REQUIRE(n > 0);
+  std::vector<uint8_t> stream = {0xF5, 0xF5, 0x1C, 0x05, 0x01};
+  stream.insert(stream.end(), good, good + n);
+  auto frames = frames_from_bytes(stream.data(), stream.size());
+  REQUIRE(frames.size() == 1);
+  check_payload(frames[0], second);
+}

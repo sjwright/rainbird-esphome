@@ -1,12 +1,14 @@
 #include "rainbird_entities.h"
 
+#include <cmath>
+
 #ifdef USE_SWITCH
 namespace esphome::rainbird {
 
 void RainbirdSwitch::setup() {
   // Multiple inheritance can make HasLoopOverride true, which would call loop() every cycle.
   this->disable_loop();
-  this->publish_state(false);
+  // No publish here. The state comes from the controller, and until it reports, it is unknown.
 }
 
 void RainbirdSwitch::set_binding(uint8_t kind, uint8_t zone, uint8_t program, uint8_t index) {
@@ -18,15 +20,10 @@ void RainbirdSwitch::set_binding(uint8_t kind, uint8_t zone, uint8_t program, ui
 
 void RainbirdSwitch::write_state(bool state) {
   WriteIntent intent{this->kind_, this->zone_, this->program_, this->index_, state ? 1.0f : 0.0f};
-  if (this->get_parent()->submit(intent)) {
-    return;
-  }
-  // publish_state drops a repeat of the current level, so a refused command is announced and then taken back.
-  bool previous = this->state;
-  this->publish_state(state);
-  if (state != previous) {
-    this->publish_state(previous);
-  }
+  // Publish nothing here, accepted or refused. on_turn_on/on_turn_off run from published states,
+  // so publishing the request and then taking it back would fire both. The controller's
+  // reply sets the state. A refused toggle reverts in Home Assistant because no state arrives.
+  this->get_parent()->submit(intent);
 }
 
 }  // namespace esphome::rainbird
@@ -37,6 +34,11 @@ namespace esphome::rainbird {
 
 void RainbirdNumber::setup() {
   this->disable_loop();
+  if (this->command_) {
+    // Controller-backed: unknown until the controller reports. Publishing the minimum
+    // here would show, for example, a 10% seasonal adjust nobody set.
+    return;
+  }
   float value = this->traits.get_min_value();
   if (this->restore_value_) {
     this->pref_ = this->make_entity_preference<float>();
@@ -78,8 +80,9 @@ void RainbirdNumber::control(float value) {
     return;
   }
   WriteIntent intent{this->kind_, this->zone_, this->program_, this->index_, value};
-  if (!this->get_parent()->submit(intent)) {
+  if (!this->get_parent()->submit(intent) && !std::isnan(this->state)) {
     // Number::publish_state does not drop repeats, so the previous value undoes the change.
+    // With no controller value yet there is nothing to restore, so the state stays unknown.
     this->publish_state(this->state);
   }
 }

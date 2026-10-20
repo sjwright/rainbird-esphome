@@ -105,6 +105,18 @@ void apply_run_page(ControllerState *state, const SchedulePage &page) {
   }
 }
 
+// Page 20 holds one byte per zone, zone 1 first. The wire byte is stored as is;
+// the codec maps it (01 obeys the sensor, 00 bypasses it). The reply length for a
+// TM2 is not captured yet, so only the zones present in the reply are set.
+void apply_bypass_page(ControllerState *state, const SchedulePage &page) {
+  if (page.page != 0x20) {
+    return;
+  }
+  for (uint8_t zone = 1; zone <= STATE_ZONES && zone <= page.size; zone++) {
+    state->set_zone_bypass(zone, page.data[zone - 1]);
+  }
+}
+
 }  // namespace
 
 bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value, uint8_t *data, size_t size) {
@@ -154,6 +166,18 @@ bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value,
       at[0] = static_cast<uint8_t>(static_cast<uint16_t>(value) >> 8);
       at[1] = static_cast<uint8_t>(value);
       return true;
+    case CodecKind::SLOT_ENABLED:
+      if (field.width != 2) {
+        return false;
+      }
+      if (value == 0) {
+        at[0] = 0xFF;
+        at[1] = 0xFF;
+        return true;
+      }
+      // Turning a slot on needs a time. The page has none for an off slot, so
+      // that write is refused rather than inventing one.
+      return !(at[0] == 0xFF && at[1] == 0xFF);
     case CodecKind::NONE:
       return false;
   }
@@ -191,6 +215,12 @@ void EspTm2Model::note_support(const CommandSupport &support, Capabilities *caps
     case 0x3D:
       caps->station_error = support.supported;
       break;
+    case 0x49:
+      caps->controller_state = support.supported;
+      break;
+    case 0x3A:
+      caps->test_stations = support.supported;
+      break;
     default:
       break;
   }
@@ -225,8 +255,14 @@ void EspTm2Model::short_poll(const Capabilities &caps, FieldSet used, RequestLis
       }
     }
   }
-  if (used.has(Field::ACTIVE_ZONE) || used.has(Field::ACTIVE_PROGRAM) || used.has(Field::REMAINING_TIME)) {
+  // 3B 00 carries the running zone, program, time left and the queued count.
+  if (used.has(Field::ACTIVE_ZONE) || used.has(Field::ACTIVE_PROGRAM) || used.has(Field::REMAINING_TIME) ||
+      used.has(Field::QUEUE)) {
     out->add(request_queue(0));
+  }
+  // 3B 01 is the queue list itself.
+  if (used.has(Field::QUEUE)) {
+    out->add(request_queue(1));
   }
 }
 
@@ -369,8 +405,10 @@ ValueCodec EspTm2Model::codec(Field field) const {
       codec.kind = CodecKind::U16_BE;
       break;
     case Field::START_TIME:
-    case Field::START_ENABLED:
       codec.kind = CodecKind::START_SLOT;
+      break;
+    case Field::START_ENABLED:
+      codec.kind = CodecKind::SLOT_ENABLED;
       break;
     case Field::WATERING_DAY:
       codec.kind = CodecKind::BIT;
@@ -415,10 +453,8 @@ void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const 
       state->set_rain_delay(combined.rain_delay_days);
       state->set_rain_sensor(combined.sensor);
       state->set_irrigation(combined.irrigation_state);
-      // FFFF means the TM2 has no controller-wide budget. Per-program 30 replies own that cell.
-      if (combined.seasonal_adjust != 0xFFFF) {
-        state->set_seasonal(0, combined.seasonal_adjust);
-      }
+      // The TM2 budgets per program, and only 30/B0 replies fill those cells. The 4C
+      // field is a controller-wide value (FFFF on every capture), so it is not program A's.
       state->set_remaining_seconds(combined.remaining_seconds);
       state->set_active_zone(combined.active_zone);
       break;
@@ -487,13 +523,14 @@ void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const 
         apply_start_page(state, starts);
       }
       apply_run_page(state, page);
+      apply_bypass_page(state, page);
       break;
     }
     case ReplyKind::ACK:
     case ReplyKind::NAK:
     case ReplyKind::MODEL:
     case ReplyKind::SUPPORT:
-    case ReplyKind::SERIAL:
+    case ReplyKind::SERIAL_NUMBER:
     case ReplyKind::FIRMWARE:
     case ReplyKind::RAW:
     case ReplyKind::NONE:

@@ -88,7 +88,11 @@ class RainbirdComponent final : public PollingComponent {
   void set_allow_writes(bool allow_writes) { this->allow_writes_ = allow_writes; }
   void set_experimental(bool experimental) { this->experimental_ = experimental; }
   void set_valve_queue(bool valve_queue) { this->valve_queue_ = valve_queue; }
-  void set_max_drift(uint32_t max_drift_ms) { this->max_drift_ms_ = max_drift_ms; }
+  // Only called when the YAML has a clock_sync block. time_id alone does not sync.
+  void set_clock_sync(uint32_t max_drift_ms) {
+    this->clock_sync_ = true;
+    this->max_drift_ms_ = max_drift_ms;
+  }
   void set_refresh_interval(uint32_t refresh_interval_ms) { this->refresh_interval_ms_ = refresh_interval_ms; }
   void set_transmitter(remote_base::RemoteTransmitterBase *transmitter) { this->transmitter_ = transmitter; }
   void set_receiver(remote_base::RemoteReceiverBase *receiver) { this->receiver_ = receiver; }
@@ -120,6 +124,7 @@ class RainbirdComponent final : public PollingComponent {
   bool allow_writes_{false};
   bool experimental_{false};
   bool valve_queue_{false};
+  bool clock_sync_{false};
   uint32_t max_drift_ms_{30000};
   uint32_t refresh_interval_ms_{3600000};
 #ifdef USE_TIME

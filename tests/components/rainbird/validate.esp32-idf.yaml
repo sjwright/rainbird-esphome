@@ -88,6 +88,8 @@ rainbird:
     - program: b
       id: beds
       name: Garden beds
+      # The hand-written seasonal_adjust number below replaces the hub's copy.
+      seasonal_adjust_number: false
   on_nak:
     - logger.log:
         format: "Controller NAK %u %u"
