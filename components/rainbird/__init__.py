@@ -10,7 +10,8 @@ the hub. Hand-written ``platform: rainbird`` blocks are what ``packages``,
 import esphome.automation as automation
 import esphome.codegen as cg
 
-# Aliased so the switch/number/button platforms don't replace these when they load.
+# Aliased so the rainbird platform modules don't replace these when they load.
+import esphome.components.binary_sensor as binary_sensor_comp
 import esphome.components.button as button_comp
 import esphome.components.number as number_comp
 from esphome.components.remote_base import (
@@ -20,7 +21,9 @@ from esphome.components.remote_base import (
     RemoteReceiverListener,
     RemoteTransmitterBase,
 )
+import esphome.components.sensor as sensor_comp
 import esphome.components.switch as switch_comp
+import esphome.components.text_sensor as text_sensor_comp
 import esphome.components.time as time_comp
 import esphome.config_validation as cv
 from esphome.const import (
@@ -46,8 +49,10 @@ DOMAIN = "rainbird"
 CODEOWNERS = ["@sjwright"]
 MULTI_CONF = True
 DEPENDENCIES = ["remote_receiver"]
-# Later steps add binary_sensor, select and datetime as those rows appear.
-AUTO_LOAD = ["switch", "number", "button"]
+# The domains the hub can generate from zones/programs. sensor and text_sensor
+# entities are only hand-written, so those domains load with their platforms.
+# Later steps add select and datetime as those rows appear.
+AUTO_LOAD = ["switch", "number", "button", "binary_sensor"]
 
 CONF_RAINBIRD_ID = "rainbird_id"
 CONF_LISTEN_ONLY = "listen_only"
@@ -93,10 +98,14 @@ FrameTrigger = rainbird_ns.class_(
     "FrameTrigger", automation.Trigger.template(cg.std_vector.template(cg.uint8))
 )
 
+# Read-only kinds use the base classes; the hub publishes to them.
 _DOMAIN_CLASS = {
     "switch": RainbirdSwitch,
     "number": RainbirdNumber,
     "button": RainbirdButton,
+    "binary_sensor": binary_sensor_comp.BinarySensor,
+    "sensor": sensor_comp.Sensor,
+    "text_sensor": text_sensor_comp.TextSensor,
 }
 
 
@@ -316,10 +325,24 @@ async def build_entity(parent, kind: EntityKind, entity_config, zone, program, i
         cg.add(var.set_command(kind.write != Write.LOCAL))
     elif kind.domain == "button":
         var = await button_comp.new_button(entity_config)
+    elif kind.domain in ("binary_sensor", "sensor", "text_sensor"):
+        # Read-only: the hub publishes to the base class, so there is no entity class
+        # and no parent pointer, only a binding the hub reads when state changes.
+        builder = {
+            "binary_sensor": binary_sensor_comp.new_binary_sensor,
+            "sensor": sensor_comp.new_sensor,
+            "text_sensor": text_sensor_comp.new_text_sensor,
+        }[kind.domain]
+        var = await builder(entity_config)
+        cg.add(getattr(parent, f"add_{kind.domain}")(var, int(kind.kind_id), zone, program))
+        return var
     else:
         raise ValueError(f"No builder for {kind.domain}")
     await cg.register_parented(var, parent)
     cg.add(var.set_binding(int(kind.kind_id), zone, program, index))
+    if kind.domain in ("switch", "number"):
+        # Controller-backed switches and numbers also show what the controller reports.
+        cg.add(getattr(parent, f"add_{kind.domain}")(var))
     return var
 
 
@@ -333,12 +356,16 @@ def _payload(value):
     return data
 
 
-async def _add_listener(parent, parent_id: str, receiver_id, suffix: str, name: str):
+async def _add_listener(
+    parent, parent_id: str, receiver_id, suffix: str, name: str, controller: bool
+):
     listener = cg.new_Pvariable(
         ID(f"{parent_id}_{suffix}", is_declaration=True, type=RainbirdReceiver)
     )
     cg.add(listener.set_parent(parent))
     cg.add(listener.set_name(name))
+    # Only the receiver on the controller's TX line feeds state; the monitor just logs.
+    cg.add(listener.set_controller(controller))
     receiver = await cg.get_variable(receiver_id)
     cg.add(receiver.register_listener(listener))
 
@@ -383,11 +410,11 @@ async def to_code(config):
     if not config[CONF_LISTEN_ONLY]:
         cg.add(var.set_transmitter(await cg.get_variable(config[CONF_TRANSMITTER_ID])))
     cg.add(var.set_receiver(await cg.get_variable(config[CONF_RECEIVER_ID])))
-    await _add_listener(var, config[CONF_ID].id, config[CONF_RECEIVER_ID], "rx", "Receiver")
+    await _add_listener(var, config[CONF_ID].id, config[CONF_RECEIVER_ID], "rx", "Receiver", True)
     if CONF_MONITOR_RECEIVER_ID in config:
         cg.add(var.set_monitor_receiver(await cg.get_variable(config[CONF_MONITOR_RECEIVER_ID])))
         await _add_listener(
-            var, config[CONF_ID].id, config[CONF_MONITOR_RECEIVER_ID], "monitor", "Monitor"
+            var, config[CONF_ID].id, config[CONF_MONITOR_RECEIVER_ID], "monitor", "Monitor", False
         )
     if CONF_TIME_ID in config:
         cg.add(var.set_time(await cg.get_variable(config[CONF_TIME_ID])))
@@ -396,10 +423,12 @@ async def to_code(config):
     for zone in config[CONF_ZONES]:
         zone_var = cg.new_Pvariable(zone[CONF_ID])
         cg.add(zone_var.set_zone(zone[CONF_ZONE]))
+        cg.add(zone_var.set_name(zone[CONF_NAME]))
         cg.add(var.add_zone(zone_var))
     for program in config[CONF_PROGRAMS]:
         program_var = cg.new_Pvariable(program[CONF_ID])
         cg.add(program_var.set_program("ABCD".index(program[CONF_PROGRAM])))
+        cg.add(program_var.set_name(program[CONF_NAME]))
         cg.add(var.add_program(program_var))
     for item in config[CONF_GENERATED]:
         kind = KINDS_BY_ID[item["kind_id"]]

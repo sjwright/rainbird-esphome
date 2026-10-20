@@ -18,8 +18,8 @@ jobs:
         run: pip install ruff yamllint pytest clang-format esphome==2026.9.1
       - name: Lint
         run: |
-          ruff check components tests
-          ruff format --check components tests
+          ruff check components tests tools
+          ruff format --check components tests tools
           yamllint .
           find components/rainbird \( -name '*.h' -o -name '*.cpp' \) -print0 \
             | xargs -0 clang-format --dry-run --Werror

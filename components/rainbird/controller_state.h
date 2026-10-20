@@ -92,6 +92,8 @@ class ControllerState {
 
   void set_queue(const QueueItem *items, uint8_t count);
   uint8_t queue_count() const { return this->queue_count_; }
+  // True once a queue list (3B 01) has been read, even an empty one.
+  bool queue_known() const { return this->queue_known_; }
   bool queue_item(uint8_t index, QueueItem *out) const;
 
   void set_seasonal(uint8_t program, uint16_t percent);

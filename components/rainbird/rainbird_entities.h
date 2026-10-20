@@ -24,6 +24,9 @@ class RainbirdSwitch final : public switch_::Switch, public Component, public Pa
  public:
   void setup() override;
   void set_binding(uint8_t kind, uint8_t zone, uint8_t program, uint8_t index);
+  EntityKind kind() const { return this->kind_; }
+  uint8_t zone() const { return this->zone_; }
+  uint8_t program() const { return this->program_; }
 
  protected:
   void write_state(bool state) override;
@@ -43,6 +46,11 @@ class RainbirdNumber final : public number::Number, public Component, public Par
   void set_initial_value(float initial_value);
   void set_restore_value(bool restore_value);
   void set_command(bool command);
+  EntityKind kind() const { return this->kind_; }
+  uint8_t zone() const { return this->zone_; }
+  uint8_t program() const { return this->program_; }
+  // False for local settings (run duration), which the controller never reports.
+  bool is_command() const { return this->command_; }
 
  protected:
   void control(float value) override;

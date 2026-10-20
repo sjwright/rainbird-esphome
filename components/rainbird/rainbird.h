@@ -5,29 +5,30 @@
 #include "esphome/core/defines.h"
 
 #include "automation.h"
+#include "entity_kind.h"
+#include "model_esp_tm2.h"
+#include "session.h"
 #include "sip_frame.h"
 
 #ifdef USE_TIME
 #include "esphome/components/time/real_time_clock.h"
 #endif
+#ifdef USE_SENSOR
+#include "esphome/components/sensor/sensor.h"
+#endif
+#ifdef USE_BINARY_SENSOR
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#endif
+#ifdef USE_TEXT_SENSOR
+#include "esphome/components/text_sensor/text_sensor.h"
+#endif
 
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace esphome::rainbird {
-
-// Values match KindId in entity_kinds.py.
-enum class EntityKind : uint8_t {
-  VALVE = 1,
-  RUN_DURATION = 2,
-  PROGRAM_START = 3,
-  SEASONAL_ADJUST = 4,
-};
-
-// Zone 0 and program 255 mean "this binding does not use that index".
-// Program 0 is program A, so 0 cannot mean "none". Keep in step with entity_kinds.py.
-static constexpr uint8_t NO_ZONE = 0;
-static constexpr uint8_t NO_PROGRAM = 255;
 
 // One write, whatever the entity domain. Local run durations do not use this.
 struct WriteIntent {
@@ -42,32 +43,43 @@ class RainbirdZone {
  public:
   void set_zone(uint8_t zone) { this->zone_ = zone; }
   uint8_t get_zone() const { return this->zone_; }
+  void set_name(const char *name) { this->name_ = name; }
+  const char *get_name() const { return this->name_; }
 
  protected:
   uint8_t zone_{0};
+  const char *name_{""};
 };
 
 class RainbirdProgram {
  public:
   void set_program(uint8_t program) { this->program_ = program; }
   uint8_t get_program() const { return this->program_; }
+  void set_name(const char *name) { this->name_ = name; }
+  const char *get_name() const { return this->name_; }
 
  protected:
   uint8_t program_{0};
+  const char *name_{""};
 };
 
 class RainbirdComponent;
+class RainbirdSwitch;
+class RainbirdNumber;
 
 // One listener per remote_receiver, each with its own polarity lock.
 class RainbirdReceiver : public remote_base::RemoteReceiverListener {
  public:
   void set_parent(RainbirdComponent *parent) { this->parent_ = parent; }
   void set_name(const char *name) { this->name_ = name; }
+  // The receiver on J2 hears the controller. The monitor (J4) only logs.
+  void set_controller(bool controller) { this->controller_ = controller; }
   bool on_receive(remote_base::RemoteReceiveData data) override;
 
  private:
   RainbirdComponent *parent_{nullptr};
   const char *name_{"Receiver"};
+  bool controller_{true};
   ReceiverDecoder decoder_{};
 };
 
@@ -79,7 +91,7 @@ class RainbirdComponent final : public PollingComponent {
   void dump_config() override;
 
   bool submit(const WriteIntent &intent);
-  // Experimental. Encodes a request and transmits it with the carrier off.
+  // Experimental. Queues a request on the link with the carrier off.
   bool send_raw(const uint8_t *data, size_t size);
   bool send_raw(const std::vector<uint8_t> &data) { return this->send_raw(data.data(), data.size()); }
 
@@ -103,13 +115,46 @@ class RainbirdComponent final : public PollingComponent {
   void add_nak_trigger(NakTrigger *trigger) { this->nak_triggers_.push_back(trigger); }
   void add_frame_trigger(FrameTrigger *trigger) { this->frame_triggers_.push_back(trigger); }
 
+  // Entities that show controller state. Each carries the binding it reads.
+  void add_switch(RainbirdSwitch *entity) { this->switches_.push_back(entity); }
+  void add_number(RainbirdNumber *entity) { this->numbers_.push_back(entity); }
+#ifdef USE_SENSOR
+  void add_sensor(sensor::Sensor *entity, uint8_t kind, uint8_t zone, uint8_t program) {
+    this->sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program});
+  }
+#endif
+#ifdef USE_BINARY_SENSOR
+  void add_binary_sensor(binary_sensor::BinarySensor *entity, uint8_t kind, uint8_t zone, uint8_t program) {
+    this->binary_sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program});
+  }
+#endif
+#ifdef USE_TEXT_SENSOR
+  void add_text_sensor(text_sensor::TextSensor *entity, uint8_t kind, uint8_t zone, uint8_t program) {
+    this->text_sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program});
+  }
+#endif
+
 #ifdef USE_TIME
   void set_time(time::RealTimeClock *time) { this->time_ = time; }
 #endif
 
  protected:
   friend class RainbirdReceiver;
-  void deliver_frame_(const Frame &frame, const char *which);
+  void deliver_frame_(const Frame &frame, const char *which, bool controller);
+  void transmit_(const Transmission &tx);
+  void after_activity_();
+  void publish_changed_();
+  void publish_countdown_();
+  std::string zone_name_(uint8_t zone) const;
+  std::string program_name_(uint8_t program) const;
+  bool schedule_changed_text_(std::string *out) const;
+
+  template<typename T> struct Binding {
+    T *entity;
+    EntityKind kind;
+    uint8_t zone;
+    uint8_t program;
+  };
 
   const char *model_name_{""};
   remote_base::RemoteTransmitterBase *transmitter_{nullptr};
@@ -120,6 +165,17 @@ class RainbirdComponent final : public PollingComponent {
   std::vector<NakTrigger *> nak_triggers_{};
   std::vector<FrameTrigger *> frame_triggers_{};
   std::vector<uint16_t> accept_ids_{};
+  std::vector<RainbirdSwitch *> switches_{};
+  std::vector<RainbirdNumber *> numbers_{};
+#ifdef USE_SENSOR
+  std::vector<Binding<sensor::Sensor>> sensors_{};
+#endif
+#ifdef USE_BINARY_SENSOR
+  std::vector<Binding<binary_sensor::BinarySensor>> binary_sensors_{};
+#endif
+#ifdef USE_TEXT_SENSOR
+  std::vector<Binding<text_sensor::TextSensor>> text_sensors_{};
+#endif
   bool listen_only_{false};
   bool allow_writes_{false};
   bool experimental_{false};
@@ -130,6 +186,17 @@ class RainbirdComponent final : public PollingComponent {
 #ifdef USE_TIME
   time::RealTimeClock *time_{nullptr};
 #endif
+
+  EspTm2Model model_{};
+  std::unique_ptr<Session> session_{};
+  uint32_t base_interval_{0};
+  SessionStage last_stage_{SessionStage::IDLE};
+  bool link_logged_{false};
+  bool link_up_{false};
+  // remaining_time counts down locally between polls.
+  bool countdown_running_{false};
+  uint16_t countdown_from_{0};
+  uint32_t countdown_at_{0};
 };
 
 template<typename... Ts> class RainbirdSendRawAction final : public Action<Ts...>, public Parented<RainbirdComponent> {

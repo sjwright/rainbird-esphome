@@ -607,9 +607,9 @@ always copied from a fresh read (6.5).
 
 | Platform | Keys |
 |----------|------|
-| `sensor` | `remaining_time`, `active_zone`, `queued_zones`, `schedule_changed`, `response_time`, `link_errors` |
+| `sensor` | `remaining_time`, `active_zone`, `queued_zones`, `response_time`, `link_errors` |
 | `binary_sensor` | `watering`, `rain_sensor`, `irrigation_enabled`, `connected` |
-| `text_sensor` | `active_program`, `queue`, `model`, `firmware_version`, `serial_number` |
+| `text_sensor` | `active_program`, `queue`, `model`, `firmware_version`, `serial_number`, `schedule_changed` (ISO 8601, device class `timestamp`) |
 | `number` | `rain_delay`, `station_delay`, `test_duration` |
 | `switch` | `rain_sensor_bypass`, `irrigation_enabled` |
 | `button` | `stop`, `advance`, `test_all_zones`, `sync_clock`, `refresh` |
@@ -1440,6 +1440,48 @@ about 4 weeks in.
 - **Safety for S7 and S9:** work at a time when watering does no harm, or
   disconnect the valve common wire. Before S9's first write, save the full
   schedule dump from the log as a backup.
+
+### 12.4 Build notes (S0–S6 code)
+
+The code for S0 to S6 is built and host-tested; nothing has run on a
+controller yet. Where the build changed the design above:
+
+- **The link is two pure classes plus a thin hub.**
+  - `LinkCore` (`link_core.h`) is the transport: queue, one request in
+    flight, timeouts from the end of the first copy, retries, reply matching
+    with selector checks, and duplicate counting.
+  - `Session` (`session.h`) is startup, probes, the poll plan, the model
+    gate and diagnostics.
+  - `RainbirdComponent` only sends, receives and publishes.
+
+  Both pure classes run against a scripted controller in
+  `tests/unit/test_session.cpp`.
+- **All waits are "elapsed since a start time ≥ a delay" in unsigned
+  arithmetic.** A signed comparison against a stored deadline refuses to
+  send for up to 24.8 days after a long idle spell or the millis() wrap; the
+  host tests caught that.
+- **Startup probes all seven optional commands** (`4C 4A 42 4B 3D 49 3A`).
+  If `04` itself is unsupported, every optional command is tried, and a NAK
+  with bit 0 switches that one off.
+- **`update_interval: never` puts the hub in manual mode**: no
+  identification and no polling, only `send_raw`. The bench loopback uses
+  this.
+- **In `listen_only` mode every valid reply updates state**, so status
+  entities work passively alongside an LNK2. `connected` there means "a
+  valid frame in the last 60 s".
+- **`schedule_changed` is a `text_sensor`** with ISO 8601 text and device
+  class `timestamp`. A float sensor only holds an epoch to about two
+  minutes.
+- **All six entity platforms are generated from `entity_kinds.py`**
+  (`platform.py`). A key resolves to a zone, program or controller kind by
+  the entry's `zone:` / `program:`.
+- **The duplicate-entity check covers controls only**; a second read-only
+  sensor for the same value is harmless.
+- **Replay tooling:**
+  - `tools/raw_to_fixture.py` converts `dump: raw` logs.
+  - `tests/unit/decode_fixture` fills in the expected frames.
+  - `tests/unit/test_replay.cpp` runs every file in `tests/captures/`.
+  - `synthetic-replies.txt` is generated; S4's real captures replace it.
 
 ---
 

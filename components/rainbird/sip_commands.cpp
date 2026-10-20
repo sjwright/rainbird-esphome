@@ -577,6 +577,35 @@ bool parse_reply(const uint8_t *payload, size_t size, Reply *out) {
   return true;
 }
 
+bool reply_matches(const uint8_t *request, size_t request_size, const uint8_t *reply, size_t reply_size) {
+  if (request == nullptr || reply == nullptr || request_size == 0 || reply_size == 0) {
+    return false;
+  }
+  const uint8_t opcode = request[0];
+  if (reply[0] == 0x01) {
+    return reply_size >= 2 && reply[1] == opcode;
+  }
+  if (reply[0] == 0x00) {
+    return reply_size >= 3 && reply[1] == opcode;
+  }
+  if (reply[0] != static_cast<uint8_t>(opcode + 0x80)) {
+    return false;
+  }
+  switch (opcode) {
+    case 0x03:  // 83 PP
+    case 0x30:  // B0 PP
+    case 0x3B:  // BB PP
+    case 0x3F:  // BF PP
+    case 0x4A:  // CA EE
+    case 0x04:  // 84 CC
+      return request_size >= 2 && reply_size >= 2 && reply[1] == request[1];
+    case 0x20:  // 20 00 PP -> A0 00 PP
+      return request_size >= 3 && reply_size >= 3 && reply[1] == request[1] && reply[2] == request[2];
+    default:
+      return true;
+  }
+}
+
 bool patch_program_field(uint8_t *data, size_t size, ProgramField field, uint8_t value) {
   if (data == nullptr || size < 6) {
     return false;

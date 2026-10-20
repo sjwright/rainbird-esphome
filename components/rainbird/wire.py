@@ -6,7 +6,7 @@ from esphome.const import CONF_ID, CONF_PLATFORM, CONF_RMT_SYMBOLS
 from esphome.core import CORE
 import esphome.final_validate as fv
 
-from .entity_kinds import KINDS, NO_PROGRAM, NO_ZONE, Scope
+from .entity_kinds import NO_PROGRAM, NO_ZONE, Scope, Write, platform_keys, resolve_kind
 from .models import MODELS
 
 CONF_RECEIVE_SYMBOLS = "receive_symbols"
@@ -253,19 +253,26 @@ def validate_hub(config: dict) -> None:
 
 
 def _entry_bindings(entry: dict, domain: str, model) -> list[tuple[tuple[int, int, int, int], str]]:
-    """(binding, label) for each rainbird entity a hand-written platform entry creates."""
+    """(binding, label) for each control a hand-written platform entry creates.
+
+    Only controls count: two switches for one valve is a mistake, while a
+    second read-only sensor for the same value is harmless.
+    """
     out = []
     zone = entry.get("zone")
     program = entry.get("program")
     program_index = NO_PROGRAM
     if isinstance(program, str) and len(program) == 1 and program.upper() in model.letters:
         program_index = model.letters.index(program.upper())
-    for kind in KINDS:
-        if kind.domain != domain or kind.key not in entry:
+    for key in platform_keys(domain):
+        if key not in entry:
+            continue
+        kind = resolve_kind(domain, key, zone=zone is not None, program=program is not None)
+        if kind is None or kind.write is Write.NONE:
             continue
         binding = (
             int(kind.kind_id),
-            zone if kind.scope is Scope.ZONE and zone is not None else NO_ZONE,
+            zone if kind.scope is Scope.ZONE else NO_ZONE,
             program_index if kind.scope is Scope.PROGRAM else NO_PROGRAM,
             0,
         )
@@ -330,5 +337,10 @@ def _validate_entity_platform(config: dict, domain: str) -> None:
     if program is not None and (len(program) != 1 or program not in model.letters):
         raise cv.Invalid(
             f"Program {program} is not valid for {model.name} (programs {', '.join(model.letters)})"
+        )
+    if domain == "text_sensor" and "schedule_changed" in config and "time_id" not in hub:
+        raise cv.Invalid(
+            "schedule_changed needs time_id on the rainbird hub: the controller stamps it in "
+            "local time, and the time zone converts it."
         )
     _check_duplicates(config, domain, hub, model)

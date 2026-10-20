@@ -8,7 +8,8 @@ namespace esphome::rainbird {
 // Quirk helpers live here so call sites do not repeat the wire arithmetic (PLAN 5.1).
 
 struct ByteBuf {
-  static constexpr size_t CAP = 48;
+  // Matches MAX_PAYLOAD in sip_frame.h, so any frame payload, including send_raw's, fits.
+  static constexpr size_t CAP = 64;
   uint8_t data[CAP]{};
   uint8_t size{0};
 
@@ -341,5 +342,11 @@ struct Reply {
 
 // False when a known opcode is the wrong length. An unknown opcode is RAW.
 bool parse_reply(const uint8_t *payload, size_t size, Reply *out);
+
+// True when a reply answers this request: the request opcode + 0x80, or an ACK or
+// NAK echoing it. Paged requests also check the selector the reply echoes (3B/BB
+// page, 3F/BF page, 03/83 page, 30/B0 program, 4A/CA event, 04/84 command,
+// 20/A0 page), so a late reply to an earlier request is not taken for this one.
+bool reply_matches(const uint8_t *request, size_t request_size, const uint8_t *reply, size_t reply_size);
 
 }  // namespace esphome::rainbird

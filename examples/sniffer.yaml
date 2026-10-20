@@ -1,6 +1,11 @@
 # Bench loopback, and the starting point for a passive sniff.
 # Jumper GPIO26 to GPIO27, flash this, and press "Send model query".
 # The log line "Frame 02" is that payload. A bad checksum never reaches on_frame.
+# `update_interval: never` keeps the hub from identifying or polling, so the
+# button is the only thing that transmits.
+#
+# Save the log and run tools/raw_to_fixture.py on it to turn the
+# `Received Raw:` lines into a replay fixture.
 #
 # Passive sniff, LNK2 still fitted: delete the transmitter, the button and
 # send_raw, set listen_only: true, and add a second remote_receiver as

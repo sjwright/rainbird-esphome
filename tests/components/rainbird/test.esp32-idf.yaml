@@ -22,6 +22,12 @@ rainbird:
   programs:
     - program: C
       start_button: false
+      running_binary_sensor: Drip running
+  zone_defaults:
+    valve_switch: {}
+    run_duration_number: {}
+    running_binary_sensor:
+      name: "{zone} running"
   on_nak:
     - logger.log:
         format: "Controller NAK %u %u"
@@ -58,3 +64,49 @@ button:
       - rainbird.send_raw:
           id: rainbird_controller
           data: [0x02]
+
+# Every read-only status entity (PLAN step S6).
+sensor:
+  - platform: rainbird
+    remaining_time:
+      name: Time remaining
+    active_zone:
+      name: Active zone
+    queued_zones:
+      name: Zones queued
+    response_time:
+      name: Controller response time
+    link_errors:
+      name: Controller link errors
+
+binary_sensor:
+  - platform: rainbird
+    watering:
+      name: Watering
+    rain_sensor:
+      name: Rain sensor
+      filters:
+        - invert:
+    irrigation_enabled:
+      name: Irrigation enabled
+    connected:
+      name: Controller connected
+  - platform: rainbird
+    zone: 4
+    running:
+      name: Side path running
+
+text_sensor:
+  - platform: rainbird
+    active_program:
+      name: Active program
+    queue:
+      name: Queue
+    model:
+      name: Controller model
+    firmware_version:
+      name: Controller firmware
+    serial_number:
+      name: Controller serial
+    schedule_changed:
+      name: Schedule last changed
