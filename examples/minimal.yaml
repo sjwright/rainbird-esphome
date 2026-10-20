@@ -1,0 +1,49 @@
+# Smallest config that validates, on an original ESP32.
+# This checks out the component from the working tree. A published config uses
+# source: github://sjwright/rainbird-esphome instead of the local path.
+# Flashing this does not run irrigation: the controller link is not built yet.
+
+esphome:
+  name: rainbird-minimal
+  min_version: 2026.9.0
+
+esp32:
+  variant: esp32
+
+logger:
+
+wifi:
+  ssid: example
+  password: example-password
+
+ota:
+  - platform: esphome
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components:
+      - rainbird
+
+remote_transmitter:
+  pin: GPIO26
+  carrier_duty_percent: 100%
+  non_blocking: true
+
+remote_receiver:
+  pin: GPIO27
+  idle: 4ms
+  filter: 50us
+  receive_symbols: 384
+  # Original ESP32 only. It cannot refill RMT memory mid-frame, so the hardware
+  # block has to hold a whole reply. Ping-pong chips leave rmt_symbols at the default.
+  rmt_symbols: 384
+
+rainbird:
+  model: ESP-TM2
+  zones:
+    - zone: 1
+      name: Front lawn
+    - zone: 2
+      name: Back lawn

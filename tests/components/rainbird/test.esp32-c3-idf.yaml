@@ -1,0 +1,19 @@
+# C3 receive uses ping-pong, so rmt_symbols stays in the 192-symbol pool.
+# receive_symbols is RAM and still has to hold 384. GPIO26 does not exist on C3.
+
+substitutions:
+  tx_pin: GPIO4
+  rx_pin: GPIO5
+  rmt_symbols: "96"
+
+packages:
+  common: !include common.yaml
+
+esphome:
+  name: rainbird-esp32-c3
+  min_version: 2026.9.0
+
+esp32:
+  variant: esp32c3
+  framework:
+    type: esp-idf

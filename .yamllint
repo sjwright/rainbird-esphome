@@ -1,0 +1,13 @@
+extends: default
+ignore: |
+  .venv
+  .esphome
+rules:
+  document-start: disable
+  line-length: disable
+  truthy: disable
+  indentation:
+    spaces: 2
+    indent-sequences: true
+  empty-lines:
+    max: 1

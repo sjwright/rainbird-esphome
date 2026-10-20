@@ -1,0 +1,45 @@
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+    components:
+      - rainbird
+
+logger:
+
+wifi:
+  ssid: test-ssid
+  password: test-password
+
+ota:
+  - platform: esphome
+
+time:
+  - platform: sntp
+    id: ha_time
+
+remote_transmitter:
+  pin: ${tx_pin}
+  carrier_duty_percent: 100%
+  non_blocking: true
+
+remote_receiver:
+  pin: ${rx_pin}
+  idle: 4ms
+  filter: 50us
+  receive_symbols: 384
+  rmt_symbols: ${rmt_symbols}
+
+rainbird:
+  id: rainbird_controller
+  model: ESP-TM2
+  time_id: ha_time
+  zones:
+    - zone: 1
+      id: front_lawn
+      name: Front lawn
+    - zone: 2
+      id: back_lawn
+      name: Back lawn
+  on_nak:
+    - logger.log: "Controller NAK"

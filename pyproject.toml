@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 100
+src = ["components", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["rainbird"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]

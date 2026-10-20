@@ -1,0 +1,16 @@
+substitutions:
+  tx_pin: GPIO26
+  rx_pin: GPIO27
+  rmt_symbols: "384"
+
+packages:
+  common: !include common.yaml
+
+esphome:
+  name: rainbird-esp32-ard
+  min_version: 2026.9.0
+
+esp32:
+  variant: esp32
+  framework:
+    type: arduino

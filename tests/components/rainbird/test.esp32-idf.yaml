@@ -1,0 +1,49 @@
+substitutions:
+  tx_pin: GPIO26
+  rx_pin: GPIO27
+  rmt_symbols: "384"
+
+packages:
+  common: !include common.yaml
+
+esphome:
+  name: rainbird-esp32-idf
+  min_version: 2026.9.0
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+# Proves the trigger parameter names compile. The package's on_nak list is replaced.
+rainbird:
+  on_nak:
+    - logger.log:
+        format: "Controller NAK %u %u"
+        args:
+          - !lambda static_cast<unsigned>(command)
+          - !lambda static_cast<unsigned>(code)
+  on_frame:
+    - lambda: |-
+        ESP_LOGD("rainbird", "frame %u", static_cast<unsigned>(payload.size()));
+
+switch:
+  - platform: rainbird
+    zone: 4
+    valve:
+      id: side_path_valve
+      name: Side path
+
+number:
+  - platform: rainbird
+    zone: 4
+    run_duration:
+      id: side_path_duration
+      name: Side path duration
+
+button:
+  - platform: rainbird
+    program: C
+    start:
+      id: run_drip
+      name: Run drip

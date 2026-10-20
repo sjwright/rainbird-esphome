@@ -1,0 +1,113 @@
+# Config-only. CI does not compile this file.
+
+esphome:
+  name: rainbird-validate
+  min_version: 2026.9.0
+  devices:
+    - id: front_device
+      name: Front lawn
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+logger:
+
+wifi:
+  ssid: test-ssid
+  password: test-password
+
+ota:
+  - platform: esphome
+
+time:
+  - platform: sntp
+    id: ha_time
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+    components:
+      - rainbird
+
+remote_transmitter:
+  id: rb_tx
+  pin: GPIO26
+  carrier_duty_percent: 100%
+  non_blocking: true
+
+remote_receiver:
+  id: rb_rx
+  pin: GPIO27
+  idle: 4ms
+  filter: 50us
+  receive_symbols: 384
+  rmt_symbols: 384
+
+rainbird:
+  id: rainbird_controller
+  model: esp-tm2
+  transmitter_id: rb_tx
+  receiver_id: rb_rx
+  time_id: ha_time
+  valve_switch_mode: queue
+  experimental: false
+  clock_sync:
+    max_drift: 30s
+  schedule:
+    refresh_interval: 1h
+    allow_writes: false
+  zone_defaults:
+    valve_switch:
+      name: "{zone}"
+      icon: mdi:sprinkler-variant
+    run_duration_number:
+      name: "{zone} duration"
+      initial_value: 10
+      restore_value: true
+      entity_category: config
+  zones:
+    - zone: 1
+      id: front_lawn
+      name: Front lawn
+      device_id: front_device
+      valve_switch: false
+    - zone: 2
+      id: back_lawn
+      name: Back lawn
+      run_duration_number: Back duration
+    - zone: 12
+      name: Spare
+      disabled: true
+  programs:
+    - program: A
+      id: lawns
+      name: Lawns
+    - program: b
+      id: beds
+      name: Garden beds
+  on_nak:
+    - logger.log:
+        format: "Controller NAK %u %u"
+        args:
+          - !lambda static_cast<unsigned>(command)
+          - !lambda static_cast<unsigned>(code)
+  on_frame:
+    - lambda: |-
+        ESP_LOGD("rainbird", "frame %u", static_cast<unsigned>(payload.size()));
+
+switch:
+  - platform: rainbird
+    zone: 4
+    valve:
+      name: Side path
+      on_turn_on:
+        - logger.log: "Side path started"
+
+number:
+  - platform: rainbird
+    program: B
+    seasonal_adjust:
+      name: Beds adjust

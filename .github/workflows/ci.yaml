@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tools
+        run: pip install ruff yamllint pytest clang-format esphome==2026.9.1
+      - name: Lint
+        run: |
+          ruff check components tests
+          ruff format --check components tests
+          yamllint .
+          find components/rainbird \( -name '*.h' -o -name '*.cpp' \) -print0 \
+            | xargs -0 clang-format --dry-run --Werror
+      - name: Host tests
+        run: make -C tests/unit test
+      - name: Python tests
+        run: pytest
+
+  compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        esphome:
+          - "2026.9.0"
+          - "2026.9.1"
+        config:
+          - tests/components/rainbird/test.esp32-idf.yaml
+          - tests/components/rainbird/test.esp32-ard.yaml
+          - tests/components/rainbird/test.esp32-c3-idf.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ matrix.esphome }}-${{ matrix.config }}
+          restore-keys: |
+            pio-${{ matrix.esphome }}-
+            pio-
+      - name: Install ESPHome
+        run: pip install esphome==${{ matrix.esphome }}
+      - name: Check configs
+        run: |
+          esphome config examples/minimal.yaml
+          esphome config tests/components/rainbird/validate.esp32-idf.yaml
+      - name: Compile
+        run: esphome compile ${{ matrix.config }}
+
+  dev:
+    if: github.event_name == 'schedule'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-dev
+          restore-keys: |
+            pio-
+      - name: Install ESPHome dev
+        run: pip install git+https://github.com/esphome/esphome.git
+      - name: Compile
+        run: esphome compile tests/components/rainbird/test.esp32-idf.yaml

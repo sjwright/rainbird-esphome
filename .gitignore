@@ -10,6 +10,9 @@ __pycache__/
 .venv/
 venv/
 
+# Host unit-test binary
+tests/unit/test_runner
+
 # Editors / OS
 .vscode/
 .idea/
