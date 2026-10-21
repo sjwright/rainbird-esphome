@@ -1,0 +1,223 @@
+# Rain Bird ESP-TM2 over its TX/RX port, with every feature the component has.
+# Pulls the component from GitHub. Pins are substitutions; set them to your wiring.
+#
+# Turned on here, and worth knowing about:
+#   schedule.allow_writes  lets the schedule entities edit the controller's programs
+#   experimental           enables 42 (next zone), 3A (test all), 49 (irrigation on/off)
+#                          and send_raw, none of them confirmed on a TM2 yet
+
+substitutions:
+  name: rainbird
+  friendly_name: Rain Bird
+  tx_pin: GPIO26
+  rx_pin: GPIO27
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.9.0
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# Home Assistant actions: run_zone, queue_zone, set_rain_delay, stop_watering.
+# They use the rain_delay and stop_watering ids below.
+packages:
+  actions: github://sjwright/rainbird-esphome/packages/ha-actions.yaml@main
+
+external_components:
+  - source: github://sjwright/rainbird-esphome@main
+    components: [rainbird]
+    refresh: 1d
+
+# Local time for clock sync and the schedule-changed timestamp.
+time:
+  - platform: homeassistant
+    id: ha_time
+
+remote_transmitter:
+  id: rb_tx
+  pin: ${tx_pin}
+  carrier_duty_percent: 100%
+  non_blocking: true
+
+remote_receiver:
+  id: rb_rx
+  pin: ${rx_pin}
+  idle: 4ms
+  filter: 50us
+  receive_symbols: 384
+  # Original ESP32 only: it cannot refill RMT memory mid-frame. Leave this out on an S3, C3 or C6.
+  rmt_symbols: 384
+
+rainbird:
+  id: rainbird_controller
+  model: ESP-TM2
+  transmitter_id: rb_tx
+  receiver_id: rb_rx
+  time_id: ha_time
+  update_interval: 15s
+  valve_switch_mode: start   # `queue` queues zones (4B) instead of starting them
+  experimental: true
+  clock_sync:
+    max_drift: 30s
+  schedule:
+    refresh_interval: 1h
+    allow_writes: true
+
+  # Every zone gets all of these. {zone} is the zone's name.
+  zone_defaults:
+    valve_switch:
+      name: "{zone}"
+      icon: mdi:sprinkler-variant
+    run_duration_number:
+      name: "{zone} duration"
+      initial_value: 10
+      restore_value: true
+      entity_category: config
+    running_binary_sensor: true
+    queue_button: true
+    sensor_bypass_switch: true
+    run_time_numbers: true      # one per program: "{zone} {program} run time"
+    fault_binary_sensor: true   # stays unknown until 3D is decoded (SPEC 8.4)
+
+  zones:
+    - zone: 1
+      id: lawn
+      name: Lawn
+    - zone: 2
+      id: rear_east
+      name: Rear East
+    - zone: 3
+      id: rear_west
+      name: Rear West
+    - zone: 4
+      id: front
+      name: Front
+
+  # Every program gets all of these. {program} is the program's name.
+  program_defaults:
+    start_button: true
+    seasonal_adjust_number: true
+    # Not "{program} running": zone Lawn and program Lawn would both be "Lawn running".
+    running_binary_sensor: "{program} program running"
+    frequency_select: true
+    cycle_days_number: true
+    days_until_next_number: true
+    watering_day_switches: true   # Monday to Sunday
+    start_time_datetimes: true    # four start slots
+    start_time_switches: true     # each slot on or off; turning one on writes its time
+
+  programs:
+    - program: A
+      id: garden_beds
+      name: Garden Beds
+    - program: B
+      id: lawn_program
+      name: Lawn
+    - program: C
+      id: program_c
+
+  # Every valid reply, for protocol work:
+  # on_frame:
+  #   - lambda: ESP_LOGD("rainbird", "%s", format_hex_pretty(payload).c_str());
+  on_nak:
+    - logger.log:
+        level: WARN
+        format: "Controller refused 0x%02X, code 0x%02X"
+        args: [command, code]
+
+# Controller-wide entities. These are only ever written by hand.
+sensor:
+  - platform: rainbird
+    remaining_time:
+      name: Time remaining
+    active_zone:
+      name: Active zone
+    queued_zones:
+      name: Zones queued
+    response_time:
+      name: Controller response time
+    link_errors:
+      name: Controller link errors
+
+binary_sensor:
+  - platform: rainbird
+    watering:
+      name: Watering
+    rain_sensor:
+      name: Rain sensor   # polarity unconfirmed; add `filters: [invert]` if it reads backwards
+    irrigation_enabled:
+      name: Irrigation enabled
+    connected:
+      name: Controller connected
+
+text_sensor:
+  - platform: rainbird
+    active_program:
+      name: Active program
+    queue:
+      name: Queue
+    model:
+      name: Controller model
+    firmware_version:
+      name: Controller firmware
+    serial_number:
+      name: Controller serial
+    schedule_changed:
+      name: Schedule last changed
+
+button:
+  - platform: rainbird
+    stop:
+      id: stop_watering
+      name: Stop watering
+    advance:
+      name: Next zone
+    test_all_zones:
+      name: Test all zones
+    sync_clock:
+      name: Sync controller clock
+    refresh:
+      name: Refresh from controller
+
+number:
+  - platform: rainbird
+    rain_delay:
+      id: rain_delay
+      name: Rain delay
+    station_delay:
+      name: Delay between zones
+    test_duration:
+      name: Test duration
+      initial_value: 2
+      restore_value: true
+      entity_category: config
+
+switch:
+  - platform: rainbird
+    irrigation_enabled:
+      name: Irrigation
+    rain_sensor_bypass:
+      name: Ignore rain sensor
+
+datetime:
+  - platform: rainbird
+    controller_clock:
+      name: Controller clock

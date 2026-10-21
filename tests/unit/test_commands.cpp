@@ -107,6 +107,18 @@ TEST_CASE("identification and clock replies") {
   CHECK(my == 0xA7);
   CHECK(yy == 0xEA);
 
+  // Real calendar dates only, in the years the packed form holds.
+  auto real = [](uint16_t year, uint8_t month, uint8_t day) { return date_valid(PackedDate{day, month, year}); };
+  CHECK(real(2024, 2, 29));
+  CHECK_FALSE(real(2023, 2, 29));
+  CHECK_FALSE(real(2000 + 100, 2, 29));
+  CHECK(real(2000, 2, 29));
+  CHECK_FALSE(real(2026, 4, 31));
+  CHECK(real(2026, 12, 31));
+  CHECK_FALSE(real(1999, 6, 1));
+  CHECK(real(4095, 6, 1));
+  CHECK_FALSE(real(4096, 6, 1));
+
   // Any date bytes parse; the model decides what an impossible date means.
   bytes = from_hex("92 00 07 EA");
   REQUIRE(parse_date(bytes.data(), bytes.size(), &packed));
@@ -188,7 +200,8 @@ TEST_CASE("ack, nak and live status") {
   CHECK_FALSE(queue_program(5).none);
 
   QueueList list;
-  bytes = from_hex("BB 01 21 05 D0 22 04 B0 23 01 A4 24 04 B0 25 02 58 00");
+  bytes = from_hex(
+      "BB 01 21 05 D0 22 04 B0 23 01 A4 24 04 B0 25 02 58 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00");
   REQUIRE(parse_queue_list(bytes.data(), bytes.size(), &list));
   REQUIRE(list.count == 5);
   const uint8_t zones[] = {1, 2, 3, 4, 5};
@@ -198,6 +211,14 @@ TEST_CASE("ack, nak and live status") {
     CHECK(list.slots[i].flags == 0x20);
     CHECK(list.slots[i].seconds == seconds[i]);
   }
+  // No slot at all, or a slot cut short, is not a queue: an empty queue is a slot of zone 0.
+  bytes = from_hex("BB 01");
+  CHECK_FALSE(parse_queue_list(bytes.data(), bytes.size(), &list));
+  bytes = from_hex("BB 01 21 05 D0 22 04");
+  CHECK_FALSE(parse_queue_list(bytes.data(), bytes.size(), &list));
+  bytes = from_hex("BB 01 00 00 00");
+  REQUIRE(parse_queue_list(bytes.data(), bytes.size(), &list));
+  CHECK(list.count == 0);
 
   IrrigationState irrigation;
   bytes = from_hex("C8 01");

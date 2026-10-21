@@ -1070,9 +1070,19 @@ across bursts.
   error. Commands and schedule writes go as one copy and are never retried:
   the controller may act on every copy it hears, and a lost reply does not
   mean it did nothing. `send_raw` is never retried either (4.1). Three
-  failures in a row set `connected` off, and polling backs off. After five
-  minutes down, the hub starts again at step 1 of the startup below, in case
-  the controller was replaced or reflashed.
+  failures in a row set `connected` off, and polling backs off. While it is
+  off, commands and schedule edits are refused, and any still queued are
+  dropped: a command must not run minutes later, or on a different
+  controller. After five minutes down, the hub starts again at step 1 of the
+  startup below, in case the controller was replaced or reflashed.
+- **Only the answer to the request in flight updates state** in active mode.
+  A late or duplicate reply is older than what that request brings.
+- **A schedule edit checks each answer's kind**: the page itself for the read
+  and the confirming read, an ACK for the write. It works from that reply's
+  bytes, never a page kept from an earlier read. Another master or the front
+  panel can still change the page between the read and the write; the
+  controller has no conditional write, so the confirming read is the check.
+- **A clock set is queued whole**: `11` and `13` together, or neither.
 - **NAKs** are logged and raise `on_nak`. The command is marked unsupported
   for the session when `nak_is_unsupported(code)` is true (bit 0 set). A NAK
   without bit 0 is logged as a likely encoding bug.
@@ -1520,7 +1530,8 @@ controller yet. Where the build changed the design above:
 - **`update_interval: never` puts the hub in manual mode**: no
   identification and no polling, only `send_raw`. The bench loopback uses
   this.
-- **In `listen_only` mode every valid reply updates state**, so status
+- **In `listen_only` mode every valid reply updates state** (in active mode
+  only the matched one does), so status
   entities work passively alongside an LNK2. `connected` there means "a
   valid frame in the last 60 s".
 - **`schedule_changed` is a `text_sensor`** with ISO 8601 text and device

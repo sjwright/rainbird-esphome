@@ -148,10 +148,6 @@ class ControllerState {
   void set_zone_bypass(uint8_t zone, bool bypassed);
   bool zone_bypass(uint8_t zone, bool *bypassed) const;
 
-  // The raw page an edit patches. The values in it are also in the cells above.
-  void set_page(uint8_t page, const uint8_t *data, uint8_t size);
-  bool copy_page(uint8_t page, uint8_t *data, size_t cap, uint8_t *size) const;
-
  private:
   struct Cell {
     int32_t value{0};
@@ -162,16 +158,6 @@ class ControllerState {
     void forget();
     bool get(int32_t *out) const;
   };
-
-  struct PageImage {
-    uint8_t page{0};
-    uint8_t data[MAX_PAGE_BYTES]{};
-    uint8_t size{0};
-    bool known{false};
-  };
-
-  // Page 00, 1P, 20, 6P and 8N: 14 on a TM2.
-  static constexpr size_t PAGE_SLOTS = 16;
 
   static int zone_index_(uint8_t zone);
   static int program_index_(uint8_t program);
@@ -208,7 +194,6 @@ class ControllerState {
   uint8_t queue_count_{0};
   bool queue_known_{false};
   bool queue_changed_{false};
-  PageImage pages_[PAGE_SLOTS]{};
 };
 
 }  // namespace esphome::rainbird

@@ -91,8 +91,7 @@ enum class ControlOp : uint8_t {
   SET_RAIN_DELAY,
   SET_IRRIGATION,
   TEST_ZONES,
-  SET_TIME,
-  SET_DATE,
+  SET_CLOCK,  // 11 then 13: both are queued or neither is
 };
 
 struct Control {
@@ -111,6 +110,7 @@ struct Control {
 enum class ControlResult : uint8_t {
   QUEUED,
   REFUSED_NOT_READY,     // not identified, model refused, listen-only, or writes off
+  REFUSED_LINK_DOWN,     // the controller is not answering
   REFUSED_EXPERIMENTAL,  // 42, 3A, 49 and send_raw
   REFUSED_UNSUPPORTED,   // the 04 probe said no
   REFUSED_RANGE,
@@ -221,6 +221,7 @@ class Session {
   void note_clock_reading_(uint32_t at_ms);
   bool watering_() const;
   bool ready_for_command_() const;
+  bool link_down_() const;
   bool enqueue_command_(const ByteBuf &request, uint32_t now_ms);
   void follow_up_(uint32_t now_ms);
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;

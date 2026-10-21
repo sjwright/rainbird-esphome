@@ -34,6 +34,8 @@ const char *control_result_text(ControlResult result) {
       return "queued";
     case ControlResult::REFUSED_NOT_READY:
       return "the controller is not identified, or this write is off";
+    case ControlResult::REFUSED_LINK_DOWN:
+      return "the controller is not answering";
     case ControlResult::REFUSED_EXPERIMENTAL:
       return "needs experimental: true";
     case ControlResult::REFUSED_UNSUPPORTED:
@@ -133,7 +135,9 @@ void Session::restart_() {
     this->fail_edit_("the controller stopped answering");
   }
   this->state_ = ControllerState{};
+  this->identity_ = Identity{};
   this->time_pending_ = false;
+  this->link_.drop_queued(Priority::POLL);
   this->caps_ = Capabilities{};
   this->writes_permitted_ = false;
   this->schedule_read_once_ = false;
@@ -257,10 +261,13 @@ void Session::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
   if (this->stage_ == SessionStage::PASSIVE) {
     this->set_connected_(true, now_ms);
   }
-  // Every valid reply updates state, matched or not. In listen_only mode these
-  // are the replies to the LNK2's own polls.
+  // Passive, every valid reply is the controller answering the LNK2, so all of it is state.
+  // Active, only the answer to the request in flight is: a late or duplicate reply is older
+  // than what that request brings, and must not replace it.
+  bool passive = this->stage_ == SessionStage::PASSIVE;
+  bool answer = passive || this->link_.on_frame(payload, size, now_ms);
   Reply reply;
-  if (parse_reply(payload, size, &reply)) {
+  if (answer && parse_reply(payload, size, &reply)) {
     this->model_.apply_reply(reply, &this->state_);
     switch (reply.kind) {
       case ReplyKind::MODEL:
@@ -306,8 +313,7 @@ void Session::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
         break;
     }
   }
-  if (this->stage_ != SessionStage::PASSIVE) {
-    this->link_.on_frame(payload, size, now_ms);
+  if (!passive) {
     this->tick(now_ms);
   }
 }
@@ -347,6 +353,12 @@ void Session::set_connected_(bool connected, uint32_t now_ms) {
     this->link_changed_ = true;
     if (!connected) {
       this->down_since_ = now_ms;
+      // Commands do not outlive a disconnect: one queued now could run minutes later, or on
+      // a different controller. The edit loses its next step with them.
+      this->link_.drop_queued(Priority::USER);
+      if (this->edit_.active) {
+        this->fail_edit_("the controller stopped answering");
+      }
     }
     SessionEvent event;
     event.kind = connected ? SessionEventKind::LINK_UP : SessionEventKind::LINK_DOWN;
@@ -486,6 +498,8 @@ bool Session::watering_() const {
   return this->state_.remaining_seconds(&remaining) && remaining != 0;
 }
 
+bool Session::link_down_() const { return this->link_status_.connected_known && !this->link_status_.connected; }
+
 bool Session::ready_for_command_() const {
   if (!this->writes_permitted_) {
     return false;
@@ -547,6 +561,9 @@ bool Session::next_queued_zone_(uint8_t skip, uint8_t *zone) const {
 }
 
 ControlResult Session::control(const Control &command, uint32_t now_ms) {
+  if (this->link_down_()) {
+    return ControlResult::REFUSED_LINK_DOWN;
+  }
   if (!this->ready_for_command_()) {
     return ControlResult::REFUSED_NOT_READY;
   }
@@ -648,20 +665,19 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       }
       request = request_test_stations(static_cast<uint8_t>(command.value));
       break;
-    case ControlOp::SET_TIME:
-      if (command.hour > 23 || command.minute > 59 || command.second > 59) {
-        return ControlResult::REFUSED_RANGE;
-      }
-      request = request_set_time(command.hour, command.minute, command.second);
-      break;
-    case ControlOp::SET_DATE: {
+    case ControlOp::SET_CLOCK: {
       PackedDate date;
       date.day = command.day;
       date.month = command.month;
       date.year = command.year;
-      if (!date_valid(date) || date.year < 2000) {
+      if (command.hour > 23 || command.minute > 59 || command.second > 59 || !date_valid(date)) {
         return ControlResult::REFUSED_RANGE;
       }
+      // Both or neither: a new time without its date is a clock a day out near midnight.
+      if (this->link_.space() < 2) {
+        return ControlResult::REFUSED_BUSY;
+      }
+      this->enqueue_command_(request_set_time(command.hour, command.minute, command.second), now_ms);
       request = request_set_date(date);
       break;
     }
@@ -690,6 +706,9 @@ ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program,
   // would race that read, and allow_writes stays off unless the config opts in.
   if (!this->config_.allow_writes || this->stage_ != SessionStage::RUNNING || !this->writes_permitted_) {
     return ControlResult::REFUSED_NOT_READY;
+  }
+  if (this->link_down_()) {
+    return ControlResult::REFUSED_LINK_DOWN;
   }
   if (this->edit_.active) {
     return ControlResult::REFUSED_BUSY;
@@ -723,7 +742,12 @@ void Session::handle_page_(const Completion &done) {
     return;
   }
   if (this->edit_.step == EditStep::WRITING) {
-    // The write was acknowledged. Read the page back before trusting it.
+    // The link matched this reply to the write, so an ACK here echoes 21.
+    if (done.reply.kind != ReplyKind::ACK) {
+      this->fail_edit_("the page write was not acknowledged");
+      return;
+    }
+    // Read the page back before trusting it.
     if (!this->enqueue_(request_read_page(this->edit_.page), Priority::USER, TagKind::PAGE, this->edit_.page)) {
       this->fail_edit_("the page was written, but the confirming read could not be queued");
       return;
@@ -731,12 +755,15 @@ void Session::handle_page_(const Completion &done) {
     this->edit_.step = EditStep::CONFIRMING;
     return;
   }
-  uint8_t raw[MAX_PAGE_BYTES];
-  uint8_t size = 0;
-  if (!this->state_.copy_page(this->edit_.page, raw, sizeof(raw), &size)) {
-    this->fail_edit_("the page reply had no data");
+  // Reading and confirming work from this reply's page, never a copy kept from an earlier read.
+  // Any other answer, an ACK for one, is not the page.
+  const SchedulePage &page = done.reply.schedule;
+  if (done.reply.kind != ReplyKind::SCHEDULE || page.page != this->edit_.page) {
+    this->fail_edit_("the page read did not return that page");
     return;
   }
+  const uint8_t *raw = page.data;
+  const uint8_t size = page.size;
   if (this->edit_.step == EditStep::CONFIRMING) {
     bool same = size == this->page_write_.size && std::memcmp(raw, this->page_write_.after, size) == 0;
     if (!same) {

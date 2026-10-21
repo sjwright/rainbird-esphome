@@ -26,8 +26,10 @@ external_components:
 
 ## Acknowledgements
 
-I did the initial feasibility study and hardrware analysis.
+I did the initial feasibility study and LNK2 hardware analysis.
+
+After incoming signals were being received, control over the Saleae Logic probe was handed over to Grok Bot for logging and signal analysis.
 
 The protocol knowledge comes from [pyrainbird](https://github.com/allenporter/pyrainbird).
 
-Development has been a collaborative effort between myself, Grok 4.7 and Opus 5.5, with additional code reviews by Kimi K3 and Muse Wonder.
+Development has been a collaborative effort between myself, Grok 4.7 and Opus 5.5, with additional code reviews by GPT 6 Sol, Kimi K3 and Muse Wonder.

@@ -245,8 +245,9 @@ class RainbirdComponent final : public PollingComponent {
   bool clock_sync_{false};
   uint32_t max_drift_ms_{30000};
   uint32_t refresh_interval_ms_{3600000};
-  bool clock_synced_{false};  // a clock set has been queued at clock_sync_at_
-  uint32_t clock_sync_at_{0};
+  // A clock set was queued at clock_set_at_. Queued, not confirmed: the next reading shows that.
+  bool clock_set_queued_{false};
+  uint32_t clock_set_at_{0};
   uint32_t clock_checked_serial_{0};  // the controller clock reading last compared
 #ifdef USE_TIME
   time::RealTimeClock *time_{nullptr};

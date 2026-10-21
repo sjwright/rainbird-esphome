@@ -144,6 +144,8 @@ bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value,
         *at = value != 0 ? GLOBAL_SENSOR_BYPASSED : GLOBAL_SENSOR_OBEYED;
       } else if (codec.kind == CodecKind::ZONE_BYPASS) {
         *at = value != 0 ? ZONE_SENSOR_BYPASSED : ZONE_SENSOR_OBEYED;
+      } else if (value < 0 || value > 0xFF) {
+        return false;  // refused, not truncated: 256 would be written as 0
       } else {
         *at = static_cast<uint8_t>(value);
       }
@@ -168,7 +170,7 @@ bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value,
         at[1] = 0xFF;
         return true;
       }
-      if (value < 0 || value > 0xFFFF) {
+      if (value < 0 || value > 0xFFFF || (codec.kind == CodecKind::START_SLOT && value >= 24 * 60)) {
         return false;
       }
       at[0] = static_cast<uint8_t>(static_cast<uint16_t>(value) >> 8);
@@ -485,8 +487,6 @@ void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const 
       if (reply.schedule.page > 0xFF) {
         break;
       }
-      // The raw image is what an edit patches. The fields are what entities show.
-      state->set_page(static_cast<uint8_t>(reply.schedule.page), reply.schedule.data, reply.schedule.size);
       this->apply_page_(reply.schedule, state);
       break;
     case ReplyKind::ACK:

@@ -56,7 +56,13 @@ bool decode_packed_date(uint8_t day, uint8_t my, uint8_t yy, PackedDate *out) {
 }
 
 bool date_valid(const PackedDate &date) {
-  return date.month >= 1 && date.month <= 12 && date.day >= 1 && date.day <= 31;
+  static constexpr uint8_t DAYS_IN_MONTH[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (date.year < 2000 || date.year > 0x0FFF || date.month < 1 || date.month > 12 || date.day < 1) {
+    return false;
+  }
+  bool leap = (date.year % 4 == 0 && date.year % 100 != 0) || date.year % 400 == 0;
+  uint8_t days = DAYS_IN_MONTH[date.month - 1] + (date.month == 2 && leap ? 1 : 0);
+  return date.day <= days;
 }
 
 void encode_packed_date(const PackedDate &date, uint8_t *day, uint8_t *my, uint8_t *yy) {
@@ -313,7 +319,10 @@ bool parse_queue_now(const uint8_t *payload, size_t size, QueueNow *out) {
 }
 
 bool parse_queue_list(const uint8_t *payload, size_t size, QueueList *out) {
-  if (out == nullptr || payload == nullptr || size < 2 || payload[0] != 0xBB || payload[1] != 0x01) {
+  // Whole 3-byte slots, at least one. A slot with zone 0 ends the list. The TM2 sends all 11
+  // (SPEC 5.3), but a shorter list of whole slots reads the same way.
+  if (out == nullptr || payload == nullptr || size < 5 || (size - 2) % 3 != 0 || payload[0] != 0xBB ||
+      payload[1] != 0x01) {
     return false;
   }
   *out = QueueList{};

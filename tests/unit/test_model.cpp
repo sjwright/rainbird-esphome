@@ -171,7 +171,7 @@ TEST_CASE("queue FF is idle or manual, and seconds are big-endian") {
   CHECK(zone == 1);
 
   ControllerState list;
-  APPLY(model, "BB 01 21 05 D0 22 04 B0 23 01 A4 24 04 B0 25 02 58 00", &list);
+  APPLY(model, "BB 01 21 05 D0 22 04 B0 23 01 A4 24 04 B0 25 02 58 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", &list);
   CHECK(list.queue_count() == 5);
   QueueItem item;
   REQUIRE(list.queue_item(0, &item));
@@ -218,12 +218,6 @@ TEST_CASE("schedule pages fill run times, days and start slots") {
   uint8_t until = 0;
   REQUIRE(state.days_until(0, &until));
   CHECK(until == 1);
-  uint8_t raw[8];
-  uint8_t raw_size = 0;
-  REQUIRE(state.copy_page(0x10, raw, sizeof(raw), &raw_size));
-  CHECK(raw_size == 6);
-  CHECK(raw[3] == 0x00);
-  CHECK(raw[4] == 0x64);
 
   APPLY(model, "A0 00 60 00 F0 FF FF FF FF FF FF", &state);
   int32_t minutes = 0;
@@ -285,11 +279,8 @@ TEST_CASE("locate maps zones onto run-time pages") {
 
 TEST_CASE("a program page edit leaves bytes 3 and 4 alone") {
   EspTm2Model model;
-  ControllerState state;
-  APPLY(model, "A0 00 10 6A 06 01 00 64 01", &state);
-  uint8_t page[8];
-  uint8_t size = 0;
-  REQUIRE(state.copy_page(0x10, page, sizeof(page), &size));
+  const uint8_t page[6] = {0x6A, 0x06, 0x01, 0x00, 0x64, 0x01};
+  const uint8_t size = sizeof(page);
 
   uint8_t edited[8];
   size_t edited_size = sizeof(edited);
@@ -316,6 +307,14 @@ TEST_CASE("a program page edit leaves bytes 3 and 4 alone") {
   CHECK(edited[2] == 0xFF);
   CHECK(edited[3] == 0xFF);
   CHECK(edited[0] == 0x00);
+
+  // Values that do not fit their field are refused, not truncated.
+  edited_size = sizeof(edited);
+  CHECK_FALSE(model.patch(0x10, page, size, Field::CYCLE_DAYS, 0, 0, 0, 256, edited, &edited_size));
+  edited_size = sizeof(edited);
+  CHECK_FALSE(model.patch(0x10, page, size, Field::FREQUENCY, 0, 0, 0, -1, edited, &edited_size));
+  edited_size = sizeof(edited);
+  CHECK_FALSE(model.patch(0x60, starts, 8, Field::START_TIME, 0, 0, 1, 24 * 60, edited, &edited_size));
 }
 
 TEST_CASE("short poll uses 4C only when the probe said it is supported") {

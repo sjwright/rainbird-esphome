@@ -90,8 +90,9 @@ struct PackedDate {
 // Fills `out` from any bytes. Returns date_valid(*out).
 bool decode_packed_date(uint8_t day, uint8_t my, uint8_t yy, PackedDate *out);
 void encode_packed_date(const PackedDate &date, uint8_t *day, uint8_t *my, uint8_t *yy);
-// Month 1-12 and day 1-31. Replies carry whatever date bytes the controller sent; the model
-// checks them. Rejecting the reply would drop its other fields, and the clock could never be set.
+// A real calendar date the packed form can hold: years 2000 to 4095, with true month lengths.
+// Replies carry whatever date bytes the controller sent; the model checks them. Rejecting the
+// reply would drop its other fields, and the clock could never be set.
 bool date_valid(const PackedDate &date);
 
 // --- requests ---

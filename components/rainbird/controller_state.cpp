@@ -601,47 +601,4 @@ bool ControllerState::zone_bypass(uint8_t zone, bool *bypassed) const {
   return true;
 }
 
-void ControllerState::set_page(uint8_t page, const uint8_t *data, uint8_t size) {
-  if (data == nullptr || size > MAX_PAGE_BYTES) {
-    return;
-  }
-  // The slot already holding this page, else the first free one.
-  PageImage *slot = nullptr;
-  for (auto &image : this->pages_) {
-    if (image.known && image.page == page) {
-      slot = &image;
-      break;
-    }
-    if (!image.known && slot == nullptr) {
-      slot = &image;
-    }
-  }
-  if (slot == nullptr) {
-    return;
-  }
-  slot->page = page;
-  slot->size = size;
-  for (uint8_t i = 0; i < size; i++) {
-    slot->data[i] = data[i];
-  }
-  slot->known = true;
-}
-
-bool ControllerState::copy_page(uint8_t page, uint8_t *data, size_t cap, uint8_t *size) const {
-  if (data == nullptr || size == nullptr) {
-    return false;
-  }
-  for (const auto &image : this->pages_) {
-    if (!image.known || image.page != page || image.size > cap) {
-      continue;
-    }
-    for (uint8_t i = 0; i < image.size; i++) {
-      data[i] = image.data[i];
-    }
-    *size = image.size;
-    return true;
-  }
-  return false;
-}
-
 }  // namespace esphome::rainbird

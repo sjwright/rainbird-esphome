@@ -39,6 +39,16 @@ size_t LinkCore::queued(Priority priority) const {
   return count;
 }
 
+void LinkCore::drop_queued(Priority priority) {
+  size_t kept = 0;
+  for (size_t i = 0; i < this->count_; i++) {
+    if (this->queue_[i].priority != priority) {
+      this->queue_[kept++] = this->queue_[i];
+    }
+  }
+  this->count_ = kept;
+}
+
 bool LinkCore::take_next_(Pending *out) {
   if (this->count_ == 0) {
     return false;

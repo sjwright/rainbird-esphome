@@ -423,28 +423,23 @@ bool RainbirdComponent::start_slot_is_on(uint8_t program, uint8_t index) const {
 
 bool RainbirdComponent::queue_clock_(uint8_t hour, uint8_t minute, uint8_t second, uint8_t day, uint8_t month,
                                      uint16_t year) {
+  Control clock;
+  clock.op = ControlOp::SET_CLOCK;
+  clock.hour = hour;
+  clock.minute = minute;
+  clock.second = second;
+  clock.day = day;
+  clock.month = month;
+  clock.year = year;
   uint32_t now = millis();
-  Control time;
-  time.op = ControlOp::SET_TIME;
-  time.hour = hour;
-  time.minute = minute;
-  time.second = second;
-  Control date;
-  date.op = ControlOp::SET_DATE;
-  date.day = day;
-  date.month = month;
-  date.year = year;
-  ControlResult time_result = this->session_->control(time, now);
-  ControlResult date_result = this->session_->control(date, now);
-  if (time_result != ControlResult::QUEUED)
-    ESP_LOGW(TAG, "Refused time set: %s", control_result_text(time_result));
-  if (date_result != ControlResult::QUEUED)
-    ESP_LOGW(TAG, "Refused date set: %s", control_result_text(date_result));
-  if (time_result == ControlResult::QUEUED || date_result == ControlResult::QUEUED) {
-    this->clock_synced_ = true;
-    this->clock_sync_at_ = now;
+  ControlResult result = this->session_->control(clock, now);
+  if (result != ControlResult::QUEUED) {
+    ESP_LOGW(TAG, "Refused clock set: %s", control_result_text(result));
+    return false;
   }
-  return time_result == ControlResult::QUEUED && date_result == ControlResult::QUEUED;
+  this->clock_set_queued_ = true;
+  this->clock_set_at_ = now;
+  return true;
 }
 
 bool RainbirdComponent::run_zone(int32_t zone, uint32_t duration_ms, bool queue) {
@@ -597,7 +592,7 @@ void RainbirdComponent::check_clock_() {
     return;
   this->clock_checked_serial_ = serial;
   uint32_t now = millis();
-  if (this->clock_synced_ && !elapsed(now, this->clock_sync_at_, CLOCK_SYNC_RETRY_MS))
+  if (this->clock_set_queued_ && !elapsed(now, this->clock_set_at_, CLOCK_SYNC_RETRY_MS))
     return;
   ESPTime local = this->time_->now();
   if (!local.is_valid())

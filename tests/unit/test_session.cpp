@@ -315,10 +315,7 @@ TEST_CASE("queue mode advances to the next queued zone when that is allowed") {
     REQUIRE(live.session.capabilities().advance);
     Session &session = live.session;
     uint32_t &now = live.now;
-    auto running = from_hex("BF 00 01 00 00 00");
-    session.on_frame(running.data(), running.size(), now);
-    auto queued = from_hex("BB 01 21 05 D0 22 04 B0 00 00 00");
-    session.on_frame(queued.data(), queued.size(), now);
+    // The script has zone 1 running and zones 1 to 5 in the queue.
     Control off;
     off.op = ControlOp::VALVE_OFF;
     off.zone = 1;
@@ -455,20 +452,17 @@ TEST_CASE("a 2-byte command goes as one copy; polls and send_raw keep the LNK2's
   CHECK(to_hex(tx.bytes, tx.size) == "F5 F5 1C 02 3F 00 41 1D F5 F5 1C 02 3F 00 41 1D");
 }
 
-TEST_CASE("commands in a row share one follow-up poll, sent after the last of them") {
+TEST_CASE("a clock set is time then date, sharing one follow-up poll") {
   Running live(config_with({Field::ZONES_RUNNING}));
   Session &session = live.session;
   uint32_t &now = live.now;
-  Control time;
-  time.op = ControlOp::SET_TIME;
-  time.hour = 12;
-  Control date;
-  date.op = ControlOp::SET_DATE;
-  date.day = 21;
-  date.month = 10;
-  date.year = 2026;
-  REQUIRE(session.control(time, now) == ControlResult::QUEUED);
-  REQUIRE(session.control(date, now) == ControlResult::QUEUED);
+  Control clock;
+  clock.op = ControlOp::SET_CLOCK;
+  clock.hour = 12;
+  clock.day = 21;
+  clock.month = 10;
+  clock.year = 2026;
+  REQUIRE(session.control(clock, now) == ControlResult::QUEUED);
   FakeController fake = FakeController::upgraded_tm2();
   fake.replies["11 0C 00 00"] = "01 11";
   fake.replies["13 15 A7 EA"] = "01 13";
@@ -585,9 +579,10 @@ TEST_CASE("after five minutes down, the session starts again at identification")
   CHECK(session.stage() == SessionStage::IDENTIFY);
   CHECK_FALSE(session.writes_permitted());
   CHECK_FALSE(session.capabilities().combined);
-  // The old controller's state goes too, so nothing is decided on it.
+  // The old controller's state and identity go too, so nothing is decided on them.
   bool on = false;
   CHECK_FALSE(session.state().zone_running(1, &on));
+  CHECK_FALSE(session.identity().model_known);
 
   FakeController fake = FakeController::upgraded_tm2();
   run_session(session, fake, now + 300000, 20000);
@@ -698,4 +693,94 @@ TEST_CASE("valves start or queue their zone by valve_queue, and missing zones ar
     on.zone = 7;
     CHECK(session.control(on, live.now) == ControlResult::REFUSED_NO_ZONE);
   }
+}
+
+TEST_CASE("with the link down, commands are refused and queued ones are dropped") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  Control run;
+  run.op = ControlOp::RUN_ZONE;
+  run.value = 5;
+  for (uint8_t zone = 1; zone <= 4; zone++) {
+    run.zone = zone;
+    REQUIRE(session.control(run, now) == ControlResult::QUEUED);
+  }
+  FakeController silent;
+  now = run_session(session, silent, now, 10000);
+  // Three failures in a row take the link down. The fourth command does not wait for it to come back.
+  CHECK_FALSE(session.link().connected);
+  CHECK(silent.requests == std::vector<std::string>{"39 00 01 05", "39 00 02 05", "39 00 03 05"});
+  run.zone = 1;
+  CHECK(session.control(run, now) == ControlResult::REFUSED_LINK_DOWN);
+}
+
+TEST_CASE("a reply nobody asked for does not change state") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  // Nothing is in flight. A late BF saying zone 3 runs is older than the next poll's answer.
+  auto late = from_hex("BF 00 04 00 00 00");
+  session.on_frame(late.data(), late.size(), live.now);
+  bool on = true;
+  REQUIRE(session.state().zone_running(3, &on));
+  CHECK_FALSE(on);
+}
+
+TEST_CASE("a schedule edit fails, and writes nothing, when a read is answered without the page") {
+  SessionConfig config = config_with({Field::FREQUENCY});
+  config.allow_writes = true;
+  config.pages.add(0x10);
+
+  // The first read gets an ACK instead of the page.
+  Running reading(config);
+  REQUIRE(reading.session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM, reading.now) == ControlResult::QUEUED);
+  FakeController fake;
+  fake.replies["20 00 10"] = "01 20";
+  run_session(reading.session, fake, reading.now, 5000);
+  SessionEvent failed;
+  REQUIRE(take_event_of(reading.session, SessionEventKind::EDIT_FAILED, &failed));
+  CHECK(std::string(failed.reason).find("did not return that page") != std::string::npos);
+  CHECK(fake.requests == std::vector<std::string>{"20 00 10"});
+
+  // The confirming read gets an ACK instead of the page.
+  Running confirming(config);
+  Session &session = confirming.session;
+  uint32_t now = confirming.now;
+  REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM, now) == ControlResult::QUEUED);
+  Transmission tx = next_after_gap(session, &now);
+  now += tx.first_copy_ms + 30;
+  auto page = from_hex("A0 00 10 6A 06 01 00 64 01");
+  session.on_frame(page.data(), page.size(), now);
+  FakeController after;
+  after.replies["21 00 10 6A 06 01 00 64 00"] = "01 21";
+  after.replies["20 00 10"] = "01 20";
+  run_session(session, after, now, 5000);
+  REQUIRE(take_event_of(session, SessionEventKind::EDIT_FAILED, &failed));
+  CHECK(std::string(failed.reason).find("did not return that page") != std::string::npos);
+}
+
+TEST_CASE("a clock set is queued whole or not at all") {
+  SessionConfig config = config_with({Field::ZONES_RUNNING});
+  config.experimental = true;  // send_raw fills the queue
+  Running live(config);
+  Session &session = live.session;
+  uint32_t now = live.now;
+  auto query = from_hex("02");
+  while (session.send_raw(query.data(), 1, now) == ControlResult::QUEUED) {
+  }
+  next_after_gap(session, &now);  // one in flight: one place free
+  Control clock;
+  clock.op = ControlOp::SET_CLOCK;
+  clock.hour = 12;
+  clock.day = 21;
+  clock.month = 10;
+  clock.year = 2026;
+  CHECK(session.control(clock, now) == ControlResult::REFUSED_BUSY);
+  FakeController fake = FakeController::upgraded_tm2();
+  run_session(session, fake, now, 30000);
+  CHECK_FALSE(seen(fake, "11 0C 00 00"));
+
+  clock.month = 2;
+  clock.day = 30;
+  CHECK(session.control(clock, now) == ControlResult::REFUSED_RANGE);
 }
