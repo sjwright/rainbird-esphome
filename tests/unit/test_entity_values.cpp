@@ -34,6 +34,11 @@ TEST_CASE("each kind asks the poll plan for the fields it reads") {
   CHECK(used.has(Field::QUEUE));
   CHECK_FALSE(used.has(Field::CLOCK));
 
+  // Advance needs the queue list to know which zone is next.
+  FieldSet advance;
+  add_fields(EntityKind::ADVANCE, &advance);
+  CHECK(advance.has(Field::QUEUE));
+
   // A config with only local settings polls nothing.
   FieldSet local;
   add_fields(EntityKind::RUN_DURATION, &local);

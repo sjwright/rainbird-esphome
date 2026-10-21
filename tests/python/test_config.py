@@ -386,3 +386,92 @@ def test_c3_receiver_fits_the_receive_blocks(tmp_path: Path):
     path.write_text(_yaml(variant="esp32c3", rx_rmt=96))
     result = _run(path, tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_max_drift_has_a_floor(tmp_path: Path):
+    time = "time:\n  - platform: sntp\n    id: ha_time\n"
+    _expect_fail(
+        tmp_path,
+        "max_drift",
+        rainbird_extra="  time_id: ha_time\n  clock_sync:\n    max_drift: 2s\n",
+        extra=time,
+    )
+
+
+def test_sync_clock_needs_time_id(tmp_path: Path):
+    extra = """
+button:
+  - platform: rainbird
+    sync_clock:
+      name: Sync controller clock
+"""
+    _expect_fail(tmp_path, "sync_clock needs time_id", extra=extra)
+
+
+def test_test_all_zones_needs_a_test_duration(tmp_path: Path):
+    extra = """
+button:
+  - platform: rainbird
+    test_all_zones:
+      name: Test all zones
+"""
+    _expect_fail(
+        tmp_path,
+        "needs a test_duration number",
+        rainbird_extra="  experimental: true\n",
+        extra=extra,
+    )
+    passing = tmp_path / "pass.yaml"
+    passing.write_text(
+        _yaml(
+            rainbird_extra="  experimental: true\n",
+            extra=extra
+            + "\nnumber:\n  - platform: rainbird\n    test_duration:\n      name: Test minutes\n",
+        )
+    )
+    result = _run(passing, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_start_slot_switch_needs_its_time(tmp_path: Path):
+    programs = "    - program: A\n      start_time_switches: true"
+    _expect_fail(
+        tmp_path,
+        "program A start 1 enabled switch needs that slot's start_time",
+        programs=programs,
+        rainbird_extra="  schedule:\n    allow_writes: true\n",
+    )
+    passing = tmp_path / "pass.yaml"
+    passing.write_text(
+        _yaml(
+            programs=programs + "\n      start_time_datetimes: true",
+            rainbird_extra="  schedule:\n    allow_writes: true\n",
+        )
+    )
+    result = _run(passing, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_ha_actions_package_validates(tmp_path: Path):
+    path = tmp_path / "actions.yaml"
+    extra = f"""
+api:
+
+packages:
+  actions: !include {REPO / "packages/ha-actions.yaml"}
+
+number:
+  - platform: rainbird
+    rain_delay:
+      id: rain_delay
+      name: Rain delay
+
+button:
+  - platform: rainbird
+    stop:
+      id: stop_watering
+      name: Stop watering
+"""
+    path.write_text(_yaml(extra=extra))
+    result = _run(path, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr

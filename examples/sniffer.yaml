@@ -21,9 +21,10 @@
 #
 # Passive sniff, LNK2 still fitted: delete the transmitter, the button and
 # send_raw, set listen_only: true, and add a second remote_receiver as
-# monitor_receiver_id. Take the inverted flag off. An ESP32-S3 has room for
-# both receivers. On the original ESP32 the two hardware blocks have to share
-# 512 symbols, so use an S3 for that.
+# monitor_receiver_id. Take the inverted flag off. on_frame shows the
+# controller's replies; the monitor's requests are logged as "Monitor ...".
+# An ESP32-S3 has room for both receivers. On the original ESP32 the two
+# hardware blocks have to share 512 symbols, so use an S3 for that.
 
 esphome:
   name: rainbird-sniffer

@@ -11,9 +11,10 @@ SRCS = \
 	../../components/rainbird/model_esp_tm2.cpp \
 	../../components/rainbird/link_core.cpp \
 	../../components/rainbird/session.cpp \
+	../../components/rainbird/clock_sync.cpp \
 	../../components/rainbird/entity_values.cpp
 
-TESTS = test_main.cpp test_manchester.cpp test_frame.cpp test_commands.cpp test_model.cpp test_replay.cpp test_link.cpp test_session.cpp test_entity_values.cpp
+TESTS = test_main.cpp test_manchester.cpp test_frame.cpp test_commands.cpp test_model.cpp test_replay.cpp test_link.cpp test_session.cpp test_clock_sync.cpp test_entity_values.cpp
 
 HDRS = \
 	../../components/rainbird/manchester.h \
@@ -24,6 +25,7 @@ HDRS = \
 	../../components/rainbird/model_esp_tm2.h \
 	../../components/rainbird/link_core.h \
 	../../components/rainbird/session.h \
+	../../components/rainbird/clock_sync.h \
 	../../components/rainbird/entity_kind.h \
 	../../components/rainbird/entity_values.h \
 	doctest.h hex.h vectors.h fixture.h fake_controller.h

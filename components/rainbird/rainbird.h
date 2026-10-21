@@ -66,6 +66,7 @@ class RainbirdProgram {
 class RainbirdComponent;
 class RainbirdSwitch;
 class RainbirdNumber;
+class RainbirdButton;
 class RainbirdSelect;
 class RainbirdTime;
 class RainbirdDateTime;
@@ -97,8 +98,9 @@ class RainbirdComponent final : public PollingComponent {
   void dump_config() override;
 
   bool submit(const WriteIntent &intent);
-  // rainbird.zone.start / queue. Minutes are already whole minutes, 1 to 255.
-  bool run_zone(uint8_t zone, uint8_t minutes, bool queue);
+  // rainbird.zone.start / queue. The values come straight from the action, so they may come from a
+  // template: anything outside zone 1-255 or 1 ms to 255 minutes is refused, never clamped.
+  bool run_zone(int32_t zone, uint32_t duration_ms, bool queue);
   // Controller clock entity and the sync button. Sends 11 and 13.
   bool set_controller_clock(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second);
   // True when the start slot is known to be on. An unknown slot is treated as off.
@@ -131,6 +133,10 @@ class RainbirdComponent final : public PollingComponent {
   // Entities that show controller state. Each carries the binding it reads.
   void add_switch(RainbirdSwitch *entity) { this->switches_.push_back(entity); }
   void add_number(RainbirdNumber *entity) { this->numbers_.push_back(entity); }
+#ifdef USE_BUTTON
+  // Buttons show nothing, but some need fields polled: advance reads the queue list.
+  void add_button(RainbirdButton *entity) { this->buttons_.push_back(entity); }
+#endif
 #ifdef USE_SELECT
   void add_select(RainbirdSelect *entity) { this->selects_.push_back(entity); }
 #endif
@@ -170,7 +176,7 @@ class RainbirdComponent final : public PollingComponent {
   void publish_changed_();
   void publish_countdown_();
   void log_page_edit_();
-  void maybe_sync_clock_();
+  void check_clock_();
   void note_binding_(EntityKind kind, uint8_t zone, uint8_t program, SessionConfig *config);
   bool zone_run_minutes_(uint8_t zone, uint8_t *minutes) const;
   bool test_minutes_(uint8_t *minutes) const;
@@ -201,6 +207,9 @@ class RainbirdComponent final : public PollingComponent {
   std::vector<uint16_t> accept_ids_{};
   std::vector<RainbirdSwitch *> switches_{};
   std::vector<RainbirdNumber *> numbers_{};
+#ifdef USE_BUTTON
+  std::vector<RainbirdButton *> buttons_{};
+#endif
 #ifdef USE_SELECT
   std::vector<RainbirdSelect *> selects_{};
 #endif
@@ -226,9 +235,9 @@ class RainbirdComponent final : public PollingComponent {
   bool clock_sync_{false};
   uint32_t max_drift_ms_{30000};
   uint32_t refresh_interval_ms_{3600000};
+  bool clock_synced_{false};  // a clock set has been queued at clock_sync_at_
   uint32_t clock_sync_at_{0};
-  int32_t clock_offset_s_{0};
-  bool clock_offset_known_{false};
+  uint32_t clock_checked_serial_{0};  // the controller clock reading last compared
 #ifdef USE_TIME
   time::RealTimeClock *time_{nullptr};
 #endif
@@ -267,24 +276,19 @@ template<typename... Ts> class RainbirdSendRawAction final : public Action<Ts...
   size_t length_{0};
 };
 
-// rainbird.zone.start and rainbird.zone.queue. Duration is milliseconds and is
-// rounded up to a minute here, because 39 and 4B count whole minutes.
+// rainbird.zone.start and rainbird.zone.queue. The hub checks the zone and duration,
+// because either can come from a template.
 template<typename... Ts> class RainbirdZoneAction final : public Action<Ts...>, public Parented<RainbirdComponent> {
  public:
-  TEMPLATABLE_VALUE(uint8_t, zone)
+  // int32_t, so a template's out-of-range zone is refused rather than wrapped into a valid one.
+  TEMPLATABLE_VALUE(int32_t, zone)
   TEMPLATABLE_VALUE(uint32_t, duration_ms)
   void set_zone_entity(RainbirdZone *zone) { this->zone_entity_ = zone; }
   void set_queue(bool queue) { this->queue_ = queue; }
 
   void play(const Ts &...x) override {
-    uint8_t zone = this->zone_entity_ != nullptr ? this->zone_entity_->get_zone() : this->zone_.value(x...);
-    uint32_t ms = this->duration_ms_.value(x...);
-    uint32_t minutes = (ms + 59999u) / 60000u;
-    if (minutes < 1)
-      minutes = 1;
-    if (minutes > 255)
-      minutes = 255;
-    this->parent_->run_zone(zone, static_cast<uint8_t>(minutes), this->queue_);
+    int32_t zone = this->zone_entity_ != nullptr ? this->zone_entity_->get_zone() : this->zone_.value(x...);
+    this->parent_->run_zone(zone, this->duration_ms_.value(x...), this->queue_);
   }
 
  protected:

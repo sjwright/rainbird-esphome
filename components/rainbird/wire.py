@@ -6,7 +6,16 @@ from esphome.const import CONF_ID, CONF_PLATFORM, CONF_RMT_SYMBOLS
 from esphome.core import CORE
 import esphome.final_validate as fv
 
-from .entity_kinds import NO_PROGRAM, NO_ZONE, FanOut, Scope, Write, platform_keys, resolve_kind
+from .entity_kinds import (
+    NO_PROGRAM,
+    NO_ZONE,
+    FanOut,
+    KindId,
+    Scope,
+    Write,
+    platform_keys,
+    resolve_kind,
+)
 from .models import MODELS
 
 CONF_RECEIVE_SYMBOLS = "receive_symbols"
@@ -246,6 +255,7 @@ def validate_hub(config: dict) -> None:
     if not config.get("listen_only") and "transmitter_id" in config:
         _check_transmitter(_declaring(config["transmitter_id"]))
     _check_send_raw(config)
+    _check_dependencies(config)
 
     if variant is None:
         return
@@ -291,6 +301,25 @@ def _entry_bindings(entry: dict, domain: str, model) -> list[tuple[tuple[int, in
     return out
 
 
+# The domains whose platform entries can hold controls.
+_CONTROL_DOMAINS = ("switch", "number", "button", "select", "datetime")
+
+
+def _platform_entries(hub_id):
+    """(domain, entry) for every hand-written control entry on this hub."""
+    full = fv.full_config.get()
+    for domain in _CONTROL_DOMAINS:
+        entries = full.get(domain) or []
+        if isinstance(entries, dict):
+            entries = [entries]
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get(CONF_PLATFORM) != "rainbird":
+                continue
+            if entry.get("rainbird_id") != hub_id:
+                continue
+            yield domain, entry
+
+
 def _check_duplicates(config: dict, domain: str, hub: dict, model) -> None:
     """One entity per binding. Hand-written entries cannot repeat the hub's or each other's."""
     mine = _entry_bindings(config, domain, model)
@@ -302,18 +331,9 @@ def _check_duplicates(config: dict, domain: str, hub: dict, model) -> None:
         binding = (item["kind_id"], item["zone"], item["program"], item["index"])
         counts[binding] = counts.get(binding, 0) + 1
         generated_ids[binding] = str(item["config"][CONF_ID])
-    full = fv.full_config.get()
-    for domain in ("switch", "number", "button", "select", "datetime"):
-        entries = full.get(domain) or []
-        if isinstance(entries, dict):
-            entries = [entries]
-        for entry in entries:
-            if not isinstance(entry, dict) or entry.get(CONF_PLATFORM) != "rainbird":
-                continue
-            if entry.get("rainbird_id") != config["rainbird_id"]:
-                continue
-            for binding, _ in _entry_bindings(entry, domain, model):
-                counts[binding] = counts.get(binding, 0) + 1
+    for entry_domain, entry in _platform_entries(config["rainbird_id"]):
+        for binding, _ in _entry_bindings(entry, entry_domain, model):
+            counts[binding] = counts.get(binding, 0) + 1
     for binding, label in mine:
         if counts.get(binding, 0) <= 1:
             continue
@@ -324,6 +344,35 @@ def _check_duplicates(config: dict, domain: str, hub: dict, model) -> None:
                 "copy off with `false` under that zone or program."
             )
         raise cv.Invalid(f"This {label} is defined more than once.")
+
+
+def _check_dependencies(hub: dict) -> None:
+    """Controls that use another entity's value need that entity on the same hub.
+
+    Without it the control only logs a warning when used, so the config fails here instead.
+    """
+    model = MODELS[str(hub["model"]).upper()]
+    bindings = {
+        (item["kind_id"], item["zone"], item["program"], item["index"])
+        for item in hub.get("generated", [])
+    }
+    for domain, entry in _platform_entries(hub[CONF_ID]):
+        bindings.update(binding for binding, _ in _entry_bindings(entry, domain, model))
+    kinds = {binding[0] for binding in bindings}
+    if KindId.TEST_ALL in kinds and KindId.TEST_DURATION not in kinds:
+        raise cv.Invalid(
+            "The test_all_zones button needs a test_duration number on the same rainbird hub: "
+            "the button runs each zone for that many minutes."
+        )
+    for kind_id, _, program, index in sorted(bindings):
+        if kind_id != KindId.START_ENABLED:
+            continue
+        if (KindId.START_TIME, NO_ZONE, program, index) not in bindings:
+            letter = model.letters[program] if program < len(model.letters) else "?"
+            raise cv.Invalid(
+                f"The program {letter} start {index + 1} enabled switch needs that slot's start_time "
+                "entity on the same rainbird hub: turning a slot on writes the time it shows."
+            )
 
 
 def validate_entity_platform(domain: str):
@@ -355,5 +404,9 @@ def _validate_entity_platform(config: dict, domain: str) -> None:
         raise cv.Invalid(
             "schedule_changed needs time_id on the rainbird hub: the controller stamps it in "
             "local time, and the time zone converts it."
+        )
+    if domain == "button" and "sync_clock" in config and "time_id" not in hub:
+        raise cv.Invalid(
+            "sync_clock needs time_id on the rainbird hub: it sets the controller to that clock's local time."
         )
     _check_duplicates(config, domain, hub, model)

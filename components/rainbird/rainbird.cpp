@@ -10,6 +10,7 @@
 #include <driver/rtc_io.h>
 #endif
 
+#include "clock_sync.h"
 #include "entity_values.h"
 #include "log_tag.h"
 #include "rainbird_entities.h"
@@ -25,6 +26,12 @@ ESPHOME_LOG_TAG(TAG, "rainbird");
 namespace {
 
 constexpr uint32_t COUNTDOWN_INTERVAL_ID = 1;
+constexpr uint32_t SILENCE_INTERVAL_ID = 2;
+constexpr uint32_t SILENCE_CHECK_MS = 5000;
+// A clock set the controller did not take is tried again after this long, not on every reading.
+constexpr uint32_t CLOCK_SYNC_RETRY_MS = 60000;
+// 39 and 4B take whole minutes in one byte.
+constexpr uint32_t MAX_RUN_MINUTES = 255;
 // 4A timestamps count from 2000-01-01 (SPEC 5.3).
 constexpr time_t SECONDS_1970_TO_2000 = 946684800;
 
@@ -111,6 +118,10 @@ void RainbirdComponent::setup() {
   for (auto *entity : this->numbers_)
     this->note_binding_(entity->kind(), entity->zone(), entity->program(), &config);
 #endif
+#ifdef USE_BUTTON
+  for (auto *entity : this->buttons_)
+    this->note_binding_(entity->kind(), entity->zone(), entity->program(), &config);
+#endif
 #ifdef USE_SELECT
   for (auto *entity : this->selects_)
     this->note_binding_(entity->kind(), NO_ZONE, entity->program(), &config);
@@ -141,6 +152,13 @@ void RainbirdComponent::setup() {
   this->session_->start(millis());
   this->last_stage_ = this->session_->stage();
   this->release_receiver_pads_();
+  if (this->listen_only_) {
+    // With `update_interval: never`, update() never runs, so silence has its own timer.
+    this->set_interval(SILENCE_INTERVAL_ID, SILENCE_CHECK_MS, [this]() {
+      this->session_->check_silence(millis());
+      this->after_activity_();
+    });
+  }
   this->after_activity_();
 }
 
@@ -228,7 +246,7 @@ void RainbirdComponent::after_activity_() {
     ESP_LOGE(TAG, "Schedule edit failed: %s", reason);
 
   // A clock command queued here waits for the next loop. Calling loop() from here would recurse.
-  this->maybe_sync_clock_();
+  this->check_clock_();
 
   // loop() only runs while the link has work: a request queued, in flight or finishing.
   if (this->session_->busy()) {
@@ -279,6 +297,12 @@ bool RainbirdReceiver::on_receive(remote_base::RemoteReceiveData data) {
 
 void RainbirdComponent::deliver_frame_(const Frame &frame, const char *which, bool controller) {
   char pretty[format_hex_pretty_size(MAX_PAYLOAD)];
+  if (!controller) {
+    // The monitor hears another master's requests. They are logged for protocol work and go
+    // nowhere else: on_frame and on_nak report the controller's replies (PLAN 4.5).
+    ESP_LOGD(TAG, "%s %s", which, format_hex_pretty_to(pretty, frame.payload, frame.length));
+    return;
+  }
   ESP_LOGV(TAG, "%s %s", which, format_hex_pretty_to(pretty, frame.payload, frame.length));
   std::vector<uint8_t> payload(frame.payload, frame.payload + frame.length);
   for (FrameTrigger *trigger : this->frame_triggers_) {
@@ -290,8 +314,7 @@ void RainbirdComponent::deliver_frame_(const Frame &frame, const char *which, bo
       trigger->trigger(nak.echo, nak.code);
     }
   }
-  // Only the controller's receiver feeds state. The monitor hears requests.
-  if (controller && this->session_) {
+  if (this->session_) {
     this->session_->on_frame(frame.payload, frame.length, millis());
     this->after_activity_();
   }
@@ -328,6 +351,9 @@ void RainbirdComponent::note_binding_(EntityKind kind, uint8_t zone, uint8_t pro
   // One zone's run time must not pull every zone's page. Other schedule pages are one per program.
   if (kind == EntityKind::RUN_TIME && zone >= 1 && zone <= 16)
     config->zone_mask |= static_cast<uint16_t>(1u << (zone - 1));
+  // In queue mode, turning a valve off moves on to the next queued zone, which the queue list names.
+  if (kind == EntityKind::VALVE && this->valve_queue_ && this->experimental_)
+    config->used.add(Field::QUEUE);
   if (program != NO_PROGRAM && program < 8 &&
       (kind == EntityKind::WATERING_DAY || kind == EntityKind::FREQUENCY || kind == EntityKind::CYCLE_DAYS ||
        kind == EntityKind::DAYS_UNTIL_NEXT || kind == EntityKind::START_TIME || kind == EntityKind::START_ENABLED)) {
@@ -422,20 +448,34 @@ bool RainbirdComponent::queue_clock_(uint8_t hour, uint8_t minute, uint8_t secon
     ESP_LOGW(TAG, "Refused time set: %s", control_result_text(time_result));
   if (date_result != ControlResult::QUEUED)
     ESP_LOGW(TAG, "Refused date set: %s", control_result_text(date_result));
-  if (time_result == ControlResult::QUEUED || date_result == ControlResult::QUEUED)
+  if (time_result == ControlResult::QUEUED || date_result == ControlResult::QUEUED) {
+    this->clock_synced_ = true;
     this->clock_sync_at_ = now;
+  }
   return time_result == ControlResult::QUEUED && date_result == ControlResult::QUEUED;
 }
 
-bool RainbirdComponent::run_zone(uint8_t zone, uint8_t minutes, bool queue) {
+bool RainbirdComponent::run_zone(int32_t zone, uint32_t duration_ms, bool queue) {
   if (!this->session_) {
     ESP_LOGW(TAG, "Refused command: the link has not started");
     return false;
   }
+  // Refused, not clamped. A negative minutes value in a template wraps to a huge duration,
+  // and clamping that would water for over four hours.
+  if (zone < 1 || zone > 255) {
+    ESP_LOGW(TAG, "Refused zone run: %d is not a zone number", static_cast<int>(zone));
+    return false;
+  }
+  if (duration_ms == 0 || duration_ms > MAX_RUN_MINUTES * 60000u) {
+    ESP_LOGW(TAG, "Refused zone run: %u ms is outside 1 ms to %u minutes", static_cast<unsigned>(duration_ms),
+             static_cast<unsigned>(MAX_RUN_MINUTES));
+    return false;
+  }
   Control command;
   command.op = queue ? ControlOp::QUEUE_ZONE : ControlOp::RUN_ZONE;
-  command.zone = zone;
-  command.value = minutes;
+  command.zone = static_cast<uint8_t>(zone);
+  // Whole minutes, so a part minute rounds up.
+  command.value = static_cast<uint16_t>((duration_ms + 59999u) / 60000u);
   if (this->queue_control_(command) != ControlResult::QUEUED)
     return false;
   this->loop();
@@ -620,47 +660,39 @@ void RainbirdComponent::log_page_edit_() {
   ESP_LOGI(TAG, "Schedule page %02X write:  %s", edit.page, format_hex_pretty_to(after, edit.after, edit.size));
 }
 
-void RainbirdComponent::maybe_sync_clock_() {
+void RainbirdComponent::check_clock_() {
 #ifdef USE_TIME
   if (!this->clock_sync_ || this->time_ == nullptr || !this->session_)
     return;
-  if (this->session_->stage() != SessionStage::RUNNING || !this->session_->writes_permitted())
+  // Once per controller reading, and only while commands can reach the controller.
+  uint32_t serial = this->session_->clock_serial();
+  if (serial == 0 || serial == this->clock_checked_serial_)
+    return;
+  if (this->session_->stage() != SessionStage::RUNNING || !this->session_->writes_permitted() ||
+      !this->session_->connected())
+    return;
+  this->clock_checked_serial_ = serial;
+  uint32_t now = millis();
+  if (this->clock_synced_ && now - this->clock_sync_at_ < CLOCK_SYNC_RETRY_MS)
     return;
   ESPTime local = this->time_->now();
   if (!local.is_valid())
     return;
-  int32_t offset = ESPTime::timezone_offset();
-  bool offset_changed = this->clock_offset_known_ && offset != this->clock_offset_s_;
-  this->clock_offset_s_ = offset;
-  this->clock_offset_known_ = true;
-  uint32_t now = millis();
-  // A failed set must not be sent again on the next loop.
-  if (!offset_changed && this->clock_sync_at_ != 0 && now - this->clock_sync_at_ < 60000)
+  const ControllerState &state = this->session_->state();
+  WallClock controller;
+  if (!state.clock(&controller.hour, &controller.minute, &controller.second))
     return;
-  uint8_t hour = 0;
-  uint8_t minute = 0;
-  uint8_t second = 0;
-  if (!this->session_->state().clock(&hour, &minute, &second))
+  bool date_valid = state.date(&controller.day, &controller.month, &controller.year);
+  WallClock here{local.year, local.month, local.day_of_month, local.hour, local.minute, local.second};
+  // A UTC-offset change moves local time by an hour, so daylight saving shows up as drift here.
+  // WAIT: local midnight is close; the next reading checks again.
+  if (check_clock(controller, date_valid, now - this->session_->clock_read_at(), here, this->max_drift_ms_) !=
+      ClockCheck::SYNC)
     return;
-  bool drift = clock_drifted(hour, minute, second, local.hour, local.minute, local.second, this->max_drift_ms_);
-  uint8_t day = 0;
-  uint8_t month = 0;
-  uint16_t year = 0;
-  bool have_date = this->session_->state().date(&day, &month, &year);
-  bool date_differs = have_date && (day != local.day_of_month || month != local.month || year != local.year);
-  if (!drift && !date_differs && !offset_changed)
-    return;
-  this->clock_sync_at_ = now;
-  if (drift || offset_changed)
-    this->queue_clock_(local.hour, local.minute, local.second, local.day_of_month, local.month, local.year);
-  else {
-    Control date;
-    date.op = ControlOp::SET_DATE;
-    date.day = local.day_of_month;
-    date.month = local.month;
-    date.year = local.year;
-    this->queue_control_(date);
-  }
+  ESP_LOGI(TAG, "Setting the controller clock to %04u-%02u-%02u %02u:%02u:%02u", static_cast<unsigned>(here.year),
+           static_cast<unsigned>(here.month), static_cast<unsigned>(here.day), static_cast<unsigned>(here.hour),
+           static_cast<unsigned>(here.minute), static_cast<unsigned>(here.second));
+  this->queue_clock_(here.hour, here.minute, here.second, here.day, here.month, here.year);
 #endif
 }
 
@@ -762,8 +794,12 @@ void RainbirdComponent::publish_changed_() {
         }
         break;
       case EntityKind::REMAINING_TIME:
-        if (kind_changed(binding.kind, state, binding.zone, binding.program, binding.index) &&
-            number_value(binding.kind, state, binding.zone, binding.program, &value, binding.index)) {
+        // Every reading re-anchors the countdown, not only a new value: a paused controller repeats
+        // the same value, and counting on from the old anchor would run down to 0. A steady 0 is
+        // not published again.
+        if (state.remaining_refreshed() &&
+            number_value(binding.kind, state, binding.zone, binding.program, &value, binding.index) &&
+            (value > 0 || kind_changed(binding.kind, state, binding.zone, binding.program, binding.index))) {
           binding.entity->publish_state(value);
           // Count down locally between polls, so Home Assistant sees time pass smoothly.
           this->countdown_from_ = static_cast<uint16_t>(value);

@@ -57,7 +57,11 @@ bool decode_packed_date(uint8_t day, uint8_t my, uint8_t yy, PackedDate *out) {
   out->day = day;
   out->month = my >> 4;
   out->year = (static_cast<uint16_t>(my & 0x0F) << 8) | yy;
-  return out->month >= 1 && out->month <= 12 && out->day >= 1 && out->day <= 31;
+  return date_valid(*out);
+}
+
+bool date_valid(const PackedDate &date) {
+  return date.month >= 1 && date.month <= 12 && date.day >= 1 && date.day <= 31;
 }
 
 void encode_packed_date(const PackedDate &date, uint8_t *day, uint8_t *my, uint8_t *yy) {
@@ -249,10 +253,11 @@ bool parse_time(const uint8_t *payload, size_t size, ClockTime *out) {
 }
 
 bool parse_date(const uint8_t *payload, size_t size, PackedDate *out) {
-  if (!exact(payload, size, 4, 0x92)) {
+  if (out == nullptr || !exact(payload, size, 4, 0x92)) {
     return false;
   }
-  return decode_packed_date(payload[1], payload[2], payload[3], out);
+  decode_packed_date(payload[1], payload[2], payload[3], out);
+  return true;
 }
 
 bool parse_ack(const uint8_t *payload, size_t size, Ack *out) {
@@ -290,9 +295,7 @@ bool parse_combined_state(const uint8_t *payload, size_t size, CombinedState *ou
   out->time.hour = payload[1];
   out->time.minute = payload[2];
   out->time.second = payload[3];
-  if (!decode_packed_date(payload[4], payload[5], payload[6], &out->date)) {
-    return false;
-  }
+  decode_packed_date(payload[4], payload[5], payload[6], &out->date);
   out->rain_delay_days = be16(payload[7], payload[8]);
   out->sensor = payload[9];
   out->irrigation_state = payload[10];

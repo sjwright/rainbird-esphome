@@ -71,6 +71,8 @@ class ControllerState {
   void set_clock(uint8_t hour, uint8_t minute, uint8_t second);
   bool clock(uint8_t *hour, uint8_t *minute, uint8_t *second) const;
   void set_date(uint8_t day, uint8_t month, uint16_t year);
+  // The controller reported a date that is not a real date. The date is unknown until a valid one arrives.
+  void forget_date();
   bool date(uint8_t *day, uint8_t *month, uint16_t *year) const;
 
   void set_rain_delay(uint16_t days);
@@ -87,6 +89,9 @@ class ControllerState {
   Activity activity() const;
   void set_remaining_seconds(uint16_t seconds);
   bool remaining_seconds(uint16_t *seconds) const;
+  // True when a reply carried the remaining time since clear_changed(), changed or not.
+  // A paused controller repeats the same value, and the local countdown re-anchors on it.
+  bool remaining_refreshed() const { return this->remaining_refreshed_; }
   void set_queued_count(uint8_t count);
   bool queued_count(uint8_t *count) const;
 
@@ -136,6 +141,7 @@ class ControllerState {
     bool changed{false};
 
     void set(int32_t next);
+    void forget();
     bool get(int32_t *out) const;
   };
 
@@ -164,6 +170,7 @@ class ControllerState {
   Cell active_zone_{};
   Cell program_byte_{};
   Cell remaining_{};
+  bool remaining_refreshed_{false};
   Cell queued_count_{};
   Cell seasonal_[STATE_PROGRAMS]{};
   Cell schedule_changed_{};

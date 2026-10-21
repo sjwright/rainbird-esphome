@@ -101,6 +101,42 @@ TEST_CASE("combined state keeps seconds and ignores FFFF seasonal adjust") {
   CHECK(remaining != 0x6701);
 }
 
+TEST_CASE("a date that is not a real date is unknown, and the rest of the reply still applies") {
+  EspTm2Model model;
+  ControllerState state;
+  APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00", &state);
+  state.clear_changed();
+  // Month 0.
+  APPLY(model, "CC 14 0B 23 08 07 E7 00 05 00 01 FF FF 00 00 00", &state);
+  uint8_t day = 0;
+  uint8_t month = 0;
+  uint16_t year = 0;
+  CHECK_FALSE(state.date(&day, &month, &year));
+  CHECK(state.changed(Field::CLOCK));
+  uint16_t rain = 0;
+  REQUIRE(state.rain_delay(&rain));
+  CHECK(rain == 5);
+
+  APPLY(model, "92 13 A7 EA", &state);
+  REQUIRE(state.date(&day, &month, &year));
+  APPLY(model, "92 00 A7 EA", &state);
+  CHECK_FALSE(state.date(&day, &month, &year));
+}
+
+TEST_CASE("every remaining-time reading counts as refreshed, changed or not") {
+  EspTm2Model model;
+  ControllerState state;
+  CHECK_FALSE(state.remaining_refreshed());
+  APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 01 67 00", &state);
+  CHECK(state.remaining_refreshed());
+  state.clear_changed();
+  CHECK_FALSE(state.remaining_refreshed());
+  // A paused controller repeats the value.
+  APPLY(model, "CC 14 0B 25 08 17 E7 00 03 00 01 FF FF 01 67 00", &state);
+  CHECK(state.remaining_refreshed());
+  CHECK_FALSE(state.changed(Field::REMAINING_TIME));
+}
+
 TEST_CASE("queue FF is idle or manual, and seconds are big-endian") {
   EspTm2Model model;
   ControllerState idle;

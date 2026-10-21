@@ -222,9 +222,9 @@ TEST_CASE("clock wrap and long idle spells do not block or break timeouts") {
   CHECK(idle.next_transmission(40 + 2592000000u, &tx));
 }
 
-TEST_CASE("a request enqueued with no retries fails after one timeout") {
+TEST_CASE("a request enqueued once fails after one timeout") {
   LinkCore link;
-  link.enqueue(buf("42"), Priority::USER, 1, 0);
+  link.enqueue(buf("42"), Priority::USER, 1, Delivery::ONCE);
   Transmission tx;
   REQUIRE(link.next_transmission(0, &tx));
   link.tick(tx.first_copy_ms + 399);

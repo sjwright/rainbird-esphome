@@ -11,6 +11,14 @@ void ControllerState::Cell::set(int32_t next) {
   this->changed = true;
 }
 
+void ControllerState::Cell::forget() {
+  if (!this->known) {
+    return;
+  }
+  this->known = false;
+  this->changed = true;
+}
+
 bool ControllerState::Cell::get(int32_t *out) const {
   if (!this->known || out == nullptr) {
     return false;
@@ -62,6 +70,7 @@ void ControllerState::clear_changed() {
   this->active_zone_.changed = false;
   this->program_byte_.changed = false;
   this->remaining_.changed = false;
+  this->remaining_refreshed_ = false;
   this->queued_count_.changed = false;
   for (auto &cell : this->seasonal_)
     cell.changed = false;
@@ -202,6 +211,8 @@ void ControllerState::set_date(uint8_t day, uint8_t month, uint16_t year) {
   this->date_packed_.set(static_cast<int32_t>(year) * 10000 + month * 100 + day);
 }
 
+void ControllerState::forget_date() { this->date_packed_.forget(); }
+
 bool ControllerState::date(uint8_t *day, uint8_t *month, uint16_t *year) const {
   int32_t packed = 0;
   if (day == nullptr || month == nullptr || year == nullptr || !this->date_packed_.get(&packed)) {
@@ -284,7 +295,10 @@ Activity ControllerState::activity() const {
   return Activity::MANUAL;
 }
 
-void ControllerState::set_remaining_seconds(uint16_t seconds) { this->remaining_.set(seconds); }
+void ControllerState::set_remaining_seconds(uint16_t seconds) {
+  this->remaining_.set(seconds);
+  this->remaining_refreshed_ = true;
+}
 
 bool ControllerState::remaining_seconds(uint16_t *seconds) const {
   int32_t value = 0;

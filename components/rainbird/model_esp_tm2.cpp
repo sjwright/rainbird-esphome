@@ -105,6 +105,14 @@ void apply_run_page(ControllerState *state, const SchedulePage &page) {
   }
 }
 
+void apply_date(ControllerState *state, const PackedDate &date) {
+  if (date_valid(date)) {
+    state->set_date(date.day, date.month, date.year);
+  } else {
+    state->forget_date();
+  }
+}
+
 // Page 20 holds one byte per zone, zone 1 first. The wire byte is stored as is;
 // the codec maps it (01 obeys the sensor, 00 bypasses it). The reply length for a
 // TM2 is not captured yet, so only the zones present in the reply are set.
@@ -449,7 +457,7 @@ void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const 
     case ReplyKind::COMBINED: {
       const CombinedState &combined = reply.combined;
       state->set_clock(combined.time.hour, combined.time.minute, combined.time.second);
-      state->set_date(combined.date.day, combined.date.month, combined.date.year);
+      apply_date(state, combined.date);
       state->set_rain_delay(combined.rain_delay_days);
       state->set_rain_sensor(combined.sensor);
       state->set_irrigation(combined.irrigation_state);
@@ -483,7 +491,7 @@ void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const 
       state->set_clock(reply.time.hour, reply.time.minute, reply.time.second);
       break;
     case ReplyKind::DATE:
-      state->set_date(reply.date.day, reply.date.month, reply.date.year);
+      apply_date(state, reply.date);
       break;
     case ReplyKind::RAIN_DELAY:
       state->set_rain_delay(reply.rain_delay.days);

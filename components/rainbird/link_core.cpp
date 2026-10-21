@@ -18,7 +18,7 @@ uint32_t frame_air_ms(size_t bytes) {
 
 LinkCore::LinkCore(const LinkTiming &timing) : timing_(timing) {}
 
-bool LinkCore::enqueue(const ByteBuf &request, Priority priority, uint32_t tag, uint8_t retries) {
+bool LinkCore::enqueue(const ByteBuf &request, Priority priority, uint32_t tag, Delivery delivery) {
   if (request.size == 0 || request.size > MAX_PAYLOAD || this->count_ >= QUEUE_CAP) {
     return false;
   }
@@ -27,7 +27,7 @@ bool LinkCore::enqueue(const ByteBuf &request, Priority priority, uint32_t tag, 
   slot.priority = priority;
   slot.tag = tag;
   slot.attempts = 0;
-  slot.retries = retries;
+  slot.delivery = delivery;
   return true;
 }
 
@@ -86,6 +86,15 @@ void LinkCore::complete(const Completion &completion) {
   this->done_[this->done_count_++] = completion;
 }
 
+void LinkCore::fail(const Pending &pending) {
+  Completion failed;
+  failed.tag = pending.tag;
+  failed.outcome = Outcome::FAILED;
+  failed.opcode = pending.request.data[0];
+  failed.attempts = pending.attempts;
+  this->complete(failed);
+}
+
 bool LinkCore::pop_completion(Completion *out) {
   if (out == nullptr || this->done_count_ == 0) {
     return false;
@@ -106,18 +115,14 @@ void LinkCore::tick(uint32_t now_ms) {
   this->link_errors_++;
   this->ready_from_ = now_ms;
   this->ready_delay_ = this->timing_.gap_ms;
-  if (this->current_.attempts <= this->current_.retries && this->push_front(this->current_)) {
+  uint8_t retries = this->current_.delivery == Delivery::NORMAL ? this->timing_.retries : 0;
+  if (this->current_.attempts <= retries && this->push_front(this->current_)) {
     return;
   }
   if (this->consecutive_failures_ < 255) {
     this->consecutive_failures_++;
   }
-  Completion failed;
-  failed.tag = this->current_.tag;
-  failed.outcome = Outcome::FAILED;
-  failed.opcode = this->current_.request.data[0];
-  failed.attempts = this->current_.attempts;
-  this->complete(failed);
+  this->fail(this->current_);
 }
 
 bool LinkCore::next_transmission(uint32_t now_ms, Transmission *out) {
@@ -131,10 +136,13 @@ bool LinkCore::next_transmission(uint32_t now_ms, Transmission *out) {
   *out = Transmission{};
   size_t first = encode_frame(next.request.data, next.request.size, false, out->bytes, sizeof(out->bytes));
   if (first == 0) {
+    // enqueue() bounds the size, so this should not happen. Fail the request rather than
+    // drop it: whoever queued it is waiting for a completion.
+    this->fail(next);
     return false;
   }
   out->size = first;
-  if (this->timing_.repeat_short && next.request.size == 2) {
+  if (this->timing_.repeat_short && next.delivery != Delivery::ONCE && next.request.size == 2) {
     // The second copy follows with no gap. Encoding both as one byte run keeps it gapless.
     std::memcpy(out->bytes + first, out->bytes, first);
     out->size = first * 2;

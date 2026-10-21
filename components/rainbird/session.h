@@ -24,12 +24,13 @@ struct SessionConfig {
   uint32_t fast_interval_ms{3000};
   uint32_t fast_hold_ms{30000};  // fast polling after a command
   uint32_t refresh_interval_ms{3600000};
-  uint32_t silence_ms{60000};          // listen-only: no frame for this long is "not connected"
-  bool allow_writes{false};            // schedule page writes (21)
-  FieldSet used{};                     // fields that configured entities read
-  uint16_t zone_mask{0};               // zones that read schedule pages, 0 = all
-  uint8_t program_mask{0};             // programs that read schedule pages, 0 = all
-  std::vector<uint16_t> accept_ids{};  // accept_model_ids
+  uint32_t silence_ms{60000};            // listen-only: no frame for this long is "not connected"
+  uint32_t reidentify_after_ms{300000};  // link down this long: start again at identification
+  bool allow_writes{false};              // schedule page writes (21)
+  FieldSet used{};                       // fields that configured entities read
+  uint16_t zone_mask{0};                 // zones that read schedule pages, 0 = all
+  uint8_t program_mask{0};               // programs that read schedule pages, 0 = all
+  std::vector<uint16_t> accept_ids{};    // accept_model_ids
   LinkTiming timing{};
 };
 
@@ -109,11 +110,6 @@ enum class ControlResult : uint8_t {
 
 const char *control_result_text(ControlResult result);
 
-// True when the controller clock and local clock differ by more than max_drift_ms.
-// Both clocks are seconds since midnight. A gap across midnight counts the short way.
-bool clock_drifted(uint8_t controller_h, uint8_t controller_m, uint8_t controller_s, uint8_t local_h, uint8_t local_m,
-                   uint8_t local_s, uint32_t max_drift_ms);
-
 // The bytes of one schedule edit, for the log line that goes out before the write.
 struct PageEditLog {
   uint8_t page{0};
@@ -129,6 +125,9 @@ class Session {
   void start(uint32_t now_ms);
   // PollingComponent::update(). Enqueues a poll cycle unless one is pending.
   void poll(uint32_t now_ms);
+  // listen_only: no frame for silence_ms marks the controller not connected. The hub calls
+  // this on its own timer, because with `update_interval: never` poll() never runs.
+  void check_silence(uint32_t now_ms);
   // Timeouts and completions. Call every loop before next_transmission().
   void tick(uint32_t now_ms);
   bool next_transmission(uint32_t now_ms, Transmission *out);
@@ -159,6 +158,11 @@ class Session {
   // D12: control and write commands are allowed only for an accepted model id.
   bool writes_permitted() const { return this->writes_permitted_; }
 
+  // Changes with every complete clock reading (4C, or 10 then 12), so the caller can act once
+  // per reading. 0 until the first. The values are in state(); clock_read_at() is when it arrived.
+  uint32_t clock_serial() const { return this->clock_serial_; }
+  uint32_t clock_read_at() const { return this->clock_read_at_; }
+
   bool connected_known() const { return this->connected_known_; }
   bool connected() const { return this->connected_; }
   bool response_known() const { return this->response_known_; }
@@ -172,8 +176,8 @@ class Session {
   void clear_changed();
 
  private:
-  // retries < 0 uses LinkTiming::retries. A command passes 0.
-  void enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail = 0, int retries = -1);
+  bool enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail = 0,
+               Delivery delivery = Delivery::NORMAL);
   void follow_up_(uint32_t now_ms);
   bool enqueue_command_(const ByteBuf &request, uint32_t now_ms);
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
@@ -182,13 +186,15 @@ class Session {
   void handle_page_(const Completion &done);
   void enqueue_list(const RequestList &list, Priority priority, TagKind kind, size_t *count = nullptr);
   void identify();
+  void restart_();
+  void note_clock_reading_(uint32_t at_ms);
   void handle(const Completion &done, uint32_t now_ms);
   void finish_probes(uint32_t now_ms);
   void begin_running(uint32_t now_ms);
   bool schedule_due(uint32_t now_ms) const;
   void read_schedule(uint32_t now_ms, Priority priority, size_t *count);
   void note_unsupported(uint8_t opcode);
-  void set_connected(bool connected);
+  void set_connected(bool connected, uint32_t now_ms);
   bool watering() const;
 
   const Model &model_;
@@ -214,6 +220,7 @@ class Session {
 
   bool connected_known_{false};
   bool connected_{false};
+  uint32_t down_since_{0};
   bool response_known_{false};
   uint32_t response_ms_{0};
   uint32_t last_link_errors_{0};
@@ -221,6 +228,10 @@ class Session {
   bool frame_seen_{false};
   bool identity_changed_{false};
   bool diagnostics_changed_{false};
+  uint32_t clock_serial_{0};
+  uint32_t clock_read_at_{0};
+  bool time_pending_{false};  // a 10 reply waiting for its 12
+  uint32_t time_at_{0};
 
   enum class EditStep : uint8_t { READING, WRITING, CONFIRMING };
 

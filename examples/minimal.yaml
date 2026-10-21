@@ -1,7 +1,7 @@
 # Smallest config that validates, on an original ESP32.
 # This checks out the component from the working tree. A published config uses
 # source: github://sjwright/rainbird-esphome instead of the local path.
-# Flashing this does not run irrigation: the controller link is not built yet.
+# Flashed, it polls the controller and gives each zone a valve switch and a run duration.
 
 esphome:
   name: rainbird-minimal

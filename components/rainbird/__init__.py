@@ -170,9 +170,15 @@ def _bare_mapping(schema):
     return validator
 
 
+# Both clocks read in whole seconds, and a set lands a fraction of a second late, so a
+# limit under a few seconds would set the clock on every reading.
+MIN_MAX_DRIFT = cv.TimePeriod(seconds=5)
+
 CLOCK_SCHEMA = cv.Schema(
     {
-        cv.Optional(CONF_MAX_DRIFT, default="30s"): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_MAX_DRIFT, default="30s"): cv.All(
+            cv.positive_time_period_milliseconds, cv.Range(min=MIN_MAX_DRIFT)
+        ),
     }
 )
 SCHEDULE_SCHEMA = cv.Schema(
@@ -370,6 +376,9 @@ async def build_entity(parent, kind: EntityKind, entity_config, zone, program, i
     if kind.domain in ("switch", "number"):
         # Controller-backed switches and numbers also show what the controller reports.
         cg.add(getattr(parent, f"add_{kind.domain}")(var))
+    elif kind.domain == "button":
+        # Buttons show nothing, but some need fields polled: advance reads the queue list.
+        cg.add(parent.add_button(var))
     elif kind.domain == "select":
         cg.add(parent.add_select(var))
     elif kind.kind_id == KindId.START_TIME:
@@ -423,7 +432,8 @@ async def _zone_action_to_code(config, action_id, template_arg, args, queue: boo
     if isinstance(zone, ID):
         cg.add(var.set_zone_entity(await cg.get_variable(zone)))
     else:
-        cg.add(var.set_zone(await cg.templatable(zone, args, cg.uint8)))
+        # int32, so the hub can refuse a template's out-of-range zone instead of wrapping it.
+        cg.add(var.set_zone(await cg.templatable(zone, args, cg.int32)))
     cg.add(var.set_duration_ms(await cg.templatable(config[CONF_DURATION], args, cg.uint32)))
     return var
 

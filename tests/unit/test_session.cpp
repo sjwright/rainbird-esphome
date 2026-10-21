@@ -159,7 +159,10 @@ TEST_CASE("listen_only never transmits and decodes what it hears") {
   CHECK(on);
   CHECK(session.connected());
 
-  session.poll(100 + 60000);
+  // update() may never run in listen_only, so silence has its own check.
+  session.check_silence(100 + 59999);
+  CHECK(session.connected());
+  session.check_silence(100 + 60000);
   CHECK_FALSE(session.connected());
 }
 
@@ -371,13 +374,6 @@ TEST_CASE("a schedule edit changes one field and checks the page that comes back
   CHECK(std::find(fake.requests.begin(), fake.requests.end(), "21 00 10 6A 06 01 00 64 00") != fake.requests.end());
 }
 
-TEST_CASE("clock drift across midnight counts the short gap") {
-  CHECK_FALSE(clock_drifted(12, 0, 0, 12, 0, 20, 30000));
-  CHECK(clock_drifted(12, 0, 0, 12, 0, 31, 30000));
-  CHECK_FALSE(clock_drifted(0, 0, 10, 23, 59, 50, 30000));
-  CHECK(clock_drifted(0, 0, 10, 23, 59, 0, 30000));
-}
-
 TEST_CASE("a new schedule timestamp re-reads the schedule on the next poll") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::FREQUENCY});
@@ -406,4 +402,170 @@ TEST_CASE("a new schedule timestamp re-reads the schedule on the next poll") {
     now = run_session(session, fake, now, 3000);
   }
   CHECK(seen(fake, "20 00 10"));
+}
+
+// The next transmission, once the gap after whatever came before has passed.
+static Transmission next_after_gap(Session &session, uint32_t *now) {
+  Transmission tx;
+  for (int i = 0; i < 200 && !session.next_transmission(*now, &tx); i++) {
+    *now += 5;
+    session.tick(*now);
+  }
+  return tx;
+}
+
+TEST_CASE("a 2-byte command goes as one copy; polls and send_raw keep the LNK2's two") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  uint32_t now = live.now;
+  Control run;
+  run.op = ControlOp::RUN_PROGRAM;
+  run.program = 0;
+  REQUIRE(session.control(run, now) == ControlResult::QUEUED);
+  Transmission tx = next_after_gap(session, &now);
+  CHECK(to_hex(tx.bytes, tx.size) == "F5 F5 1C 02 38 00 3A 1D");
+
+  SessionConfig manual = config_with({Field::ZONES_RUNNING});
+  manual.polling = false;
+  Session raw(live.model, manual);
+  raw.start(0);
+  REQUIRE(raw.send_raw(from_hex("3F 00").data(), 2, 0));
+  REQUIRE(raw.next_transmission(0, &tx));
+  CHECK(to_hex(tx.bytes, tx.size) == "F5 F5 1C 02 3F 00 41 1D F5 F5 1C 02 3F 00 41 1D");
+}
+
+TEST_CASE("commands in a row share one follow-up poll, sent after the last of them") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  Control time;
+  time.op = ControlOp::SET_TIME;
+  time.hour = 12;
+  Control date;
+  date.op = ControlOp::SET_DATE;
+  date.day = 21;
+  date.month = 10;
+  date.year = 2026;
+  REQUIRE(session.control(time, now) == ControlResult::QUEUED);
+  REQUIRE(session.control(date, now) == ControlResult::QUEUED);
+  FakeController fake = FakeController::upgraded_tm2();
+  fake.replies["11 0C 00 00"] = "01 11";
+  fake.replies["13 15 A7 EA"] = "01 13";
+  fake.requests.clear();
+  now = run_session(session, fake, now, 5000);
+  CHECK(fake.requests == std::vector<std::string>{"11 0C 00 00", "13 15 A7 EA", "3F 00"});
+}
+
+TEST_CASE("each complete clock reading moves the clock serial on once") {
+  EspTm2Model model;
+  SessionConfig config = config_with({Field::CLOCK});
+  config.listen_only = true;
+  Session session(model, config);
+  session.start(0);
+  CHECK(session.clock_serial() == 0);
+
+  auto cc = from_hex("CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00");
+  session.on_frame(cc.data(), cc.size(), 100);
+  CHECK(session.clock_serial() == 1);
+  CHECK(session.clock_read_at() == 100);
+
+  // Without 4C: 10, then 12. The pair is one reading, timed by the 10.
+  auto time = from_hex("90 0C 0A 28");
+  auto date = from_hex("92 13 A7 EA");
+  session.on_frame(time.data(), time.size(), 200);
+  CHECK(session.clock_serial() == 1);
+  session.on_frame(date.data(), date.size(), 300);
+  CHECK(session.clock_serial() == 2);
+  CHECK(session.clock_read_at() == 200);
+
+  // A 12 on its own is not a reading.
+  session.on_frame(date.data(), date.size(), 400);
+  CHECK(session.clock_serial() == 2);
+}
+
+TEST_CASE("a schedule page that timed out is read again on the next poll; a NAKed one is not") {
+  EspTm2Model model;
+  SessionConfig config = config_with({Field::FREQUENCY, Field::START_TIME});
+  config.program_mask = 0x1;
+  Session session(model, config);
+  FakeController fake = FakeController::upgraded_tm2();
+  fake.replies.erase("20 00 10");         // silent: the read times out
+  fake.replies["20 00 60"] = "00 20 01";  // not supported
+  session.start(0);
+  uint32_t now = run_session(session, fake, 0, 20000);
+  REQUIRE(session.stage() == SessionStage::RUNNING);
+
+  fake.replies["20 00 10"] = "A0 00 10 6A 06 01 00 64 01";
+  fake.requests.clear();
+  session.poll(now);
+  now = run_session(session, fake, now, 5000);
+  CHECK(seen(fake, "20 00 10"));
+  CHECK(seen(fake, "20 00 60"));  // the whole schedule is read again, NAKed page included
+
+  fake.requests.clear();
+  session.poll(now);
+  run_session(session, fake, now, 5000);
+  CHECK_FALSE(seen(fake, "20 00 10"));
+  CHECK_FALSE(seen(fake, "20 00 60"));
+}
+
+TEST_CASE("a confirming read the queue refuses ends the edit, and the next edit can start") {
+  SessionConfig config = config_with({Field::FREQUENCY});
+  config.allow_writes = true;
+  config.program_mask = 0x1;
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM, now) == ControlResult::QUEUED);
+
+  Transmission tx = next_after_gap(session, &now);
+  REQUIRE(to_hex(first_payload(tx).data(), first_payload(tx).size()) == "20 00 10");
+  now += tx.first_copy_ms + 30;
+  auto page = from_hex("A0 00 10 6A 06 01 00 64 01");
+  session.on_frame(page.data(), page.size(), now);
+  tx = next_after_gap(session, &now);
+  REQUIRE(to_hex(first_payload(tx).data(), first_payload(tx).size()) == "21 00 10 6A 06 01 00 64 00");
+
+  // The write is in flight. Fill the queue so the confirming read has nowhere to go.
+  auto model_query = from_hex("02");
+  while (session.send_raw(model_query.data(), 1, now)) {
+  }
+  now += tx.first_copy_ms + 30;
+  auto ack = from_hex("01 21");
+  session.on_frame(ack.data(), ack.size(), now);
+  const char *reason = nullptr;
+  REQUIRE(session.take_edit_failure(&reason));
+  CHECK(std::string(reason).find("confirming read") != std::string::npos);
+
+  FakeController fake = FakeController::upgraded_tm2();
+  now = run_session(session, fake, now, 20000);
+  CHECK(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM, now) == ControlResult::QUEUED);
+}
+
+TEST_CASE("after five minutes down, the session starts again at identification") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  REQUIRE(session.writes_permitted());
+  FakeController silent;
+  for (int i = 0; i < 3; i++) {
+    session.poll(now);
+    now = run_session(session, silent, now, 5000);
+  }
+  REQUIRE_FALSE(session.connected());
+
+  session.poll(now + 60000);
+  CHECK(session.stage() == SessionStage::RUNNING);
+  now = run_session(session, silent, now + 60000, 5000);
+
+  session.poll(now + 300000);
+  CHECK(session.stage() == SessionStage::IDENTIFY);
+  CHECK_FALSE(session.writes_permitted());
+  CHECK_FALSE(session.capabilities().combined);
+
+  FakeController fake = FakeController::upgraded_tm2();
+  run_session(session, fake, now + 300000, 20000);
+  CHECK(session.stage() == SessionStage::RUNNING);
+  CHECK(session.writes_permitted());
+  CHECK(session.capabilities().combined);
 }

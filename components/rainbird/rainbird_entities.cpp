@@ -119,9 +119,10 @@ void RainbirdSelect::set_binding(uint8_t kind, uint8_t zone, uint8_t program, ui
 }
 
 void RainbirdSelect::control(size_t index) {
+  // Publish nothing. Queued is not written: the confirming read publishes the new option, and a
+  // failed edit leaves the controller's option showing.
   WriteIntent intent{this->kind_, this->zone_, this->program_, this->index_, static_cast<float>(index)};
-  if (this->get_parent()->submit(intent))
-    this->publish_state(index);
+  this->get_parent()->submit(intent);
 }
 
 }  // namespace esphome::rainbird
@@ -157,29 +158,16 @@ void RainbirdTime::control(const datetime::TimeCall &call) {
     return;
   uint8_t hour = call.get_hour().value_or(this->hour_);
   uint8_t minute = call.get_minute().value_or(this->minute_);
-  uint8_t second = call.get_second().value_or(this->second_);
-  bool had = this->has_state();
-  uint8_t prev_hour = this->hour_;
-  uint8_t prev_minute = this->minute_;
-  uint8_t prev_second = this->second_;
-  this->hour_ = hour;
-  this->minute_ = minute;
-  this->second_ = second;
-  // Off slots stay in RAM. Writing FFFF and a time are different page fields, and the
-  // enable switch is what turns a slot on, using whatever time is here.
   if (this->get_parent()->start_slot_is_on(this->program_, this->index_)) {
+    // Publish nothing, as with the switches: the confirming read shows the new time, and a
+    // failed edit leaves the controller's time showing.
     WriteIntent intent{this->kind_, this->zone_, this->program_, this->index_, static_cast<float>(hour * 60 + minute)};
-    if (!this->get_parent()->submit(intent)) {
-      if (!had)
-        return;
-      this->hour_ = prev_hour;
-      this->minute_ = prev_minute;
-      this->second_ = prev_second;
-      this->publish_state();
-      return;
-    }
+    this->get_parent()->submit(intent);
+    return;
   }
-  this->publish_state();
+  // An off slot has no time on the controller (the page holds FFFF). The time stays here, and
+  // the slot's enable switch writes it when it turns the slot on.
+  this->show(hour, minute);
 }
 
 }  // namespace esphome::rainbird

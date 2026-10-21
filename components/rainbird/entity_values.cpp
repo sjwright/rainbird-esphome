@@ -29,6 +29,7 @@ void add_fields(EntityKind kind, FieldSet *used) {
       used->add(Field::ACTIVE_ZONE);
       break;
     case EntityKind::QUEUE:
+    case EntityKind::ADVANCE:  // the zone to advance to comes from the queue list (3B 01)
       used->add(Field::QUEUE);
       break;
     case EntityKind::RAIN_SENSOR:
@@ -45,7 +46,6 @@ void add_fields(EntityKind kind, FieldSet *used) {
     case EntityKind::PROGRAM_START:  // command only
     case EntityKind::QUEUE_ZONE:
     case EntityKind::STOP:
-    case EntityKind::ADVANCE:
     case EntityKind::TEST_ALL:
     case EntityKind::SYNC_CLOCK:
     case EntityKind::REFRESH:

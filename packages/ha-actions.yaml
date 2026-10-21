@@ -8,17 +8,36 @@ api:
         zone: int
         minutes: int
       then:
-        - rainbird.zone.start:
-            zone: !lambda "return zone;"
-            duration: !lambda "return minutes * 60 * 1000;"
+        # Checked here, before the multiply: a negative or huge int would wrap.
+        - if:
+            condition:
+              lambda: "return minutes >= 1 && minutes <= 255;"
+            then:
+              - rainbird.zone.start:
+                  zone: !lambda "return zone;"
+                  duration: !lambda "return minutes * 60000;"
+            else:
+              - logger.log:
+                  level: WARN
+                  format: "run_zone: minutes must be 1 to 255, not %d"
+                  args: [minutes]
     - action: queue_zone
       variables:
         zone: int
         minutes: int
       then:
-        - rainbird.zone.queue:
-            zone: !lambda "return zone;"
-            duration: !lambda "return minutes * 60 * 1000;"
+        - if:
+            condition:
+              lambda: "return minutes >= 1 && minutes <= 255;"
+            then:
+              - rainbird.zone.queue:
+                  zone: !lambda "return zone;"
+                  duration: !lambda "return minutes * 60000;"
+            else:
+              - logger.log:
+                  level: WARN
+                  format: "queue_zone: minutes must be 1 to 255, not %d"
+                  args: [minutes]
     - action: set_rain_delay
       variables:
         days: int

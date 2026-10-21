@@ -244,7 +244,7 @@ rainbird:
   # Time source, used for clock sync and to convert controller-local timestamps
   time_id: ha_time
   clock_sync:
-    max_drift: 30s           # also synced at boot and after a UTC-offset change
+    max_drift: 30s           # checked on every clock reading; daylight saving shows as drift
 
   schedule:
     refresh_interval: 1h     # re-read pages; also re-read when 4A 01 changes
@@ -484,14 +484,14 @@ api:
 | `update_interval` | time | `15s` | Idle poll cycle (section 6.4) |
 | `valve_switch_mode` | `start` / `queue` | `start` | Whether turning a zone switch on sends `39` or `4B`. Also changes what "off" does (6.5). |
 | `time_id` | ID of `time` | – | Needed by `clock_sync` and by the `schedule_changed` sensor |
-| `clock_sync.max_drift` | time | `30s` | Sync when the controller drifts further than this. Also syncs at boot and after a UTC-offset change. Needs `time_id`. |
+| `clock_sync.max_drift` | time | `30s` | Sync when the controller drifts further than this, at least 5 s. Checked on every clock reading, from boot on; a UTC-offset change moves local time an hour, so it shows as drift. Needs `time_id`. |
 | `schedule.refresh_interval` | time | `1h` | Full re-read of the schedule pages that configured entities use. The `4A 01` timestamp triggers re-reads in between. |
 | `schedule.allow_writes` | bool | `false` | Lets schedule entities write `21 …` pages |
 | `experimental` | bool | `false` | Allows `49`, `3A`, `42` and `rainbird.send_raw` |
 | `zone_defaults`, `zones` | see 4.2 | all 12 zones | `zones: []` creates none |
 | `program_defaults`, `programs` | see 4.3 | all programs | `programs: []` creates none |
 | `on_nak` | automation | | Variables `command`, `code` |
-| `on_frame` | automation | | Variable `payload` (`std::vector<uint8_t>`) for every valid reply |
+| `on_frame` | automation | | Variable `payload` (`std::vector<uint8_t>`) for every valid reply. The monitor receiver's requests are only logged. |
 
 **Internal constants, not options.** These start at the values below. Phase 2
 measures the real behaviour, then the constants are fixed. Only one that turns
@@ -500,8 +500,8 @@ out to need tuning per installation would become an option.
 | Constant | Initial value | Notes |
 |----------|---------------|-------|
 | Request timeout | 400 ms | From the end of the first copy of a request. The longest reply (42 bytes) is about 140 ms on the wire, plus about 30 ms of controller turnaround. |
-| Retries | 2 | For timeouts and bad frames. A NAK is never retried. `send_raw` is sent once, so a lost reply cannot run a command the controller already acted on. |
-| Duplicate 2-byte requests | on | Copies the LNK2 habit (SPEC 2.3). Phase 2 A/B-tests whether it's needed. |
+| Retries | 2 | For timeouts and bad frames on reads. A NAK is never retried. Commands, schedule writes and `send_raw` are never retried, so a lost reply cannot run a command the controller already acted on. |
+| Duplicate 2-byte requests | on | Copies the LNK2 habit (SPEC 2.3) for reads and `send_raw`. Commands and schedule writes go as one copy, because the controller may act on each. Phase 2 A/B-tests whether it's needed. |
 | Fast poll interval | 3 s | While watering, and for 30 s after a command |
 | Gap between transactions | 20 ms | |
 | Receive polarity | auto, per receiver | Locked separately for each receiver (6.1) |
@@ -1045,8 +1045,12 @@ across bursts.
 - **Duplicate replies.** A second identical reply within the window is
   dropped and counted, which answers SPEC question 5.
 - **Errors.** A timeout or bad frame is retried, then counted as a link
-  error. `send_raw` is sent once (4.1). Three failures in a row set
-  `connected` off, and polling backs off.
+  error. Commands and schedule writes go as one copy and are never retried:
+  the controller may act on every copy it hears, and a lost reply does not
+  mean it did nothing. `send_raw` is never retried either (4.1). Three
+  failures in a row set `connected` off, and polling backs off. After five
+  minutes down, the hub starts again at step 1 of the startup below, in case
+  the controller was replaced or reflashed.
 - **NAKs** are logged and raise `on_nak`. The command is marked unsupported
   for the session when `nak_is_unsupported(code)` is true (bit 0 set). A NAK
   without bit 0 is logged as a likely encoding bug.
@@ -1054,7 +1058,8 @@ across bursts.
   cycle.
 - **Follow-up reads** after any ACKed control command are the model's *short
   poll* (6.4), the same list the fast poll uses. That way a `0005` without
-  `4C` gets its own fallback reads. The fast poll then runs for 30 s.
+  `4C` gets its own fallback reads. Commands in a row, such as the clock's
+  time and date, share one follow-up. The fast poll then runs for 30 s.
   Entities show the confirmed state within about 500 ms; nothing is
   published optimistically.
 - The `remaining_time` countdown uses `set_interval` with a `constexpr`
@@ -1150,8 +1155,13 @@ config validation fails without it. Whether the controller really stores
 local time is still an open question (SPEC 8.11); phase 3 checks it.
 
 **Clock sync** stays built in, because only C++ can compare the controller
-clock against `time_id` before writing. Users who want more frequent syncs
-can add `time: on_time_sync:` → `button.press` on `sync_clock`.
+clock against `time_id` before writing. Each new reading is compared once,
+moved on by its age, with date and time as one instant, so a few seconds
+either side of midnight never looks like a day. A sync writes `11` and then
+`13`; it waits while local midnight is within 5 s, so the controller cannot
+pass midnight between the two. After a sync, the next one waits a minute.
+Users who want more frequent syncs can add `time: on_time_sync:` →
+`button.press` on `sync_clock`.
 
 **Rain sensor.** Polarity is unconfirmed (SPEC 8.1). The binary sensor
 publishes `value != 0` as on. Users can add `filters: [invert]`, and the
@@ -1292,7 +1302,7 @@ tag becomes `[wire]`, and the default or `experimental` gate is adjusted.
 |------|------------|
 | The controller is fussy about transmit timing or the idle level | RMT gives exact timing. Phase 1 measures the LNK2's real waveform first, and `inverted:` on the transmitter pin handles polarity. |
 | Optocoupler edges are slow enough to skew pulse widths | ±30 % classification. Use an external pull-up of a few kΩ rather than the internal ~45 kΩ one. |
-| RMT memory runs out on an original ESP32 (512 symbols) | Receive 384 + transmit 64 fits. The sniffer setup (receive 384 + monitor 128, no transmit) also fits. Final validation adds up every RMT user's `rmt_symbols` and fails early. S3, C3 and C6 don't have this constraint, thanks to RX ping-pong. |
+| RMT memory runs out on an original ESP32 (512 symbols) | Receive 384 + transmit 64 fits. A monitor receiver needs 384 too, so the sniffer setup with two receivers needs an S3. Final validation adds up every RMT user's `rmt_symbols` and fails early. S3, C3 and C6 don't have this constraint, thanks to RX ping-pong. |
 | `remote_receiver` or `remote_transmitter` change behaviour in a future ESPHome | CI against `min_version`, the latest stable release and weekly `dev`. Final validation pins the settings we depend on. Replay tests use the receiver's own raw format, so a format change shows up immediately. |
 | A bad schedule write corrupts the controller's programs | Writes are off by default. The model gate (D12) applies. Every write goes through one read-modify-write routine with confirmation and hex logging, and each page type is tested on its own. |
 | Generated entity count is high (12 zones × up to 7, 3 programs × up to 21) | Only valve and duration per zone, and run button and seasonal adjust per program, are generated by default. Everything else is opt-in. |

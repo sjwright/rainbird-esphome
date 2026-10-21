@@ -106,6 +106,16 @@ TEST_CASE("identification and clock replies") {
   CHECK(day == 0x13);
   CHECK(my == 0xA7);
   CHECK(yy == 0xEA);
+
+  // Any date bytes parse; the model decides what an impossible date means.
+  bytes = from_hex("92 00 07 EA");
+  REQUIRE(parse_date(bytes.data(), bytes.size(), &packed));
+  CHECK_FALSE(date_valid(packed));
+  CombinedState impossible;
+  bytes = from_hex("CC 14 0B 23 08 07 E7 00 03 00 01 FF FF 00 00 00");
+  REQUIRE(parse_combined_state(bytes.data(), bytes.size(), &impossible));
+  CHECK_FALSE(date_valid(impossible.date));
+  CHECK(impossible.rain_delay_days == 3);
 }
 
 TEST_CASE("ack, nak and live status") {

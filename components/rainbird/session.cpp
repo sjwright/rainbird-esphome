@@ -18,6 +18,9 @@ TagKind tag_kind(uint32_t value) { return static_cast<TagKind>((value >> 8) & 0x
 // Unsigned elapsed time is correct across the millis() wrap and any idle spell.
 bool elapsed(uint32_t now, uint32_t from, uint32_t delay) { return now - from >= delay; }
 
+// Without 4C the clock is read as 10, then 12. A 12 this soon after a 10 completes the reading.
+constexpr uint32_t CLOCK_PAIR_MS = 5000;
+
 }  // namespace
 
 Session::Session(const Model &model, const SessionConfig &config)
@@ -28,9 +31,8 @@ void Session::clear_changed() {
   this->diagnostics_changed_ = false;
 }
 
-void Session::enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail, int retries) {
-  uint8_t limit = retries < 0 ? this->config_.timing.retries : static_cast<uint8_t>(retries);
-  this->link_.enqueue(request, priority, tag(kind, detail), limit);
+bool Session::enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail, Delivery delivery) {
+  return this->link_.enqueue(request, priority, tag(kind, detail), delivery);
 }
 
 const char *control_result_text(ControlResult result) {
@@ -55,20 +57,9 @@ const char *control_result_text(ControlResult result) {
   return "refused";
 }
 
-bool clock_drifted(uint8_t controller_h, uint8_t controller_m, uint8_t controller_s, uint8_t local_h, uint8_t local_m,
-                   uint8_t local_s, uint32_t max_drift_ms) {
-  uint32_t controller = controller_h * 3600u + controller_m * 60u + controller_s;
-  uint32_t local = local_h * 3600u + local_m * 60u + local_s;
-  uint32_t gap = controller > local ? controller - local : local - controller;
-  if (gap > 12u * 3600u) {
-    gap = 24u * 3600u - gap;
-  }
-  return gap * 1000u > max_drift_ms;
-}
-
 void Session::enqueue_list(const RequestList &list, Priority priority, TagKind kind, size_t *count) {
   for (uint8_t i = 0; i < list.count; i++) {
-    if (this->link_.enqueue(list.items[i], priority, tag(kind, 0)) && count != nullptr) {
+    if (this->enqueue(list.items[i], priority, kind) && count != nullptr) {
       (*count)++;
     }
   }
@@ -92,13 +83,30 @@ void Session::identify() {
   this->enqueue(request_model(), Priority::FOLLOW_UP, TagKind::IDENTIFY);
 }
 
+void Session::restart_() {
+  // What was learned at startup belongs to the controller that answered then.
+  if (this->edit_.active) {
+    this->fail_edit_("the controller stopped answering");
+  }
+  this->caps_ = Capabilities{};
+  this->writes_permitted_ = false;
+  this->schedule_read_once_ = false;
+  this->schedule_stale_ = false;
+  this->event_known_ = false;
+  this->poll_count_ = 0;
+  this->identify();
+}
+
+void Session::check_silence(uint32_t now_ms) {
+  if (this->stage_ == SessionStage::PASSIVE && this->frame_seen_ &&
+      elapsed(now_ms, this->last_frame_at_, this->config_.silence_ms)) {
+    this->set_connected(false, now_ms);
+  }
+}
+
 void Session::poll(uint32_t now_ms) {
   switch (this->stage_) {
     case SessionStage::PASSIVE:
-      if (this->frame_seen_ && elapsed(now_ms, this->last_frame_at_, this->config_.silence_ms)) {
-        this->set_connected(false);
-      }
-      return;
     case SessionStage::MANUAL:
       return;
     case SessionStage::IDLE:
@@ -110,6 +118,13 @@ void Session::poll(uint32_t now_ms) {
       return;
     case SessionStage::RUNNING:
       break;
+  }
+  // A controller gone this long may not be the same one when it answers again: it could have
+  // been replaced or reflashed. Start over, so its model id, probes and schedule are read again.
+  if (this->connected_known_ && !this->connected_ &&
+      elapsed(now_ms, this->down_since_, this->config_.reidentify_after_ms)) {
+    this->restart_();
+    return;
   }
   // One cycle at a time. A cycle still queued or in flight is not doubled up.
   if (this->link_.queued(Priority::POLL) > 0) {
@@ -139,10 +154,16 @@ bool Session::schedule_due(uint32_t now_ms) const {
 void Session::read_schedule(uint32_t now_ms, Priority priority, size_t *count) {
   RequestList pages;
   this->model_.schedule_pages(this->config_.used, this->config_.zone_mask, this->config_.program_mask, &pages);
-  this->enqueue_list(pages, priority, TagKind::SCHEDULE, count);
+  size_t queued = 0;
+  this->enqueue_list(pages, priority, TagKind::SCHEDULE, &queued);
+  if (count != nullptr) {
+    *count += queued;
+  }
   this->last_schedule_read_ = now_ms;
   this->schedule_read_once_ = true;
-  this->schedule_stale_ = false;
+  // A page the queue refused is read again on the next poll, not a refresh_interval later.
+  // A page read that times out does the same (handle()).
+  this->schedule_stale_ = queued < pages.count;
 }
 
 void Session::tick(uint32_t now_ms) {
@@ -161,11 +182,18 @@ bool Session::next_transmission(uint32_t now_ms, Transmission *out) {
   return this->link_.next_transmission(now_ms, out);
 }
 
+void Session::note_clock_reading_(uint32_t at_ms) {
+  this->clock_read_at_ = at_ms;
+  if (++this->clock_serial_ == 0) {
+    this->clock_serial_ = 1;
+  }
+}
+
 void Session::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
   this->last_frame_at_ = now_ms;
   this->frame_seen_ = true;
   if (this->stage_ == SessionStage::PASSIVE) {
-    this->set_connected(true);
+    this->set_connected(true, now_ms);
   }
   // Every valid reply updates state, matched or not. In listen_only mode these
   // are the replies to the LNK2's own polls.
@@ -187,6 +215,20 @@ void Session::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
         this->identity_.serial = reply.serial;
         this->identity_.serial_known = true;
         this->identity_changed_ = true;
+        break;
+      case ReplyKind::COMBINED:
+        this->note_clock_reading_(now_ms);
+        break;
+      case ReplyKind::TIME:
+        this->time_pending_ = true;
+        this->time_at_ = now_ms;
+        break;
+      case ReplyKind::DATE:
+        // The pair is one reading, timed by the 10 reply.
+        if (this->time_pending_ && !elapsed(now_ms, this->time_at_, CLOCK_PAIR_MS)) {
+          this->note_clock_reading_(this->time_at_);
+        }
+        this->time_pending_ = false;
         break;
       case ReplyKind::EVENT:
         // A new schedule timestamp means the schedule was edited (SPEC 8.11).
@@ -216,8 +258,8 @@ bool Session::send_raw(const uint8_t *payload, size_t size, uint32_t now_ms) {
   for (size_t i = 0; i < size; i++) {
     request.push(payload[i]);
   }
-  // Once only. If the controller acted and the reply was lost, a retry would run the command again.
-  if (!this->link_.enqueue(request, Priority::USER, tag(TagKind::RAW, 0), 0)) {
+  // Never retried. If the controller acted and the reply was lost, a retry would run the command again.
+  if (!this->enqueue(request, Priority::USER, TagKind::RAW, 0, Delivery::NO_RETRY)) {
     return false;
   }
   this->hold_ = true;
@@ -232,9 +274,12 @@ void Session::note_unsupported(uint8_t opcode) {
   this->model_.note_support(support, &this->caps_);
 }
 
-void Session::set_connected(bool connected) {
+void Session::set_connected(bool connected, uint32_t now_ms) {
   if (!this->connected_known_ || this->connected_ != connected) {
     this->diagnostics_changed_ = true;
+    if (!connected) {
+      this->down_since_ = now_ms;
+    }
   }
   this->connected_known_ = true;
   this->connected_ = connected;
@@ -244,10 +289,10 @@ void Session::handle(const Completion &done, uint32_t now_ms) {
   if (done.outcome == Outcome::FAILED) {
     // Three requests in a row failing after their retries means the link is down.
     if (this->link_.consecutive_failures() >= 3) {
-      this->set_connected(false);
+      this->set_connected(false, now_ms);
     }
   } else {
-    this->set_connected(true);
+    this->set_connected(true, now_ms);
     this->response_known_ = true;
     this->response_ms_ = done.response_ms;
     this->diagnostics_changed_ = true;
@@ -290,6 +335,10 @@ void Session::handle(const Completion &done, uint32_t now_ms) {
       }
       return;
     case TagKind::SCHEDULE:
+      // A NAK is an answer: that page does not exist. A timeout is read again on the next poll.
+      if (done.outcome == Outcome::FAILED) {
+        this->schedule_stale_ = true;
+      }
       if (this->stage_ == SessionStage::SCHEDULE && this->schedule_pending_ > 0 && --this->schedule_pending_ == 0) {
         this->begin_running(now_ms);
       }
@@ -362,8 +411,9 @@ bool Session::enqueue_command_(const ByteBuf &request, uint32_t now_ms) {
   if (request.size == 0) {
     return false;
   }
-  // Once only. The controller may already have acted if the reply is what got lost.
-  if (!this->link_.enqueue(request, Priority::USER, tag(TagKind::CONTROL, request.data[0]), 0)) {
+  // One copy, never retried: the controller may act on every copy it hears, and a lost reply
+  // does not mean it did nothing.
+  if (!this->enqueue(request, Priority::USER, TagKind::CONTROL, request.data[0], Delivery::ONCE)) {
     return false;
   }
   this->hold_ = true;
@@ -374,6 +424,11 @@ bool Session::enqueue_command_(const ByteBuf &request, uint32_t now_ms) {
 void Session::follow_up_(uint32_t now_ms) {
   this->hold_ = true;
   this->hold_from_ = now_ms;
+  // Commands in a row (time, then date) share one follow-up. It still reads after the last
+  // of them, because commands go ahead of FOLLOW_UP.
+  if (this->link_.queued(Priority::FOLLOW_UP) > 0) {
+    return;
+  }
   RequestList list;
   this->model_.short_poll(this->caps_, this->config_.used, &list);
   this->enqueue_list(list, Priority::FOLLOW_UP, TagKind::POLL);
@@ -547,6 +602,9 @@ void Session::fail_edit_(const char *reason) {
   this->edit_.active = false;
   this->edit_.log_ready = false;
   this->edit_failure_ = reason;
+  // A write whose acknowledgement was lost may still have landed. Read the schedule again so
+  // the entities show what the controller holds.
+  this->schedule_stale_ = true;
 }
 
 ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value,
@@ -573,8 +631,7 @@ ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program,
   this->edit_.index = index;
   this->edit_.value = value;
   this->edit_.page = located->page;
-  if (!this->link_.enqueue(request_read_page(located->page), Priority::USER, tag(TagKind::PAGE, located->page),
-                           this->config_.timing.retries)) {
+  if (!this->enqueue(request_read_page(located->page), Priority::USER, TagKind::PAGE, located->page)) {
     this->edit_.active = false;
     return ControlResult::REFUSED_BUSY;
   }
@@ -643,7 +700,7 @@ void Session::handle_page_(const Completion &done) {
     this->edit_.log_ready = true;
     ByteBuf write;
     if (!request_write_page(this->edit_.page, patched, out_size, &write) ||
-        !this->link_.enqueue(write, Priority::USER, tag(TagKind::PAGE, this->edit_.page), 0)) {
+        !this->enqueue(write, Priority::USER, TagKind::PAGE, this->edit_.page, Delivery::ONCE)) {
       this->fail_edit_("the page write could not be queued");
       return;
     }
@@ -651,7 +708,10 @@ void Session::handle_page_(const Completion &done) {
     return;
   }
   // The write was acknowledged. Read the page back before trusting it.
-  this->enqueue(request_read_page(this->edit_.page), Priority::USER, TagKind::PAGE, this->edit_.page);
+  if (!this->enqueue(request_read_page(this->edit_.page), Priority::USER, TagKind::PAGE, this->edit_.page)) {
+    this->fail_edit_("the page was written, but the confirming read could not be queued");
+    return;
+  }
   this->edit_.step = EditStep::CONFIRMING;
 }
 
