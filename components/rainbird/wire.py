@@ -6,7 +6,7 @@ from esphome.const import CONF_ID, CONF_PLATFORM, CONF_RMT_SYMBOLS
 from esphome.core import CORE
 import esphome.final_validate as fv
 
-from .entity_kinds import NO_PROGRAM, NO_ZONE, Scope, Write, platform_keys, resolve_kind
+from .entity_kinds import NO_PROGRAM, NO_ZONE, FanOut, Scope, Write, platform_keys, resolve_kind
 from .models import MODELS
 
 CONF_RECEIVE_SYMBOLS = "receive_symbols"
@@ -270,13 +270,23 @@ def _entry_bindings(entry: dict, domain: str, model) -> list[tuple[tuple[int, in
         kind = resolve_kind(domain, key, zone=zone is not None, program=program is not None)
         if kind is None or kind.write is Write.NONE:
             continue
+        index = 0
+        if kind.fan_out is FanOut.DAY:
+            index = entry.get("day", 0)
+        elif kind.fan_out is FanOut.SLOT and isinstance(entry.get("slot"), int):
+            index = entry["slot"] - 1
+        uses_program = kind.scope is Scope.PROGRAM or kind.fan_out is FanOut.PROGRAM
         binding = (
             int(kind.kind_id),
             zone if kind.scope is Scope.ZONE else NO_ZONE,
-            program_index if kind.scope is Scope.PROGRAM else NO_PROGRAM,
-            0,
+            program_index if uses_program else NO_PROGRAM,
+            index,
         )
         where = f"zone {zone}" if kind.scope is Scope.ZONE else f"program {program}"
+        if kind.fan_out is FanOut.SLOT:
+            where += f" slot {entry.get('slot')}"
+        elif kind.fan_out is FanOut.DAY:
+            where += f" day {index}"
         out.append((binding, f"{domain} {kind.key} for {where}"))
     return out
 
@@ -293,7 +303,7 @@ def _check_duplicates(config: dict, domain: str, hub: dict, model) -> None:
         counts[binding] = counts.get(binding, 0) + 1
         generated_ids[binding] = str(item["config"][CONF_ID])
     full = fv.full_config.get()
-    for domain in ("switch", "number", "button"):
+    for domain in ("switch", "number", "button", "select", "datetime"):
         entries = full.get(domain) or []
         if isinstance(entries, dict):
             entries = [entries]
@@ -338,6 +348,9 @@ def _validate_entity_platform(config: dict, domain: str) -> None:
         raise cv.Invalid(
             f"Program {program} is not valid for {model.name} (programs {', '.join(model.letters)})"
         )
+    slot = config.get("slot")
+    if isinstance(slot, int) and not 1 <= slot <= model.starts:
+        raise cv.Invalid(f"Slot {slot} is outside 1–{model.starts} for {model.name}")
     if domain == "text_sensor" and "schedule_changed" in config and "time_id" not in hub:
         raise cv.Invalid(
             "schedule_changed needs time_id on the rainbird hub: the controller stamps it in "

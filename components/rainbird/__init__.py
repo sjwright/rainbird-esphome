@@ -13,6 +13,7 @@ import esphome.codegen as cg
 # Aliased so the rainbird platform modules don't replace these when they load.
 import esphome.components.binary_sensor as binary_sensor_comp
 import esphome.components.button as button_comp
+import esphome.components.datetime as datetime_comp
 import esphome.components.number as number_comp
 from esphome.components.remote_base import (
     CONF_RECEIVER_ID,
@@ -21,6 +22,7 @@ from esphome.components.remote_base import (
     RemoteReceiverListener,
     RemoteTransmitterBase,
 )
+import esphome.components.select as select_comp
 import esphome.components.sensor as sensor_comp
 import esphome.components.switch as switch_comp
 import esphome.components.text_sensor as text_sensor_comp
@@ -28,6 +30,7 @@ import esphome.components.time as time_comp
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_DATA,
+    CONF_DURATION,
     CONF_ID,
     CONF_INITIAL_VALUE,
     CONF_MODEL,
@@ -40,7 +43,7 @@ from esphome.const import (
 )
 from esphome.core import CORE, ID
 
-from .entity_kinds import KINDS_BY_ID, EntityKind, Write
+from .entity_kinds import FREQUENCY_OPTIONS, KINDS_BY_ID, EntityKind, KindId, Write
 from .errors import ConfigError
 from .expand import expand
 from .models import resolve_model
@@ -53,8 +56,7 @@ MULTI_CONF = True
 DEPENDENCIES = ["remote_receiver"]
 # The domains the hub can generate from zones/programs. sensor and text_sensor
 # entities are only hand-written, so those domains load with their platforms.
-# Later steps add select and datetime as those rows appear.
-AUTO_LOAD = ["switch", "number", "button", "binary_sensor"]
+AUTO_LOAD = ["switch", "number", "button", "binary_sensor", "select", "datetime"]
 
 CONF_RAINBIRD_ID = "rainbird_id"
 CONF_LISTEN_ONLY = "listen_only"
@@ -91,6 +93,18 @@ RainbirdNumber = rainbird_ns.class_(
 RainbirdButton = rainbird_ns.class_(
     "RainbirdButton", button_comp.Button, cg.Parented.template(RainbirdComponent)
 )
+RainbirdSelect = rainbird_ns.class_(
+    "RainbirdSelect", select_comp.Select, cg.Parented.template(RainbirdComponent)
+)
+RainbirdTime = rainbird_ns.class_(
+    "RainbirdTime", datetime_comp.TimeEntity, cg.Parented.template(RainbirdComponent)
+)
+RainbirdDateTime = rainbird_ns.class_(
+    "RainbirdDateTime", datetime_comp.DateTimeEntity, cg.Parented.template(RainbirdComponent)
+)
+RainbirdZoneAction = rainbird_ns.class_(
+    "RainbirdZoneAction", automation.Action, cg.Parented.template(RainbirdComponent)
+)
 RainbirdReceiver = rainbird_ns.class_("RainbirdReceiver", RemoteReceiverListener)
 RainbirdSendRawAction = rainbird_ns.class_(
     "RainbirdSendRawAction", automation.Action, cg.Parented.template(RainbirdComponent)
@@ -105,6 +119,7 @@ _DOMAIN_CLASS = {
     "switch": RainbirdSwitch,
     "number": RainbirdNumber,
     "button": RainbirdButton,
+    "select": RainbirdSelect,
     "binary_sensor": binary_sensor_comp.BinarySensor,
     "sensor": sensor_comp.Sensor,
     "text_sensor": text_sensor_comp.TextSensor,
@@ -112,7 +127,13 @@ _DOMAIN_CLASS = {
 
 
 def entity_schema(kind: EntityKind):
-    return build_entity_schema(kind, _DOMAIN_CLASS[kind.domain])
+    if kind.kind_id == KindId.START_TIME:
+        cls = RainbirdTime
+    elif kind.kind_id == KindId.CONTROLLER_CLOCK:
+        cls = RainbirdDateTime
+    else:
+        cls = _DOMAIN_CLASS[kind.domain]
+    return build_entity_schema(kind, cls)
 
 
 def program_letter(value):
@@ -327,6 +348,10 @@ async def build_entity(parent, kind: EntityKind, entity_config, zone, program, i
         cg.add(var.set_command(kind.write != Write.LOCAL))
     elif kind.domain == "button":
         var = await button_comp.new_button(entity_config)
+    elif kind.domain == "select":
+        var = await select_comp.new_select(entity_config, options=list(FREQUENCY_OPTIONS))
+    elif kind.domain == "datetime":
+        var = await datetime_comp.new_datetime(entity_config)
     elif kind.domain in ("binary_sensor", "sensor", "text_sensor"):
         # Read-only: the hub publishes to the base class, so there is no entity class
         # and no parent pointer, only a binding the hub reads when state changes.
@@ -336,7 +361,7 @@ async def build_entity(parent, kind: EntityKind, entity_config, zone, program, i
             "text_sensor": text_sensor_comp.new_text_sensor,
         }[kind.domain]
         var = await builder(entity_config)
-        cg.add(getattr(parent, f"add_{kind.domain}")(var, int(kind.kind_id), zone, program))
+        cg.add(getattr(parent, f"add_{kind.domain}")(var, int(kind.kind_id), zone, program, index))
         return var
     else:
         raise ValueError(f"No builder for {kind.domain}")
@@ -345,6 +370,12 @@ async def build_entity(parent, kind: EntityKind, entity_config, zone, program, i
     if kind.domain in ("switch", "number"):
         # Controller-backed switches and numbers also show what the controller reports.
         cg.add(getattr(parent, f"add_{kind.domain}")(var))
+    elif kind.domain == "select":
+        cg.add(parent.add_select(var))
+    elif kind.kind_id == KindId.START_TIME:
+        cg.add(parent.add_time(var))
+    elif kind.kind_id == KindId.CONTROLLER_CLOCK:
+        cg.add(parent.add_datetime(var))
     return var
 
 
@@ -370,6 +401,51 @@ async def _add_listener(
     cg.add(listener.set_controller(controller))
     receiver = await cg.get_variable(receiver_id)
     cg.add(receiver.register_listener(listener))
+
+
+def _zone_action_schema():
+    return cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(RainbirdComponent),
+            cv.Required(CONF_ZONE): cv.Any(
+                cv.use_id(RainbirdZone), cv.templatable(cv.int_range(min=1, max=22))
+            ),
+            cv.Required(CONF_DURATION): cv.templatable(cv.positive_time_period_milliseconds),
+        }
+    )
+
+
+async def _zone_action_to_code(config, action_id, template_arg, args, queue: bool):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_queue(queue))
+    zone = config[CONF_ZONE]
+    if isinstance(zone, ID):
+        cg.add(var.set_zone_entity(await cg.get_variable(zone)))
+    else:
+        cg.add(var.set_zone(await cg.templatable(zone, args, cg.uint8)))
+    cg.add(var.set_duration_ms(await cg.templatable(config[CONF_DURATION], args, cg.uint32)))
+    return var
+
+
+@automation.register_action(
+    "rainbird.zone.start",
+    RainbirdZoneAction,
+    _zone_action_schema(),
+    synchronous=True,
+)
+async def zone_start_to_code(config, action_id, template_arg, args):
+    return await _zone_action_to_code(config, action_id, template_arg, args, False)
+
+
+@automation.register_action(
+    "rainbird.zone.queue",
+    RainbirdZoneAction,
+    _zone_action_schema(),
+    synchronous=True,
+)
+async def zone_queue_to_code(config, action_id, template_arg, args):
+    return await _zone_action_to_code(config, action_id, template_arg, args, True)
 
 
 @automation.register_action(

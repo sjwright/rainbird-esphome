@@ -230,6 +230,154 @@ TEST_CASE("a poll cycle is not doubled while one is still pending") {
   CHECK(std::count(fake.requests.begin(), fake.requests.end(), "3F 00") == 1);
 }
 
+struct Running {
+  EspTm2Model model;
+  Session session;
+  uint32_t now{0};
+
+  explicit Running(SessionConfig config) : session(model, config) {
+    FakeController fake = FakeController::upgraded_tm2();
+    this->session.start(0);
+    this->now = run_session(this->session, fake, 0, 10000);
+  }
+};
+
+TEST_CASE("a zone run is sent once, then a short poll follows the ack") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  REQUIRE(live.session.stage() == SessionStage::RUNNING);
+  REQUIRE(live.session.writes_permitted());
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  FakeController fake;
+  Control run;
+  run.op = ControlOp::RUN_ZONE;
+  run.zone = 1;
+  run.value = 6;
+  REQUIRE(session.control(run, now) == ControlResult::QUEUED);
+  now = run_session(session, fake, now, 5000);
+  CHECK(fake.requests == std::vector<std::string>{"39 00 01 06"});
+
+  fake.replies["39 00 01 06"] = "01 39";
+  fake.requests.clear();
+  REQUIRE(session.control(run, now) == ControlResult::QUEUED);
+  now = run_session(session, fake, now, 5000);
+  REQUIRE(fake.requests.size() >= 2);
+  CHECK(fake.requests[0] == "39 00 01 06");
+  CHECK(fake.requests[1] == "3F 00");
+}
+
+TEST_CASE("turning a zone off stops only when that zone is running") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  Control off;
+  off.op = ControlOp::STOP_ZONE;
+  // The scripted poll leaves zone 1 running and the rest off.
+  off.zone = 2;
+  CHECK(session.control(off, now) == ControlResult::REFUSED_NOT_RUNNING);
+  off.zone = 1;
+  FakeController fake;
+  REQUIRE(session.control(off, now) == ControlResult::QUEUED);
+  run_session(session, fake, now, 5000);
+  CHECK(fake.requests == std::vector<std::string>{"40"});
+}
+
+TEST_CASE("queue mode advances to the next queued zone when that is allowed") {
+  Running live(config_with({Field::ZONES_RUNNING, Field::QUEUE}));
+  REQUIRE(live.session.capabilities().advance);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  auto running = from_hex("BF 00 01 00 00 00");
+  session.on_frame(running.data(), running.size(), now);
+  auto queued = from_hex("BB 01 21 05 D0 22 04 B0 00 00 00");
+  session.on_frame(queued.data(), queued.size(), now);
+  Control off;
+  off.op = ControlOp::STOP_ZONE;
+  off.zone = 1;
+  off.queue_mode = true;
+  off.experimental = true;
+  FakeController fake;
+  REQUIRE(session.control(off, now) == ControlResult::QUEUED);
+  run_session(session, fake, now, 5000);
+  CHECK(fake.requests == std::vector<std::string>{"42 02"});
+
+  off.experimental = false;
+  fake.requests.clear();
+  REQUIRE(session.control(off, now) == ControlResult::QUEUED);
+  run_session(session, fake, now, 5000);
+  CHECK(fake.requests == std::vector<std::string>{"40"});
+}
+
+TEST_CASE("experimental commands stay off until the config and the probe allow them") {
+  Running live(config_with({Field::IRRIGATION_ENABLED}));
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  // This script answers 04 49 with "not supported" and 04 3A with "supported".
+  CHECK_FALSE(session.capabilities().controller_state);
+  REQUIRE(session.capabilities().test_stations);
+  Control irrigation;
+  irrigation.op = ControlOp::SET_IRRIGATION;
+  irrigation.value = 0;
+  CHECK(session.control(irrigation, now) == ControlResult::REFUSED_EXPERIMENTAL);
+  irrigation.experimental = true;
+  CHECK(session.control(irrigation, now) == ControlResult::REFUSED_UNSUPPORTED);
+
+  Control test_all;
+  test_all.op = ControlOp::TEST_ZONES;
+  test_all.value = 2;
+  CHECK(session.control(test_all, now) == ControlResult::REFUSED_EXPERIMENTAL);
+  test_all.experimental = true;
+  FakeController fake;
+  REQUIRE(session.control(test_all, now) == ControlResult::QUEUED);
+  run_session(session, fake, now, 5000);
+  CHECK(fake.requests == std::vector<std::string>{"3A 02"});
+}
+
+TEST_CASE("a schedule edit changes one field and checks the page that comes back") {
+  SessionConfig config = config_with({Field::FREQUENCY});
+  config.allow_writes = true;
+  config.program_mask = 0x1;
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM, now) == ControlResult::QUEUED);
+
+  FakeController fake;
+  fake.replies["20 00 10"] = "A0 00 10 6A 06 01 00 64 01";
+  now += 25;  // the gap after the poll that left the session idle
+  session.tick(now);
+  Transmission tx;
+  REQUIRE(session.next_transmission(now, &tx));
+  std::vector<uint8_t> request = first_payload(tx);
+  CHECK(to_hex(request.data(), request.size()) == "20 00 10");
+  now += tx.first_copy_ms + fake.turnaround_ms;
+  std::vector<uint8_t> reply = from_hex("A0 00 10 6A 06 01 00 64 01");
+  session.on_frame(reply.data(), reply.size(), now);
+
+  PageEditLog log;
+  REQUIRE(session.take_page_log(&log));
+  CHECK(log.page == 0x10);
+  CHECK(log.before[5] == FREQ_CYCLIC);
+  CHECK(log.after[5] == FREQ_CUSTOM);
+  CHECK(log.before[3] == log.after[3]);
+  CHECK(log.before[4] == log.after[4]);
+
+  // The write is queued and has not been sent. Answer it, then answer the confirm read with the new page.
+  fake.replies["21 00 10 6A 06 01 00 64 00"] = "01 21";
+  fake.replies["20 00 10"] = "A0 00 10 6A 06 01 00 64 00";
+  now = run_session(session, fake, now, 5000);
+  const char *reason = nullptr;
+  CHECK_FALSE(session.take_edit_failure(&reason));
+  CHECK(std::find(fake.requests.begin(), fake.requests.end(), "21 00 10 6A 06 01 00 64 00") != fake.requests.end());
+}
+
+TEST_CASE("clock drift across midnight counts the short gap") {
+  CHECK_FALSE(clock_drifted(12, 0, 0, 12, 0, 20, 30000));
+  CHECK(clock_drifted(12, 0, 0, 12, 0, 31, 30000));
+  CHECK_FALSE(clock_drifted(0, 0, 10, 23, 59, 50, 30000));
+  CHECK(clock_drifted(0, 0, 10, 23, 59, 0, 30000));
+}
+
 TEST_CASE("a new schedule timestamp re-reads the schedule on the next poll") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::FREQUENCY});

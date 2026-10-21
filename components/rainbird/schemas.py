@@ -1,15 +1,32 @@
 """Entity schemas shared by the hub expander and the platform modules."""
 
-from esphome.components import binary_sensor, button, number, sensor, switch, text_sensor
+from esphome.components import (
+    binary_sensor,
+    button,
+    datetime,
+    number,
+    select,
+    sensor,
+    switch,
+    text_sensor,
+)
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_INITIAL_VALUE,
     CONF_RESTORE_VALUE,
     UNIT_MINUTE,
     UNIT_PERCENT,
+    UNIT_SECOND,
 )
 
-from .entity_kinds import EntityKind, Write
+from .entity_kinds import EntityKind, KindId, Write
+
+_NUMBER_UNITS = {
+    "min": UNIT_MINUTE,
+    "%": UNIT_PERCENT,
+    "s": UNIT_SECOND,
+    "d": "d",
+}
 
 
 def _opt(value):
@@ -48,7 +65,9 @@ def build_entity_schema(kind: EntityKind, cls):
             icon=_opt(kind.icon),
         )
     if kind.domain == "number":
-        unit = UNIT_MINUTE if kind.unit == "min" else UNIT_PERCENT
+        unit = _NUMBER_UNITS.get(kind.unit)
+        if unit is None:
+            raise ValueError(f"No unit for {kind.key}")
         minimum, maximum, _step = kind.limits
 
         def _initial(config):
@@ -72,4 +91,12 @@ def build_entity_schema(kind: EntityKind, cls):
             ),
             _initial,
         )
+    if kind.domain == "select":
+        return select.select_schema(
+            cls, icon=_opt(kind.icon), entity_category=_opt(kind.entity_category)
+        )
+    if kind.domain == "datetime":
+        if kind.kind_id == KindId.START_TIME:
+            return datetime.time_schema(cls)
+        return datetime.datetime_schema(cls)
     raise ValueError(f"No schema for domain {kind.domain}")

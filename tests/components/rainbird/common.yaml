@@ -34,6 +34,10 @@ rainbird:
   id: rainbird_controller
   model: ESP-TM2
   time_id: ha_time
+  clock_sync:
+    max_drift: 30s
+  schedule:
+    allow_writes: true
   zones:
     - zone: 1
       id: front_lawn
@@ -43,3 +47,70 @@ rainbird:
       name: Back lawn
   on_nak:
     - logger.log: "Controller NAK"
+
+number:
+  - platform: rainbird
+    rain_delay:
+      id: rain_delay
+      name: Rain delay
+    station_delay:
+      name: Delay between zones
+    test_duration:
+      name: Test duration
+  - platform: rainbird
+    zone: 1
+    program: A
+    run_time:
+      name: Front lawn lawns run time
+
+button:
+  - platform: rainbird
+    stop:
+      id: stop_watering
+      name: Stop watering
+    advance:
+      name: Next zone
+    test_all_zones:
+      name: Test all zones
+    sync_clock:
+      name: Sync controller clock
+    refresh:
+      name: Refresh from controller
+  - platform: template
+    name: Run front lawn
+    on_press:
+      - rainbird.zone.start:
+          id: rainbird_controller
+          zone: front_lawn
+          duration: 6min
+      - rainbird.zone.queue:
+          zone: !lambda "return 2;"
+          duration: !lambda "return 5 * 60 * 1000;"
+
+select:
+  - platform: rainbird
+    program: A
+    frequency:
+      name: Lawns frequency
+
+datetime:
+  - platform: rainbird
+    program: A
+    slot: 1
+    start_time:
+      name: Lawns start 1
+  - platform: rainbird
+    controller_clock:
+      name: Controller clock
+
+switch:
+  - platform: rainbird
+    program: A
+    day: Monday
+    slot: 1
+    watering_day:
+      name: Lawns Monday
+    start_time_enabled:
+      name: Lawns start 1 enabled
+    rain_sensor_bypass:
+      name: Ignore rain sensor

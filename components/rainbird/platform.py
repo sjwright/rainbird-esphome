@@ -30,7 +30,28 @@ from . import (
     entity_schema,
     program_letter,
 )
-from .entity_kinds import KINDS, NO_PROGRAM, NO_ZONE, Scope, platform_keys, resolve_kind
+from .entity_kinds import (
+    DAYS,
+    KINDS,
+    NO_PROGRAM,
+    NO_ZONE,
+    FanOut,
+    Scope,
+    platform_keys,
+    resolve_kind,
+)
+
+CONF_DAY = "day"
+CONF_SLOT = "slot"
+
+
+def _day_index(value):
+    text = cv.string(value).lower()
+    for index, day in enumerate(DAYS):
+        if day.lower() == text:
+            return index
+    names = ", ".join(DAYS)
+    raise cv.Invalid(f"day must be one of {names}")
 
 
 def _resolve(domain: str, key: str, config: dict):
@@ -43,6 +64,7 @@ def _check_scopes(domain: str):
         if not keys:
             raise cv.Invalid(f"Add one of: {', '.join(platform_keys(domain))}")
         uses_zone = uses_program = False
+        needs_day = needs_slot = False
         for key in keys:
             kind = _resolve(domain, key, config)
             if kind is None:
@@ -50,12 +72,25 @@ def _check_scopes(domain: str):
                 need = "zone" if Scope.ZONE in scopes else "program"
                 raise cv.Invalid(f"{key} needs {need}")
             uses_zone |= kind.scope is Scope.ZONE
-            uses_program |= kind.scope is Scope.PROGRAM
+            # Run times are zone entities, one per program, so program: belongs on the entry.
+            uses_program |= kind.scope is Scope.PROGRAM or kind.fan_out is FanOut.PROGRAM
+            needs_day |= kind.fan_out is FanOut.DAY
+            needs_slot |= kind.fan_out is FanOut.SLOT
         # Reject a selector nothing uses rather than ignore it silently.
         if CONF_ZONE in config and not uses_zone:
             raise cv.Invalid(f"zone is not used by {', '.join(keys)}. Remove zone.")
         if CONF_PROGRAM in config and not uses_program:
             raise cv.Invalid(f"program is not used by {', '.join(keys)}. Remove program.")
+        if uses_program and CONF_PROGRAM not in config:
+            raise cv.Invalid(f"{', '.join(keys)} needs program")
+        if needs_day and CONF_DAY not in config:
+            raise cv.Invalid(f"{', '.join(keys)} needs day")
+        if CONF_DAY in config and not needs_day:
+            raise cv.Invalid(f"day is not used by {', '.join(keys)}. Remove day.")
+        if needs_slot and CONF_SLOT not in config:
+            raise cv.Invalid(f"{', '.join(keys)} needs slot")
+        if CONF_SLOT in config and not needs_slot:
+            raise cv.Invalid(f"slot is not used by {', '.join(keys)}. Remove slot.")
         return config
 
     return validator
@@ -66,6 +101,8 @@ def platform_schema(domain: str):
         cv.GenerateID(CONF_RAINBIRD_ID): cv.use_id(RainbirdComponent),
         cv.Optional(CONF_ZONE): cv.int_range(min=1, max=22),
         cv.Optional(CONF_PROGRAM): program_letter,
+        cv.Optional(CONF_DAY): _day_index,
+        cv.Optional(CONF_SLOT): cv.int_range(min=1, max=6),
     }
     for key in platform_keys(domain):
         # Kinds sharing a key (zone and program `running`) share an entity schema.
@@ -81,5 +118,14 @@ async def platform_to_code(domain: str, config: dict) -> None:
             continue
         kind = _resolve(domain, key, config)
         zone = config[CONF_ZONE] if kind.scope is Scope.ZONE else NO_ZONE
-        program = "ABCD".index(config[CONF_PROGRAM]) if kind.scope is Scope.PROGRAM else NO_PROGRAM
-        await build_entity(parent, kind, config[key], zone, program, 0)
+        if kind.scope is Scope.PROGRAM or kind.fan_out is FanOut.PROGRAM:
+            program = "ABCD".index(config[CONF_PROGRAM])
+        else:
+            program = NO_PROGRAM
+        if kind.fan_out is FanOut.DAY:
+            index = config[CONF_DAY]
+        elif kind.fan_out is FanOut.SLOT:
+            index = config[CONF_SLOT] - 1
+        else:
+            index = 0
+        await build_entity(parent, kind, config[key], zone, program, index)

@@ -66,6 +66,9 @@ class RainbirdProgram {
 class RainbirdComponent;
 class RainbirdSwitch;
 class RainbirdNumber;
+class RainbirdSelect;
+class RainbirdTime;
+class RainbirdDateTime;
 
 // One listener per remote_receiver, each with its own polarity lock.
 class RainbirdReceiver : public remote_base::RemoteReceiverListener {
@@ -94,6 +97,12 @@ class RainbirdComponent final : public PollingComponent {
   void dump_config() override;
 
   bool submit(const WriteIntent &intent);
+  // rainbird.zone.start / queue. Minutes are already whole minutes, 1 to 255.
+  bool run_zone(uint8_t zone, uint8_t minutes, bool queue);
+  // Controller clock entity and the sync button. Sends 11 and 13.
+  bool set_controller_clock(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second);
+  // True when the start slot is known to be on. An unknown slot is treated as off.
+  bool start_slot_is_on(uint8_t program, uint8_t index) const;
   // Experimental. Queues one request on the link, with the carrier off. A lost reply is not retried.
   bool send_raw(const uint8_t *data, size_t size);
   bool send_raw(const std::vector<uint8_t> &data) { return this->send_raw(data.data(), data.size()); }
@@ -122,19 +131,29 @@ class RainbirdComponent final : public PollingComponent {
   // Entities that show controller state. Each carries the binding it reads.
   void add_switch(RainbirdSwitch *entity) { this->switches_.push_back(entity); }
   void add_number(RainbirdNumber *entity) { this->numbers_.push_back(entity); }
+#ifdef USE_SELECT
+  void add_select(RainbirdSelect *entity) { this->selects_.push_back(entity); }
+#endif
+#ifdef USE_DATETIME_TIME
+  void add_time(RainbirdTime *entity) { this->times_.push_back(entity); }
+#endif
+#ifdef USE_DATETIME_DATETIME
+  void add_datetime(RainbirdDateTime *entity) { this->datetimes_.push_back(entity); }
+#endif
 #ifdef USE_SENSOR
-  void add_sensor(sensor::Sensor *entity, uint8_t kind, uint8_t zone, uint8_t program) {
-    this->sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program});
+  void add_sensor(sensor::Sensor *entity, uint8_t kind, uint8_t zone, uint8_t program, uint8_t index) {
+    this->sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program, index});
   }
 #endif
 #ifdef USE_BINARY_SENSOR
-  void add_binary_sensor(binary_sensor::BinarySensor *entity, uint8_t kind, uint8_t zone, uint8_t program) {
-    this->binary_sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program});
+  void add_binary_sensor(binary_sensor::BinarySensor *entity, uint8_t kind, uint8_t zone, uint8_t program,
+                         uint8_t index) {
+    this->binary_sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program, index});
   }
 #endif
 #ifdef USE_TEXT_SENSOR
-  void add_text_sensor(text_sensor::TextSensor *entity, uint8_t kind, uint8_t zone, uint8_t program) {
-    this->text_sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program});
+  void add_text_sensor(text_sensor::TextSensor *entity, uint8_t kind, uint8_t zone, uint8_t program, uint8_t index) {
+    this->text_sensors_.push_back({entity, static_cast<EntityKind>(kind), zone, program, index});
   }
 #endif
 
@@ -150,6 +169,14 @@ class RainbirdComponent final : public PollingComponent {
   void after_activity_();
   void publish_changed_();
   void publish_countdown_();
+  void log_page_edit_();
+  void maybe_sync_clock_();
+  void note_binding_(EntityKind kind, uint8_t zone, uint8_t program, SessionConfig *config);
+  bool zone_run_minutes_(uint8_t zone, uint8_t *minutes) const;
+  bool test_minutes_(uint8_t *minutes) const;
+  bool start_minutes_(uint8_t program, uint8_t index, uint16_t *minutes) const;
+  ControlResult queue_control_(const Control &command);
+  bool queue_clock_(uint8_t hour, uint8_t minute, uint8_t second, uint8_t day, uint8_t month, uint16_t year);
   std::string zone_name_(uint8_t zone) const;
   std::string program_name_(uint8_t program) const;
   bool schedule_changed_text_(std::string *out) const;
@@ -159,6 +186,7 @@ class RainbirdComponent final : public PollingComponent {
     EntityKind kind;
     uint8_t zone;
     uint8_t program;
+    uint8_t index;
   };
 
   const char *model_name_{""};
@@ -173,6 +201,15 @@ class RainbirdComponent final : public PollingComponent {
   std::vector<uint16_t> accept_ids_{};
   std::vector<RainbirdSwitch *> switches_{};
   std::vector<RainbirdNumber *> numbers_{};
+#ifdef USE_SELECT
+  std::vector<RainbirdSelect *> selects_{};
+#endif
+#ifdef USE_DATETIME_TIME
+  std::vector<RainbirdTime *> times_{};
+#endif
+#ifdef USE_DATETIME_DATETIME
+  std::vector<RainbirdDateTime *> datetimes_{};
+#endif
 #ifdef USE_SENSOR
   std::vector<Binding<sensor::Sensor>> sensors_{};
 #endif
@@ -189,6 +226,9 @@ class RainbirdComponent final : public PollingComponent {
   bool clock_sync_{false};
   uint32_t max_drift_ms_{30000};
   uint32_t refresh_interval_ms_{3600000};
+  uint32_t clock_sync_at_{0};
+  int32_t clock_offset_s_{0};
+  bool clock_offset_known_{false};
 #ifdef USE_TIME
   time::RealTimeClock *time_{nullptr};
 #endif
@@ -225,6 +265,31 @@ template<typename... Ts> class RainbirdSendRawAction final : public Action<Ts...
   std::vector<uint8_t> (*func_)(Ts...){nullptr};
   const uint8_t *data_{nullptr};
   size_t length_{0};
+};
+
+// rainbird.zone.start and rainbird.zone.queue. Duration is milliseconds and is
+// rounded up to a minute here, because 39 and 4B count whole minutes.
+template<typename... Ts> class RainbirdZoneAction final : public Action<Ts...>, public Parented<RainbirdComponent> {
+ public:
+  TEMPLATABLE_VALUE(uint8_t, zone)
+  TEMPLATABLE_VALUE(uint32_t, duration_ms)
+  void set_zone_entity(RainbirdZone *zone) { this->zone_entity_ = zone; }
+  void set_queue(bool queue) { this->queue_ = queue; }
+
+  void play(const Ts &...x) override {
+    uint8_t zone = this->zone_entity_ != nullptr ? this->zone_entity_->get_zone() : this->zone_.value(x...);
+    uint32_t ms = this->duration_ms_.value(x...);
+    uint32_t minutes = (ms + 59999u) / 60000u;
+    if (minutes < 1)
+      minutes = 1;
+    if (minutes > 255)
+      minutes = 255;
+    this->parent_->run_zone(zone, static_cast<uint8_t>(minutes), this->queue_);
+  }
+
+ protected:
+  RainbirdZone *zone_entity_{nullptr};
+  bool queue_{false};
 };
 
 }  // namespace esphome::rainbird

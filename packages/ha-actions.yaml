@@ -1,0 +1,31 @@
+# Home Assistant actions for a rainbird hub. Include this as a package and give
+# the rain delay number id: rain_delay and the stop button id: stop_watering.
+# Zone numbers and minutes come from the Home Assistant action call.
+api:
+  actions:
+    - action: run_zone
+      variables:
+        zone: int
+        minutes: int
+      then:
+        - rainbird.zone.start:
+            zone: !lambda "return zone;"
+            duration: !lambda "return minutes * 60 * 1000;"
+    - action: queue_zone
+      variables:
+        zone: int
+        minutes: int
+      then:
+        - rainbird.zone.queue:
+            zone: !lambda "return zone;"
+            duration: !lambda "return minutes * 60 * 1000;"
+    - action: set_rain_delay
+      variables:
+        days: int
+      then:
+        - number.set:
+            id: rain_delay
+            value: !lambda "return days;"
+    - action: stop_watering
+      then:
+        - button.press: stop_watering

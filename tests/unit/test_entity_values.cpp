@@ -148,3 +148,40 @@ TEST_CASE("identity and duration text") {
   CHECK(duration_text(1488) == "24:48");
   CHECK(duration_text(4000) == "1:06:40");
 }
+
+TEST_CASE("schedule entities read the page fields they are bound to") {
+  ControllerState state;
+  apply(state, "A0 00 10 6A 06 01 00 64 01");
+  bool on = true;
+  REQUIRE(bool_value(EntityKind::WATERING_DAY, state, NO_ZONE, 0, &on, 1));
+  CHECK_FALSE(on);
+  REQUIRE(bool_value(EntityKind::WATERING_DAY, state, NO_ZONE, 0, &on, 0));
+  CHECK(on);
+  uint8_t frequency = 9;
+  REQUIRE(select_index(EntityKind::FREQUENCY, state, NO_ZONE, 0, &frequency));
+  CHECK(frequency == FREQ_CYCLIC);
+  float number = 0;
+  REQUIRE(number_value(EntityKind::CYCLE_DAYS, state, NO_ZONE, 0, &number));
+  CHECK(number == 6);
+  REQUIRE(number_value(EntityKind::DAYS_UNTIL_NEXT, state, NO_ZONE, 0, &number));
+  CHECK(number == 1);
+  CHECK(kind_changed(EntityKind::WATERING_DAY, state, NO_ZONE, 0, 0));
+
+  apply(state, "A0 00 00 00 00 04 00");
+  REQUIRE(number_value(EntityKind::STATION_DELAY, state, NO_ZONE, NO_PROGRAM, &number));
+  CHECK(number == 0);
+  REQUIRE(number_value(EntityKind::RAIN_DELAY, state, NO_ZONE, NO_PROGRAM, &number));
+  CHECK(number == 4);
+  REQUIRE(bool_value(EntityKind::GLOBAL_BYPASS, state, NO_ZONE, NO_PROGRAM, &on));
+  CHECK_FALSE(on);
+
+  FieldSet used;
+  add_fields(EntityKind::RUN_TIME, &used);
+  add_fields(EntityKind::ZONE_FAULT, &used);
+  add_fields(EntityKind::CONTROLLER_CLOCK, &used);
+  CHECK(used.has(Field::RUN_TIME));
+  CHECK(used.has(Field::ZONE_FAULT));
+  CHECK(used.has(Field::CLOCK));
+  bool fault = true;
+  CHECK_FALSE(bool_value(EntityKind::ZONE_FAULT, state, 1, NO_PROGRAM, &fault));
+}

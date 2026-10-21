@@ -1,6 +1,7 @@
 #include "session.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace esphome::rainbird {
 
@@ -27,8 +28,42 @@ void Session::clear_changed() {
   this->diagnostics_changed_ = false;
 }
 
-void Session::enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail) {
-  this->link_.enqueue(request, priority, tag(kind, detail));
+void Session::enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail, int retries) {
+  uint8_t limit = retries < 0 ? this->config_.timing.retries : static_cast<uint8_t>(retries);
+  this->link_.enqueue(request, priority, tag(kind, detail), limit);
+}
+
+const char *control_result_text(ControlResult result) {
+  switch (result) {
+    case ControlResult::QUEUED:
+      return "queued";
+    case ControlResult::REFUSED_NOT_READY:
+      return "the controller is not identified, or this write is off";
+    case ControlResult::REFUSED_EXPERIMENTAL:
+      return "needs experimental: true";
+    case ControlResult::REFUSED_UNSUPPORTED:
+      return "the controller does not support it";
+    case ControlResult::REFUSED_RANGE:
+      return "out of range";
+    case ControlResult::REFUSED_NOT_RUNNING:
+      return "that zone is not running";
+    case ControlResult::REFUSED_QUEUED_ONLY:
+      return "that zone is only queued, and there is no command to remove one zone";
+    case ControlResult::REFUSED_BUSY:
+      return "the link could not take another request";
+  }
+  return "refused";
+}
+
+bool clock_drifted(uint8_t controller_h, uint8_t controller_m, uint8_t controller_s, uint8_t local_h, uint8_t local_m,
+                   uint8_t local_s, uint32_t max_drift_ms) {
+  uint32_t controller = controller_h * 3600u + controller_m * 60u + controller_s;
+  uint32_t local = local_h * 3600u + local_m * 60u + local_s;
+  uint32_t gap = controller > local ? controller - local : local - controller;
+  if (gap > 12u * 3600u) {
+    gap = 24u * 3600u - gap;
+  }
+  return gap * 1000u > max_drift_ms;
 }
 
 void Session::enqueue_list(const RequestList &list, Priority priority, TagKind kind, size_t *count) {
@@ -263,6 +298,15 @@ void Session::handle(const Completion &done, uint32_t now_ms) {
     case TagKind::POLL:
     case TagKind::RAW:
       return;
+    case TagKind::CONTROL:
+      // The short poll runs only after an ack. A NAK is the answer; sending the command again is not.
+      if (done.outcome == Outcome::REPLY) {
+        this->follow_up_(now_ms);
+      }
+      return;
+    case TagKind::PAGE:
+      this->handle_page_(done);
+      return;
   }
 }
 
@@ -304,6 +348,311 @@ bool Session::watering() const {
   }
   uint16_t remaining = 0;
   return this->state_.remaining_seconds(&remaining) && remaining != 0;
+}
+
+bool Session::ready_for_command_() const {
+  if (!this->writes_permitted_) {
+    return false;
+  }
+  return this->stage_ == SessionStage::PROBE || this->stage_ == SessionStage::SCHEDULE ||
+         this->stage_ == SessionStage::RUNNING;
+}
+
+bool Session::enqueue_command_(const ByteBuf &request, uint32_t now_ms) {
+  if (request.size == 0) {
+    return false;
+  }
+  // Once only. The controller may already have acted if the reply is what got lost.
+  if (!this->link_.enqueue(request, Priority::USER, tag(TagKind::CONTROL, request.data[0]), 0)) {
+    return false;
+  }
+  this->hold_ = true;
+  this->hold_from_ = now_ms;
+  return true;
+}
+
+void Session::follow_up_(uint32_t now_ms) {
+  this->hold_ = true;
+  this->hold_from_ = now_ms;
+  RequestList list;
+  this->model_.short_poll(this->caps_, this->config_.used, &list);
+  this->enqueue_list(list, Priority::FOLLOW_UP, TagKind::POLL);
+}
+
+bool Session::next_queued_zone_(uint8_t skip, uint8_t *zone) const {
+  if (zone == nullptr || !this->state_.queue_known()) {
+    return false;
+  }
+  uint8_t active = 0;
+  this->state_.active_zone(&active);
+  for (uint8_t i = 0; i < this->state_.queue_count(); i++) {
+    QueueItem item;
+    if (!this->state_.queue_item(i, &item) || item.zone == 0) {
+      continue;
+    }
+    if (item.zone == skip || item.zone == active) {
+      continue;
+    }
+    *zone = item.zone;
+    return true;
+  }
+  return false;
+}
+
+ControlResult Session::control(const Control &command, uint32_t now_ms) {
+  if (this->stage_ == SessionStage::PASSIVE || this->stage_ == SessionStage::MANUAL) {
+    return ControlResult::REFUSED_NOT_READY;
+  }
+  if (command.op == ControlOp::REFRESH) {
+    if (this->stage_ != SessionStage::IDLE && this->stage_ != SessionStage::RUNNING) {
+      return ControlResult::REFUSED_NOT_READY;
+    }
+    if (this->link_.queued(Priority::POLL) == 0) {
+      this->poll(now_ms);
+    }
+    return ControlResult::QUEUED;
+  }
+  if (!this->ready_for_command_()) {
+    return ControlResult::REFUSED_NOT_READY;
+  }
+  const uint8_t zones = this->model_.limits().zones;
+  const uint8_t programs = this->model_.limits().programs;
+  ByteBuf request;
+  switch (command.op) {
+    case ControlOp::RUN_ZONE:
+      if (command.zone < 1 || command.zone > zones || command.value < 1 || command.value > 255) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      if (command.queue_mode) {
+        if (!this->caps_.queue_run) {
+          return ControlResult::REFUSED_UNSUPPORTED;
+        }
+        request = request_queue_station(0, command.zone, static_cast<uint8_t>(command.value));
+      } else {
+        request = request_run_station(command.zone, static_cast<uint8_t>(command.value));
+      }
+      break;
+    case ControlOp::QUEUE_ZONE:
+      if (!this->caps_.queue_run) {
+        return ControlResult::REFUSED_UNSUPPORTED;
+      }
+      if (command.zone < 1 || command.zone > zones || command.value < 1 || command.value > 255) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      request = request_queue_station(0, command.zone, static_cast<uint8_t>(command.value));
+      break;
+    case ControlOp::STOP_ZONE: {
+      bool running = false;
+      if (!this->state_.zone_running(command.zone, &running) || !running) {
+        for (uint8_t i = 0; i < this->state_.queue_count(); i++) {
+          QueueItem item;
+          if (this->state_.queue_item(i, &item) && item.zone == command.zone) {
+            return ControlResult::REFUSED_QUEUED_ONLY;
+          }
+        }
+        return ControlResult::REFUSED_NOT_RUNNING;
+      }
+      uint8_t next = 0;
+      if (command.queue_mode && command.experimental && this->caps_.advance &&
+          this->next_queued_zone_(command.zone, &next)) {
+        request = request_advance(next);
+      } else {
+        request = request_stop();
+      }
+      break;
+    }
+    case ControlOp::RUN_PROGRAM:
+      if (command.program >= programs) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      request = request_run_program(command.program);
+      break;
+    case ControlOp::STOP:
+      request = request_stop();
+      break;
+    case ControlOp::ADVANCE: {
+      if (!command.experimental) {
+        return ControlResult::REFUSED_EXPERIMENTAL;
+      }
+      if (!this->caps_.advance) {
+        return ControlResult::REFUSED_UNSUPPORTED;
+      }
+      uint8_t next = 0;
+      if (!this->next_queued_zone_(0, &next)) {
+        return ControlResult::REFUSED_NOT_RUNNING;
+      }
+      request = request_advance(next);
+      break;
+    }
+    case ControlOp::SET_SEASONAL:
+      if (command.program >= programs || command.value > 200) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      request = request_set_water_budget(command.program, command.value);
+      break;
+    case ControlOp::SET_RAIN_DELAY:
+      if (command.value > 14) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      request = request_set_rain_delay(command.value);
+      break;
+    case ControlOp::SET_IRRIGATION:
+      if (!command.experimental) {
+        return ControlResult::REFUSED_EXPERIMENTAL;
+      }
+      if (!this->caps_.controller_state) {
+        return ControlResult::REFUSED_UNSUPPORTED;
+      }
+      request = request_set_controller_state(command.value == 0 ? 0 : 1);
+      break;
+    case ControlOp::TEST_ZONES:
+      if (!command.experimental) {
+        return ControlResult::REFUSED_EXPERIMENTAL;
+      }
+      if (!this->caps_.test_stations) {
+        return ControlResult::REFUSED_UNSUPPORTED;
+      }
+      if (command.value < 1 || command.value > 255) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      request = request_test_stations(static_cast<uint8_t>(command.value));
+      break;
+    case ControlOp::SET_TIME:
+      if (command.hour > 23 || command.minute > 59 || command.second > 59) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      request = request_set_time(command.hour, command.minute, command.second);
+      break;
+    case ControlOp::SET_DATE: {
+      PackedDate date;
+      date.day = command.day;
+      date.month = command.month;
+      date.year = command.year;
+      if (date.day < 1 || date.day > 31 || date.month < 1 || date.month > 12 || date.year < 2000) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      request = request_set_date(date);
+      break;
+    }
+    case ControlOp::REFRESH:
+      return ControlResult::QUEUED;
+  }
+  if (!this->enqueue_command_(request, now_ms)) {
+    return ControlResult::REFUSED_BUSY;
+  }
+  return ControlResult::QUEUED;
+}
+
+void Session::fail_edit_(const char *reason) {
+  this->edit_.active = false;
+  this->edit_.log_ready = false;
+  this->edit_failure_ = reason;
+}
+
+ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value,
+                                     uint32_t now_ms) {
+  (void) now_ms;
+  // Page writes wait until the link is running. A write during the first schedule read
+  // would race that read, and allow_writes stays off unless the config opts in.
+  if (!this->config_.allow_writes || this->stage_ != SessionStage::RUNNING || !this->writes_permitted_) {
+    return ControlResult::REFUSED_NOT_READY;
+  }
+  if (this->edit_.active) {
+    return ControlResult::REFUSED_BUSY;
+  }
+  std::optional<PageField> located = this->model_.locate(field, zone, program, index);
+  if (!located.has_value()) {
+    return ControlResult::REFUSED_RANGE;
+  }
+  this->edit_ = ScheduleEdit{};
+  this->edit_.active = true;
+  this->edit_.step = EditStep::READING;
+  this->edit_.field = field;
+  this->edit_.zone = zone;
+  this->edit_.program = program;
+  this->edit_.index = index;
+  this->edit_.value = value;
+  this->edit_.page = located->page;
+  if (!this->link_.enqueue(request_read_page(located->page), Priority::USER, tag(TagKind::PAGE, located->page),
+                           this->config_.timing.retries)) {
+    this->edit_.active = false;
+    return ControlResult::REFUSED_BUSY;
+  }
+  return ControlResult::QUEUED;
+}
+
+bool Session::take_page_log(PageEditLog *out) {
+  if (out == nullptr || !this->edit_.log_ready) {
+    return false;
+  }
+  out->page = this->edit_.page;
+  out->size = this->edit_.size;
+  std::memcpy(out->before, this->edit_.before, this->edit_.size);
+  std::memcpy(out->after, this->edit_.after, this->edit_.size);
+  this->edit_.log_ready = false;
+  return true;
+}
+
+bool Session::take_edit_failure(const char **reason) {
+  if (this->edit_failure_ == nullptr) {
+    return false;
+  }
+  if (reason != nullptr) {
+    *reason = this->edit_failure_;
+  }
+  this->edit_failure_ = nullptr;
+  return true;
+}
+
+void Session::handle_page_(const Completion &done) {
+  if (!this->edit_.active) {
+    return;
+  }
+  if (done.outcome != Outcome::REPLY) {
+    this->fail_edit_("the page read or write was not acknowledged");
+    return;
+  }
+  if (this->edit_.step == EditStep::READING || this->edit_.step == EditStep::CONFIRMING) {
+    uint8_t raw[40];
+    uint8_t size = 0;
+    if (!this->state_.copy_page(this->edit_.page, raw, sizeof(raw), &size)) {
+      this->fail_edit_("the page reply had no data");
+      return;
+    }
+    if (this->edit_.step == EditStep::CONFIRMING) {
+      bool same = size == this->edit_.size;
+      for (uint8_t i = 0; same && i < size; i++) {
+        same = raw[i] == this->edit_.after[i];
+      }
+      this->edit_.active = false;
+      if (!same) {
+        this->edit_failure_ = "the confirming read does not match the page that was written";
+      }
+      return;
+    }
+    uint8_t patched[40];
+    size_t out_size = size;
+    if (!this->model_.patch(this->edit_.page, raw, size, this->edit_.field, this->edit_.zone, this->edit_.program,
+                            this->edit_.index, this->edit_.value, patched, &out_size)) {
+      this->fail_edit_("that field could not be changed on the page");
+      return;
+    }
+    this->edit_.size = static_cast<uint8_t>(out_size);
+    std::memcpy(this->edit_.before, raw, out_size);
+    std::memcpy(this->edit_.after, patched, out_size);
+    this->edit_.log_ready = true;
+    ByteBuf write;
+    if (!request_write_page(this->edit_.page, patched, out_size, &write) ||
+        !this->link_.enqueue(write, Priority::USER, tag(TagKind::PAGE, this->edit_.page), 0)) {
+      this->fail_edit_("the page write could not be queued");
+      return;
+    }
+    this->edit_.step = EditStep::WRITING;
+    return;
+  }
+  // The write was acknowledged. Read the page back before trusting it.
+  this->enqueue(request_read_page(this->edit_.page), Priority::USER, TagKind::PAGE, this->edit_.page);
+  this->edit_.step = EditStep::CONFIRMING;
 }
 
 uint32_t Session::desired_interval(uint32_t now_ms) const {

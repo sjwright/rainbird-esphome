@@ -57,6 +57,27 @@ class KindId(IntEnum):
     FIRMWARE_VERSION = 19
     SERIAL_NUMBER = 20
     SCHEDULE_CHANGED = 21
+    QUEUE_ZONE = 22
+    STOP = 23
+    ADVANCE = 24
+    TEST_ALL = 25
+    SYNC_CLOCK = 26
+    REFRESH = 27
+    RAIN_DELAY = 28
+    STATION_DELAY = 29
+    TEST_DURATION = 30
+    CYCLE_DAYS = 31
+    DAYS_UNTIL_NEXT = 32
+    RUN_TIME = 33
+    IRRIGATION_SET = 34
+    GLOBAL_BYPASS = 35
+    ZONE_BYPASS = 36
+    WATERING_DAY = 37
+    START_ENABLED = 38
+    ZONE_FAULT = 39
+    FREQUENCY = 40
+    START_TIME = 41
+    CONTROLLER_CLOCK = 42
 
 
 # Zone 0 and program 255 mean "this binding does not use that index".
@@ -84,6 +105,9 @@ _DOMAIN_SUFFIX = {
     "select": "select",
     "datetime": "datetime",
 }
+
+# Same order as FREQUENCY_NAMES in model_esp_tm2.cpp. The select index is the wire byte.
+FREQUENCY_OPTIONS = ("Custom days", "Cyclic", "Odd days", "Even days")
 
 _PLURAL_SUFFIX = {
     "switch": "switches",
@@ -325,6 +349,221 @@ KINDS = (
         Scope.CONTROLLER,
         "Schedule last changed",
         device_class="timestamp",
+    ),
+    # Opt-in controls and schedule rows (PLAN 4.2–4.4). None of these are
+    # generated unless a zone, program or platform entry asks for them.
+    EntityKind(
+        KindId.QUEUE_ZONE,
+        "queue",
+        "button",
+        Scope.ZONE,
+        "Queue {zone}",
+        write=Write.COMMAND,
+        icon="mdi:playlist-plus",
+    ),
+    EntityKind(
+        KindId.STOP,
+        "stop",
+        "button",
+        Scope.CONTROLLER,
+        "Stop watering",
+        write=Write.COMMAND,
+        icon="mdi:stop",
+    ),
+    EntityKind(
+        KindId.ADVANCE,
+        "advance",
+        "button",
+        Scope.CONTROLLER,
+        "Next zone",
+        write=Write.COMMAND,
+        gate=Gate.EXPERIMENTAL,
+        icon="mdi:skip-next",
+    ),
+    EntityKind(
+        KindId.TEST_ALL,
+        "test_all_zones",
+        "button",
+        Scope.CONTROLLER,
+        "Test all zones",
+        write=Write.COMMAND,
+        gate=Gate.EXPERIMENTAL,
+        icon="mdi:test-tube",
+    ),
+    EntityKind(
+        KindId.SYNC_CLOCK,
+        "sync_clock",
+        "button",
+        Scope.CONTROLLER,
+        "Sync controller clock",
+        write=Write.COMMAND,
+        icon="mdi:clock-check",
+    ),
+    EntityKind(
+        KindId.REFRESH,
+        "refresh",
+        "button",
+        Scope.CONTROLLER,
+        "Refresh from controller",
+        write=Write.COMMAND,
+        entity_category="diagnostic",
+        icon="mdi:refresh",
+    ),
+    EntityKind(
+        KindId.RAIN_DELAY,
+        "rain_delay",
+        "number",
+        Scope.CONTROLLER,
+        "Rain delay",
+        write=Write.COMMAND,
+        limits=(0, 14, 1),
+        unit="d",
+        icon="mdi:weather-rainy",
+    ),
+    EntityKind(
+        KindId.STATION_DELAY,
+        "station_delay",
+        "number",
+        Scope.CONTROLLER,
+        "Delay between zones",
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+        limits=(0, 65535, 1),
+        unit="s",
+        icon="mdi:timer-sand",
+    ),
+    EntityKind(
+        KindId.TEST_DURATION,
+        "test_duration",
+        "number",
+        Scope.CONTROLLER,
+        "Test duration",
+        write=Write.LOCAL,
+        limits=(1, 255, 1),
+        unit="min",
+        icon="mdi:timer-outline",
+    ),
+    EntityKind(
+        KindId.CYCLE_DAYS,
+        "cycle_days",
+        "number",
+        Scope.PROGRAM,
+        "{program} cycle days",
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+        limits=(0, 255, 1),
+        unit="d",
+    ),
+    EntityKind(
+        KindId.DAYS_UNTIL_NEXT,
+        "days_until_next",
+        "number",
+        Scope.PROGRAM,
+        "{program} days until next run",
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+        limits=(0, 255, 1),
+        unit="d",
+    ),
+    EntityKind(
+        KindId.RUN_TIME,
+        "run_time",
+        "number",
+        Scope.ZONE,
+        "{zone} {program} run time",
+        fan_out=FanOut.PROGRAM,
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+        limits=(0, 65535, 1),
+        unit="min",
+        key_override="run_time_numbers",
+    ),
+    EntityKind(
+        KindId.IRRIGATION_SET,
+        "irrigation_enabled",
+        "switch",
+        Scope.CONTROLLER,
+        "Irrigation enabled",
+        write=Write.COMMAND,
+        gate=Gate.EXPERIMENTAL,
+        icon="mdi:water-check",
+    ),
+    EntityKind(
+        KindId.GLOBAL_BYPASS,
+        "rain_sensor_bypass",
+        "switch",
+        Scope.CONTROLLER,
+        "Ignore rain sensor",
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+        icon="mdi:weather-rainy",
+    ),
+    EntityKind(
+        KindId.ZONE_BYPASS,
+        "sensor_bypass",
+        "switch",
+        Scope.ZONE,
+        "{zone} ignores rain sensor",
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+        icon="mdi:weather-rainy",
+    ),
+    EntityKind(
+        KindId.WATERING_DAY,
+        "watering_day",
+        "switch",
+        Scope.PROGRAM,
+        "{program} {day}",
+        fan_out=FanOut.DAY,
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+    ),
+    EntityKind(
+        KindId.START_ENABLED,
+        "start_time_enabled",
+        "switch",
+        Scope.PROGRAM,
+        "{program} start {slot} enabled",
+        fan_out=FanOut.SLOT,
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+        key_override="start_time_switches",
+    ),
+    EntityKind(
+        KindId.ZONE_FAULT,
+        "fault",
+        "binary_sensor",
+        Scope.ZONE,
+        "{zone} fault",
+        device_class="problem",
+    ),
+    EntityKind(
+        KindId.FREQUENCY,
+        "frequency",
+        "select",
+        Scope.PROGRAM,
+        "{program} frequency",
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+    ),
+    EntityKind(
+        KindId.START_TIME,
+        "start_time",
+        "datetime",
+        Scope.PROGRAM,
+        "{program} start {slot}",
+        fan_out=FanOut.SLOT,
+        write=Write.SCHEDULE_PAGE,
+        gate=Gate.ALLOW_WRITES,
+    ),
+    EntityKind(
+        KindId.CONTROLLER_CLOCK,
+        "controller_clock",
+        "datetime",
+        Scope.CONTROLLER,
+        "Controller clock",
+        write=Write.COMMAND,
+        icon="mdi:clock-outline",
     ),
 )
 

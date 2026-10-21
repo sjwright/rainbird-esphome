@@ -41,7 +41,14 @@ void add_fields(EntityKind kind, FieldSet *used) {
       used->add(Field::SCHEDULE_CHANGED);
       break;
     case EntityKind::RUN_DURATION:   // local setting
+    case EntityKind::TEST_DURATION:  // local setting, used by the test-all button
     case EntityKind::PROGRAM_START:  // command only
+    case EntityKind::QUEUE_ZONE:
+    case EntityKind::STOP:
+    case EntityKind::ADVANCE:
+    case EntityKind::TEST_ALL:
+    case EntityKind::SYNC_CLOCK:
+    case EntityKind::REFRESH:
     case EntityKind::RESPONSE_TIME:  // link diagnostics
     case EntityKind::LINK_ERRORS:
     case EntityKind::CONNECTED:
@@ -49,10 +56,53 @@ void add_fields(EntityKind kind, FieldSet *used) {
     case EntityKind::FIRMWARE_VERSION:
     case EntityKind::SERIAL_NUMBER:
       break;
+    case EntityKind::RAIN_DELAY:
+      used->add(Field::RAIN_DELAY);
+      break;
+    case EntityKind::STATION_DELAY:
+      used->add(Field::STATION_DELAY);
+      break;
+    case EntityKind::CYCLE_DAYS:
+      used->add(Field::CYCLE_DAYS);
+      break;
+    case EntityKind::DAYS_UNTIL_NEXT:
+      used->add(Field::DAYS_UNTIL_NEXT);
+      break;
+    case EntityKind::RUN_TIME:
+      used->add(Field::RUN_TIME);
+      break;
+    case EntityKind::IRRIGATION_SET:
+      used->add(Field::IRRIGATION_ENABLED);
+      break;
+    case EntityKind::GLOBAL_BYPASS:
+      used->add(Field::GLOBAL_SENSOR_BYPASS);
+      break;
+    case EntityKind::ZONE_BYPASS:
+      used->add(Field::ZONE_SENSOR_BYPASS);
+      break;
+    case EntityKind::WATERING_DAY:
+      used->add(Field::WATERING_DAY);
+      break;
+    case EntityKind::START_ENABLED:
+      used->add(Field::START_ENABLED);
+      break;
+    case EntityKind::ZONE_FAULT:
+      // Polled when the probe said 3D works. There is no decoder yet, so the sensor stays unknown.
+      used->add(Field::ZONE_FAULT);
+      break;
+    case EntityKind::FREQUENCY:
+      used->add(Field::FREQUENCY);
+      break;
+    case EntityKind::START_TIME:
+      used->add(Field::START_TIME);
+      break;
+    case EntityKind::CONTROLLER_CLOCK:
+      used->add(Field::CLOCK);
+      break;
   }
 }
 
-bool kind_changed(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program) {
+bool kind_changed(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, uint8_t index) {
   switch (kind) {
     case EntityKind::VALVE:
     case EntityKind::ZONE_RUNNING:
@@ -83,12 +133,39 @@ bool kind_changed(EntityKind kind, const ControllerState &state, uint8_t zone, u
       return state.changed(Field::IRRIGATION_ENABLED);
     case EntityKind::SCHEDULE_CHANGED:
       return state.changed(Field::SCHEDULE_CHANGED);
+    case EntityKind::RAIN_DELAY:
+      return state.changed(Field::RAIN_DELAY);
+    case EntityKind::STATION_DELAY:
+      return state.changed(Field::STATION_DELAY);
+    case EntityKind::CYCLE_DAYS:
+      return state.changed(Field::CYCLE_DAYS, 0, program);
+    case EntityKind::DAYS_UNTIL_NEXT:
+      return state.changed(Field::DAYS_UNTIL_NEXT, 0, program);
+    case EntityKind::RUN_TIME:
+      return state.changed(Field::RUN_TIME, zone, program);
+    case EntityKind::IRRIGATION_SET:
+      return state.changed(Field::IRRIGATION_ENABLED);
+    case EntityKind::GLOBAL_BYPASS:
+      return state.changed(Field::GLOBAL_SENSOR_BYPASS);
+    case EntityKind::ZONE_BYPASS:
+      return state.changed(Field::ZONE_SENSOR_BYPASS, zone);
+    case EntityKind::WATERING_DAY:
+      return state.changed(Field::WATERING_DAY, 0, program, index);
+    case EntityKind::START_ENABLED:
+      return state.changed(Field::START_ENABLED, 0, program, index);
+    case EntityKind::FREQUENCY:
+      return state.changed(Field::FREQUENCY, 0, program);
+    case EntityKind::START_TIME:
+      return state.changed(Field::START_TIME, 0, program, index);
+    case EntityKind::CONTROLLER_CLOCK:
+      return state.changed(Field::CLOCK);
     default:
       return false;
   }
 }
 
-bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, bool *out) {
+bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, bool *out,
+                uint8_t index) {
   if (out == nullptr) {
     return false;
   }
@@ -136,7 +213,8 @@ bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uin
       *out = value != 0;
       return true;
     }
-    case EntityKind::IRRIGATION_ENABLED: {
+    case EntityKind::IRRIGATION_ENABLED:
+    case EntityKind::IRRIGATION_SET: {
       uint8_t value = 0;
       if (!state.irrigation(&value)) {
         return false;
@@ -144,13 +222,38 @@ bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uin
       *out = value != 0;
       return true;
     }
+    case EntityKind::WATERING_DAY:
+      return state.watering_day(program, index, out);
+    case EntityKind::START_ENABLED:
+      return state.start_enabled(program, index, out);
+    case EntityKind::GLOBAL_BYPASS: {
+      uint8_t wire = 0;
+      if (!state.global_bypass(&wire)) {
+        return false;
+      }
+      *out = wire == GLOBAL_SENSOR_BYPASSED;
+      return true;
+    }
+    case EntityKind::ZONE_BYPASS: {
+      // Page 20 stores 0x00 for bypass, which is this switch being on.
+      uint8_t wire = 0;
+      if (!state.zone_bypass(zone, &wire)) {
+        return false;
+      }
+      *out = wire == 0x00;
+      return true;
+    }
+    case EntityKind::ZONE_FAULT:
+      // 3D has no decoder yet (SPEC 8.4). Stay unknown rather than invent a layout.
+      return false;
     default:
       return false;
   }
 }
 
-bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, float *out) {
-  (void) zone;
+bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, float *out,
+                  uint8_t index) {
+  (void) index;
   if (out == nullptr) {
     return false;
   }
@@ -187,9 +290,64 @@ bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, u
       *out = count;
       return true;
     }
+    case EntityKind::RAIN_DELAY: {
+      uint16_t days = 0;
+      if (!state.rain_delay(&days)) {
+        return false;
+      }
+      *out = days;
+      return true;
+    }
+    case EntityKind::STATION_DELAY: {
+      uint16_t seconds = 0;
+      if (!state.station_delay(&seconds)) {
+        return false;
+      }
+      *out = seconds;
+      return true;
+    }
+    case EntityKind::CYCLE_DAYS: {
+      uint8_t days = 0;
+      if (!state.cycle_days(program, &days)) {
+        return false;
+      }
+      *out = days;
+      return true;
+    }
+    case EntityKind::DAYS_UNTIL_NEXT: {
+      uint8_t days = 0;
+      if (!state.days_until(program, &days)) {
+        return false;
+      }
+      *out = days;
+      return true;
+    }
+    case EntityKind::RUN_TIME: {
+      uint16_t minutes = 0;
+      if (!state.run_minutes(zone, program, &minutes)) {
+        return false;
+      }
+      *out = minutes;
+      return true;
+    }
     default:
       return false;
   }
+}
+
+bool select_index(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, uint8_t *out) {
+  (void) zone;
+  if (out == nullptr || kind != EntityKind::FREQUENCY) {
+    return false;
+  }
+  return state.frequency(program, out);
+}
+
+bool start_slot_minutes(const ControllerState &state, uint8_t program, uint8_t index, int32_t *minutes) {
+  if (minutes == nullptr) {
+    return false;
+  }
+  return state.start_minutes(program, index, minutes);
 }
 
 std::string duration_text(uint32_t seconds) {

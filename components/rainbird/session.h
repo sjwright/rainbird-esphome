@@ -25,6 +25,7 @@ struct SessionConfig {
   uint32_t fast_hold_ms{30000};  // fast polling after a command
   uint32_t refresh_interval_ms{3600000};
   uint32_t silence_ms{60000};          // listen-only: no frame for this long is "not connected"
+  bool allow_writes{false};            // schedule page writes (21)
   FieldSet used{};                     // fields that configured entities read
   uint16_t zone_mask{0};               // zones that read schedule pages, 0 = all
   uint8_t program_mask{0};             // programs that read schedule pages, 0 = all
@@ -52,7 +53,74 @@ enum class SessionStage : uint8_t {
 };
 
 // Request tags. The high byte says why the request was sent.
-enum class TagKind : uint8_t { IDENTIFY = 1, INFO = 2, PROBE = 3, SCHEDULE = 4, POLL = 5, RAW = 6 };
+enum class TagKind : uint8_t {
+  IDENTIFY = 1,
+  INFO = 2,
+  PROBE = 3,
+  SCHEDULE = 4,
+  POLL = 5,
+  RAW = 6,
+  CONTROL = 7,  // a command that may already have been acted on; sent once
+  PAGE = 8,     // one schedule edit: read, write, read back
+};
+
+// A control command. Minutes, percent and days share `value`. Clock fields are separate.
+enum class ControlOp : uint8_t {
+  RUN_ZONE,
+  QUEUE_ZONE,
+  STOP_ZONE,
+  RUN_PROGRAM,
+  STOP,
+  ADVANCE,
+  SET_SEASONAL,
+  SET_RAIN_DELAY,
+  SET_IRRIGATION,
+  TEST_ZONES,
+  SET_TIME,
+  SET_DATE,
+  REFRESH,
+};
+
+struct Control {
+  ControlOp op{ControlOp::STOP};
+  uint8_t zone{0};
+  uint8_t program{0};
+  uint16_t value{0};
+  uint8_t hour{0};
+  uint8_t minute{0};
+  uint8_t second{0};
+  uint8_t day{0};
+  uint8_t month{0};
+  uint16_t year{0};
+  bool queue_mode{false};
+  bool experimental{false};
+};
+
+enum class ControlResult : uint8_t {
+  QUEUED,
+  REFUSED_NOT_READY,     // not identified, model refused, listen-only, or writes off
+  REFUSED_EXPERIMENTAL,  // 42, 3A and 49
+  REFUSED_UNSUPPORTED,   // the 04 probe said no
+  REFUSED_RANGE,
+  REFUSED_NOT_RUNNING,  // valve off, and this zone is not the one running
+  REFUSED_QUEUED_ONLY,  // queued, and there is no "remove one zone" command
+  REFUSED_BUSY,         // a schedule edit is already in flight, or the queue is full
+};
+
+const char *control_result_text(ControlResult result);
+
+// True when the controller clock and local clock differ by more than max_drift_ms.
+// Both clocks are seconds since midnight. A gap across midnight counts the short way.
+bool clock_drifted(uint8_t controller_h, uint8_t controller_m, uint8_t controller_s, uint8_t local_h, uint8_t local_m,
+                   uint8_t local_s, uint32_t max_drift_ms);
+
+// The bytes of one schedule edit, for the log line that goes out before the write.
+struct PageEditLog {
+  uint8_t page{0};
+  uint8_t size{0};
+  uint8_t before[40]{};
+  uint8_t after[40]{};
+};
 
 class Session {
  public:
@@ -68,6 +136,15 @@ class Session {
   void on_frame(const uint8_t *payload, size_t size, uint32_t now_ms);
   // Experimental raw send. The experimental gate is the hub's; this only queues it.
   bool send_raw(const uint8_t *payload, size_t size, uint32_t now_ms);
+  // One control command, sent once. A lost reply must not run it again.
+  ControlResult control(const Control &command, uint32_t now_ms);
+  // Read the page, change one field, write it back, read it again. One at a time.
+  ControlResult edit_schedule(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value,
+                              uint32_t now_ms);
+  // The hub logs this before the write is transmitted. False when there is nothing new.
+  bool take_page_log(PageEditLog *out);
+  // A failed edit, once. The text is a static reason.
+  bool take_edit_failure(const char **reason);
 
   // Fast while watering or just after a command, otherwise update_interval.
   uint32_t desired_interval(uint32_t now_ms) const;
@@ -95,7 +172,14 @@ class Session {
   void clear_changed();
 
  private:
-  void enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail = 0);
+  // retries < 0 uses LinkTiming::retries. A command passes 0.
+  void enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail = 0, int retries = -1);
+  void follow_up_(uint32_t now_ms);
+  bool enqueue_command_(const ByteBuf &request, uint32_t now_ms);
+  bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
+  bool ready_for_command_() const;
+  void fail_edit_(const char *reason);
+  void handle_page_(const Completion &done);
   void enqueue_list(const RequestList &list, Priority priority, TagKind kind, size_t *count = nullptr);
   void identify();
   void handle(const Completion &done, uint32_t now_ms);
@@ -137,6 +221,26 @@ class Session {
   bool frame_seen_{false};
   bool identity_changed_{false};
   bool diagnostics_changed_{false};
+
+  enum class EditStep : uint8_t { READING, WRITING, CONFIRMING };
+
+  struct ScheduleEdit {
+    bool active{false};
+    EditStep step{EditStep::READING};
+    Field field{Field::RUN_TIME};
+    uint8_t zone{0};
+    uint8_t program{0};
+    uint8_t index{0};
+    int32_t value{0};
+    uint8_t page{0};
+    bool log_ready{false};
+    uint8_t size{0};
+    uint8_t before[40]{};
+    uint8_t after[40]{};
+  };
+
+  ScheduleEdit edit_{};
+  const char *edit_failure_{nullptr};
 };
 
 }  // namespace esphome::rainbird

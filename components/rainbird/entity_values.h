@@ -17,10 +17,17 @@ namespace esphome::rainbird {
 void add_fields(EntityKind kind, FieldSet *used);
 
 // True when a value the entity shows may have changed since the last clear_changed().
-bool kind_changed(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program);
+// `index` is the watering day, start slot, or unused.
+bool kind_changed(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, uint8_t index = 0);
 
-bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, bool *out);
-bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, float *out);
+bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, bool *out,
+                uint8_t index = 0);
+bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, float *out,
+                  uint8_t index = 0);
+// Frequency select. The value is the option index, which is the page byte.
+bool select_index(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, uint8_t *out);
+// Start-slot minutes since midnight. Negative means the slot is off and has no time.
+bool start_slot_minutes(const ControllerState &state, uint8_t program, uint8_t index, int32_t *minutes);
 
 // Zone and program display names, from the YAML. Fall back to "Zone N" / "Program A".
 struct Names {
