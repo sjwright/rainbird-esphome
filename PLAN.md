@@ -51,7 +51,7 @@ section 3.
 | D7 | **Schedule fields use typed entities, never free text.** Watering days are 7 switches per program. Each start-time slot is a `datetime` time entity plus an "enabled" switch, since `FFFF` (off) can't be shown as a time. | Nothing on the write path parses text, and each entity maps to bits or bytes of one page. All are opt-in. |
 | D8 | **Names can contain the placeholders `{zone}`, `{program}`, `{day}` and `{slot}`** | One template in `zone_defaults` or `program_defaults` names the same entity everywhere. Single braces don't clash with ESPHome's `${substitutions}`. |
 | D9 | **Generated IDs are public API from v0.1.0**: `<zone id>_<key>`, e.g. `front_lawn_valve_switch` | Users will write lambdas and automations against them, so changing the scheme is a breaking change. A snapshot test (section 8) guards it. |
-| D10 | **The wire layer is ESPHome's `remote_transmitter` and `remote_receiver`**, referenced by `transmitter_id` and `receiver_id`. | This is how core's `climate_ir` platforms do it, and how bus-based components take a `uart_id`. ESPHome already provides non-blocking RMT transmit with the carrier off, RMT receive with its own interrupt handler, buffering, overflow warnings and raw dumps, and it maintains that code across ESP-IDF releases. The rainbird component never touches RMT, GPIO interrupts or IRAM. Section 6.1 checks the limits. |
+| D10 | **The wire layer is ESPHome's `remote_transmitter` and `remote_receiver`**, referenced by `transmitter_id` and `receiver_id`. | This is how core's `climate_ir` platforms do it, and how bus-based components take a `uart_id`. ESPHome already provides non-blocking RMT transmit with the carrier off, RMT receive with its own interrupt handler, buffering, overflow warnings and raw dumps, and it maintains that code across ESP-IDF releases. The rainbird component never touches RMT or IRAM. It does call `rtc_gpio_deinit` on the receiver pins after `remote_receiver` setup, because that component leaves original-ESP32 RTC pads on the RTC mux (6.1). Section 6.1 checks the limits. |
 | D11 | **Unverified commands are off by default**: `schedule: allow_writes: false`, `experimental: false`. `rainbird.send_raw` also needs `experimental: true`. | SPEC.md section 8 lists the unverified commands. A raw-send action left in a config would bypass both gates. |
 | D12 | **An unrecognised model ID makes the hub read-only** | If `02` returns an ID outside the model's list, status polling continues but every control and write command is refused. `accept_model_ids:` overrides this. |
 | D13 | **Prefer ESPHome's own entity actions, conditions and triggers.** Custom actions exist only where a runtime argument is needed. | `button.press`, `number.set`, `switch.is_on` and `on_turn_on` already cover stopping, rain delay, program runs, state checks and "zone started". What's left: `rainbird.zone.start`/`queue` (zone number from Home Assistant), `rainbird.send_raw`, and the `on_nak`/`on_frame` triggers (4.5). |
@@ -500,7 +500,7 @@ out to need tuning per installation would become an option.
 | Constant | Initial value | Notes |
 |----------|---------------|-------|
 | Request timeout | 400 ms | From the end of the first copy of a request. The longest reply (42 bytes) is about 140 ms on the wire, plus about 30 ms of controller turnaround. |
-| Retries | 2 | For timeouts and bad frames. A NAK is never retried. |
+| Retries | 2 | For timeouts and bad frames. A NAK is never retried. `send_raw` is sent once, so a lost reply cannot run a command the controller already acted on. |
 | Duplicate 2-byte requests | on | Copies the LNK2 habit (SPEC 2.3). Phase 2 A/B-tests whether it's needed. |
 | Fast poll interval | 3 s | While watering, and for 30 s after a command |
 | Gap between transactions | 20 ms | |
@@ -961,6 +961,17 @@ timings to that receiver's decoder (6.2) and returns `true` when it decodes a
 valid frame. A second adapter, with its own decoder state, serves
 `monitor_receiver_id`.
 
+On the original ESP32, `remote_receiver` passes the bare GPIO number to the RMT
+driver and never runs the pin's `setup()`. That `setup()` is what moves an RTC
+pad (GPIO 0, 2, 4, 12 to 15, 25 to 27, and 32 to 39) off the RTC mux, so a
+receiver on one of those pins can see a flat line. After `remote_receiver`
+setup, `release_receiver_pads_()` calls `rtc_gpio_deinit` and
+`gpio_input_enable` on each receiver pin. ESP-IDF declares `rtc_gpio_deinit`
+only when `SOC_RTCIO_PIN_COUNT > 0`. In 5.5.5 that count is 0 on the C2 and
+the C3, which have no RTC mux, so the call is compiled out there.
+`gpio_input_enable` only turns the input buffer on. Drop the workaround once
+ESPHome fixes the receiver and `min_version` includes that release.
+
 **Will the receive buffer hold a whole reply?** Checked against the ESP-IDF
 5.5.4 RMT driver source on this machine. In the worst case a Manchester byte
 is 16 level runs, or 8 RMT symbols, so the longest reply (42 bytes) needs up
@@ -1034,7 +1045,8 @@ across bursts.
 - **Duplicate replies.** A second identical reply within the window is
   dropped and counted, which answers SPEC question 5.
 - **Errors.** A timeout or bad frame is retried, then counted as a link
-  error. Three in a row set `connected` off, and polling backs off.
+  error. `send_raw` is sent once (4.1). Three failures in a row set
+  `connected` off, and polling backs off.
 - **NAKs** are logged and raise `on_nak`. The command is marked unsupported
   for the session when `nak_is_unsupported(code)` is true (bit 0 set). A NAK
   without bit 0 is logged as a likely encoding bug.

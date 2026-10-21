@@ -32,8 +32,8 @@ TEST_CASE("startup identifies, probes, reads the schedule in use, then polls") {
   session.start(0);
   run_session(session, fake, 0, 10000);
 
-  std::vector<std::string> expect = {"02", "0B", "05", "03 00", "04 4C", "04 4A", "04 42", "04 4B",
-                                     "04 3D", "04 49", "04 3A", "20 00 80", "3F 00", "4C"};
+  std::vector<std::string> expect = {"02",    "0B",    "05",    "03 00", "04 4C",    "04 4A", "04 42",
+                                     "04 4B", "04 3D", "04 49", "04 3A", "20 00 80", "3F 00", "4C"};
   REQUIRE(fake.requests.size() >= expect.size());
   CHECK(std::vector<std::string>(fake.requests.begin(), fake.requests.begin() + expect.size()) == expect);
   CHECK(session.stage() == SessionStage::RUNNING);
@@ -176,6 +176,18 @@ TEST_CASE("with polling off only send_raw transmits") {
   REQUIRE(session.send_raw(from_hex("02").data(), 1, 0));
   REQUIRE(session.next_transmission(0, &tx));
   CHECK(to_hex(tx.bytes, tx.size) == "F5 F5 1C 01 02 03 1D");
+}
+
+TEST_CASE("send_raw is sent once when nothing answers") {
+  EspTm2Model model;
+  SessionConfig config = config_with({Field::ZONES_RUNNING});
+  config.polling = false;
+  Session session(model, config);
+  FakeController silent;
+  session.start(0);
+  REQUIRE(session.send_raw(from_hex("42").data(), 1, 0));
+  run_session(session, silent, 0, 5000);
+  CHECK(silent.requests == std::vector<std::string>{"42"});
 }
 
 TEST_CASE("polling is fast while a zone runs and after a command, otherwise update_interval") {

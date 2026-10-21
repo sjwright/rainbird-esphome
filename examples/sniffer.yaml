@@ -1,18 +1,29 @@
-# Bench loopback, and the starting point for a passive sniff.
-# Jumper GPIO26 to GPIO27 and flash this. One second after boot it sends a
-# model query. The link repeats a request that gets no reply, so that is three
-# frames, enough for the polarity lock. The button does the same send once an
-# API can press it. The log line "Frame 02" is that payload. A bad checksum
-# never reaches on_frame. `update_interval: never` keeps the hub from
-# identifying or polling.
+# Bench loopback on one dev board. Jumper GPIO26 to GPIO27. There is no
+# optocoupler, so the transmitter pin is inverted: the receiver has to lock
+# inverted, which is the polarity half of what the optocoupler does. This
+# does not add the extra half-bit real replies start with.
 #
-# Save the log and run tools/raw_to_fixture.py on it to turn the
-# `Received Raw:` lines into a replay fixture.
+# One second after boot, the sends below. send_raw is not retried. A retry
+# would repeat a command the controller may already have run. Nothing here
+# is a reply, so each request times out. 02 is queued three times because
+# polarity locks on the third good frame. Each wait is longer than one timeout.
+#   02                         one byte, three times.
+#   3F 00                      two bytes. The link puts both copies in one
+#                              buffer with no gap.
+#   36 bytes of FF             42 bytes on the wire. FF does not merge half-bits,
+#                              so this is the symbol count a worst-case reply needs.
+#
+# "Frame ..." is the payload. A bad checksum never reaches on_frame.
+# `update_interval: never` keeps the hub from identifying or polling.
+# The logger is 921600 because one 42-byte raw dump is about 2KB.
+#
+# Save the log and run tools/raw_to_fixture.py on it.
 #
 # Passive sniff, LNK2 still fitted: delete the transmitter, the button and
 # send_raw, set listen_only: true, and add a second remote_receiver as
-# monitor_receiver_id. An ESP32-S3 has room for both. On the original ESP32
-# the two hardware blocks have to share 512 symbols, so use an S3 for that.
+# monitor_receiver_id. Take the inverted flag off. An ESP32-S3 has room for
+# both receivers. On the original ESP32 the two hardware blocks have to share
+# 512 symbols, so use an S3 for that.
 
 esphome:
   name: rainbird-sniffer
@@ -21,14 +32,28 @@ esphome:
     priority: -100
     then:
       - delay: 1s
-      - logger.log: "Sending model query"
+      - logger.log: "Bench: short frame"
       - rainbird.send_raw: [0x02]
+      - delay: 1s
+      - rainbird.send_raw: [0x02]
+      - delay: 1s
+      - rainbird.send_raw: [0x02]
+      - delay: 1s
+      - logger.log: "Bench: 2-byte request"
+      - rainbird.send_raw: [0x3F, 0x00]
+      - delay: 1s
+      - logger.log: "Bench: 36 bytes of FF"
+      - rainbird.send_raw: !lambda |-
+          return std::vector<uint8_t>(36, 0xFF);
+      - delay: 1s
+      - logger.log: "Bench: sequence finished"
 
 esp32:
   variant: esp32
 
 logger:
   level: DEBUG
+  baud_rate: 921600
 
 wifi:
   ssid: example
@@ -46,7 +71,9 @@ external_components:
 
 remote_transmitter:
   id: rb_tx
-  pin: GPIO26
+  pin:
+    number: GPIO26
+    inverted: true
   carrier_duty_percent: 100%
   non_blocking: true
 

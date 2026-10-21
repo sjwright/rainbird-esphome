@@ -64,7 +64,8 @@ TEST_CASE("one request in flight, highest priority first, then oldest") {
   Transmission tx;
   uint32_t now = 0;
   std::vector<std::string> order;
-  const char *answers[] = {"01 40", "8B 01 2F 00 00", "BF 00 00 00 00 00", "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00"};
+  const char *answers[] = {"01 40", "8B 01 2F 00 00", "BF 00 00 00 00 00",
+                           "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00"};
   for (const char *answer : answers) {
     REQUIRE(link.next_transmission(now, &tx));
     order.push_back(sent(tx));
@@ -219,4 +220,20 @@ TEST_CASE("clock wrap and long idle spells do not block or break timeouts") {
   reply(idle, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00", 40);
   idle.enqueue(buf("4C"), Priority::POLL, 2);
   CHECK(idle.next_transmission(40 + 2592000000u, &tx));
+}
+
+TEST_CASE("a request enqueued with no retries fails after one timeout") {
+  LinkCore link;
+  link.enqueue(buf("42"), Priority::USER, 1, 0);
+  Transmission tx;
+  REQUIRE(link.next_transmission(0, &tx));
+  link.tick(tx.first_copy_ms + 399);
+  CHECK(link.in_flight());
+  link.tick(tx.first_copy_ms + 400);
+  Completion done;
+  REQUIRE(link.pop_completion(&done));
+  CHECK(done.outcome == Outcome::FAILED);
+  CHECK(done.attempts == 1);
+  CHECK(link.link_errors() == 1);
+  CHECK(link.queued() == 0);
 }

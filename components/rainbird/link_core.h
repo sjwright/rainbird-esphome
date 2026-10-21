@@ -17,7 +17,7 @@ enum class Priority : uint8_t { USER = 0, FOLLOW_UP = 1, POLL = 2 };
 
 struct LinkTiming {
   uint32_t timeout_ms{400};  // after the end of the first copy (SPEC 2.3: reply ~30 ms later)
-  uint8_t retries{2};        // for timeouts; a NAK is an answer and is not retried
+  uint8_t retries{2};        // extra sends after a timeout. send_raw passes 0. A NAK is not retried.
   uint32_t gap_ms{20};       // quiet time between transactions
   bool repeat_short{true};   // send 2-byte requests twice, back to back, as the LNK2 does
 };
@@ -52,7 +52,13 @@ class LinkCore {
   explicit LinkCore(const LinkTiming &timing = LinkTiming{});
 
   // False when the queue is full or the request is empty or too long.
-  bool enqueue(const ByteBuf &request, Priority priority, uint32_t tag);
+  // `retries` is how many extra sends follow a timeout. The one-argument form
+  // uses LinkTiming::retries. Pass 0 when a second copy could run a command
+  // the controller already acted on. send_raw does, and S7's controls should.
+  bool enqueue(const ByteBuf &request, Priority priority, uint32_t tag, uint8_t retries);
+  bool enqueue(const ByteBuf &request, Priority priority, uint32_t tag) {
+    return this->enqueue(request, priority, tag, this->timing_.retries);
+  }
   // Times out the request in flight. Call before next_transmission().
   void tick(uint32_t now_ms);
   // True when out holds frames to send now.
@@ -78,6 +84,7 @@ class LinkCore {
     Priority priority{Priority::POLL};
     uint32_t tag{0};
     uint8_t attempts{0};
+    uint8_t retries{0};
   };
 
   bool take_next(Pending *out);

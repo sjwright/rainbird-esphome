@@ -9,9 +9,9 @@ Capture with `dump: raw` on the receiver (examples/sniffer.yaml), save the
 
 Each `Received Raw:` dump becomes one `burst:` line. Long bursts continue on
 following `remote.raw` lines that start with two spaces; those are joined.
-The dumper leaves out the idle sample remote_receiver appends, so a burst
-ends with the long run that holds the frame's last half-bit, exactly as the
-listener sees it apart from that sample.
+The raw dumper skips the last timing. That timing is the idle sample
+`remote_receiver` appends, and the decoder needs it to recover the last
+half-bit, so this puts the sample back before decoding.
 
 With --decode (the default) the bursts are run through the component's own
 decoder (tests/unit/decode_fixture, built with make) to fill in `expect:`
@@ -34,6 +34,10 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _NUMBER = re.compile(r"-?\d+")
 _START = "Received Raw:"
 _TAG = "[remote.raw"
+# Wider than a 416 µs pulse at +30% (540). A dump that already ends on an idle
+# tail is left alone.
+_IDLE_ALREADY_US = 540
+_IDLE_US = 4000
 
 
 def parse_log(lines: list[str]) -> list[list[int]]:
@@ -54,6 +58,23 @@ def parse_log(lines: list[str]) -> list[list[int]]:
         else:
             current = None
     return [burst for burst in bursts if burst]
+
+
+def restore_idle(bursts: list[list[int]], idle_us: int = _IDLE_US) -> list[list[int]]:
+    """Put back the idle sample `dump: raw` does not print.
+
+    decode_rmt_ appends one idle after the pulses, at the opposite level from
+    the last pulse. The raw dumper then skips that last entry. The listener
+    still sees it, and the decoder uses it for the frame's last half-bit.
+    """
+    restored = []
+    for burst in bursts:
+        if abs(burst[-1]) > _IDLE_ALREADY_US:
+            restored.append(burst)
+            continue
+        sign = -1 if burst[-1] > 0 else 1
+        restored.append([*burst, sign * idle_us])
+    return restored
 
 
 def render(bursts: list[list[int]], note: str | None, receiver: str | None) -> str:
@@ -87,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    bursts = parse_log(args.log.read_text(errors="replace").splitlines())
+    bursts = restore_idle(parse_log(args.log.read_text(errors="replace").splitlines()))
     if not bursts:
         print(f"{args.log}: no 'Received Raw:' lines found", file=sys.stderr)
         return 1

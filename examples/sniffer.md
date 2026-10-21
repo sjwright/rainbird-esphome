@@ -11,3 +11,15 @@ GPIO26 and GPIO27 are RTC pads on this chip. `remote_receiver` sets up its RMT c
 With that in the image, the same three transmits decoded. The log showed `Frame 02`, a `Received Raw:` line starting `208, -208, 208, -208`, and on the third good frame `Receiver polarity locked: normal, aligned`. A bad checksum still does not reach `on_frame`.
 
 There is no `api:` block, and WiFi never connects, so the "Send model query" button cannot be pressed. The boot action is what transmits. This was a direct jumper, no optocoupler, which is why the lock came up normal and aligned. The optocoupler path is still untested.
+
+## Inverted pin and a full-size frame
+
+Same board, same G26 to G27 jumper, later the same day. The transmitter pin is inverted, which is the polarity an optocoupler will present. The logger is 921600. One second after boot the hub sends three payloads, four seconds apart. Nothing answers, so each one is tried three times.
+
+`02` locks the receiver on the third copy: `inverted, aligned`. The raw line starts `-208, 208, -208, 208`.
+
+`3F 00` is two bytes, so the link puts both copies in one buffer. Each `Received Raw` for that send is 211 timings and decodes to two `Frame 3F.00` lines, with no gap between the copies.
+
+36 bytes of `FF` is 42 bytes on the wire. Half-bits do not merge, so the burst is 651 timings, about 326 RMT symbols. The receiver block is 384. All three copies decode to that 36-byte payload. There is no overflow warning.
+
+`dump: raw` skips the idle sample the receiver appends, and the decoder needs that sample for the last half-bit. `tools/raw_to_fixture.py` puts it back. The capture is `tests/captures/bench-loopback.txt`. One sample of `-290` before the first send decodes to no frame. `Controller link down` is the retries timing out: the loopback is the request, not a reply.

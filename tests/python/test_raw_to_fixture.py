@@ -32,6 +32,13 @@ def test_a_continuation_must_follow_its_dump():
     assert raw_to_fixture.parse_log(log) == [[208]]
 
 
+def test_restore_idle_puts_back_the_sample_the_dumper_skips():
+    # A real dump ends on a 208/416 pulse. The skipped sample is the opposite
+    # level. A line that already ends on the idle tail is kept as it is.
+    bursts = raw_to_fixture.restore_idle([[-208, 416, -416], [-290], [208, -4000]])
+    assert bursts == [[-208, 416, -416, 4000], [-290, 4000], [208, -4000]]
+
+
 def test_render_writes_note_receiver_and_bursts():
     text = raw_to_fixture.render([[208, -4000]], "first line\nsecond", "rx")
     assert text == "# first line\n# second\nreceiver: rx\nburst: 208, -4000\n"

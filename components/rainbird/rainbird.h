@@ -94,7 +94,7 @@ class RainbirdComponent final : public PollingComponent {
   void dump_config() override;
 
   bool submit(const WriteIntent &intent);
-  // Experimental. Queues a request on the link with the carrier off.
+  // Experimental. Queues one request on the link, with the carrier off. A lost reply is not retried.
   bool send_raw(const uint8_t *data, size_t size);
   bool send_raw(const std::vector<uint8_t> &data) { return this->send_raw(data.data(), data.size()); }
 

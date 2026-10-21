@@ -18,7 +18,7 @@ uint32_t frame_air_ms(size_t bytes) {
 
 LinkCore::LinkCore(const LinkTiming &timing) : timing_(timing) {}
 
-bool LinkCore::enqueue(const ByteBuf &request, Priority priority, uint32_t tag) {
+bool LinkCore::enqueue(const ByteBuf &request, Priority priority, uint32_t tag, uint8_t retries) {
   if (request.size == 0 || request.size > MAX_PAYLOAD || this->count_ >= QUEUE_CAP) {
     return false;
   }
@@ -27,6 +27,7 @@ bool LinkCore::enqueue(const ByteBuf &request, Priority priority, uint32_t tag) 
   slot.priority = priority;
   slot.tag = tag;
   slot.attempts = 0;
+  slot.retries = retries;
   return true;
 }
 
@@ -105,7 +106,7 @@ void LinkCore::tick(uint32_t now_ms) {
   this->link_errors_++;
   this->ready_from_ = now_ms;
   this->ready_delay_ = this->timing_.gap_ms;
-  if (this->current_.attempts <= this->timing_.retries && this->push_front(this->current_)) {
+  if (this->current_.attempts <= this->current_.retries && this->push_front(this->current_)) {
     return;
   }
   if (this->consecutive_failures_ < 255) {

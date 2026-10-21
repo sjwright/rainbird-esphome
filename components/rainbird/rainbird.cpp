@@ -92,15 +92,17 @@ void RainbirdComponent::setup() {
 
 void RainbirdComponent::release_receiver_pads_() {
 #ifdef USE_ESP32
-  // On the original ESP32 these pads (GPIO26, GPIO27, and the other RTC pins)
-  // stay on the RTC mux until something calls rtc_gpio_deinit. remote_receiver
-  // never does, so its RMT input can miss a real signal. This runs after that
-  // setup because the hub's priority is just below DATA.
+  // remote_receiver hands the GPIO number to the RMT driver and never runs the
+  // pin's setup(), which is what moves an original-ESP32 RTC pad onto the
+  // digital input. rtc_gpio_deinit does that move. ESP-IDF only declares it
+  // when SOC_RTCIO_PIN_COUNT > 0. C2 and C3 are 0, and they have no such mux.
+  // This runs after remote_receiver setup, because the hub's priority is just below DATA.
   for (uint8_t pin : this->receiver_pins_) {
     auto gpio = static_cast<gpio_num_t>(pin);
-    if (rtc_gpio_is_valid_gpio(gpio)) {
+#if SOC_RTCIO_PIN_COUNT > 0
+    if (rtc_gpio_is_valid_gpio(gpio))
       rtc_gpio_deinit(gpio);
-    }
+#endif
     gpio_input_enable(gpio);
   }
 #endif

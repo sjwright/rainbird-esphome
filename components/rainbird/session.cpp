@@ -181,7 +181,8 @@ bool Session::send_raw(const uint8_t *payload, size_t size, uint32_t now_ms) {
   for (size_t i = 0; i < size; i++) {
     request.push(payload[i]);
   }
-  if (!this->link_.enqueue(request, Priority::USER, tag(TagKind::RAW, 0))) {
+  // Once only. If the controller acted and the reply was lost, a retry would run the command again.
+  if (!this->link_.enqueue(request, Priority::USER, tag(TagKind::RAW, 0), 0)) {
     return false;
   }
   this->hold_ = true;
