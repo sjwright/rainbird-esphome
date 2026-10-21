@@ -37,9 +37,9 @@ class FrameParser {
   bool pop(Frame *out);
 
  private:
-  void pump();
-  bool find_preamble(size_t *at);
-  uint8_t byte_at(size_t bit) const;
+  void pump_();
+  bool find_preamble_(size_t *at);
+  uint8_t byte_at_(size_t bit) const;
 
   std::vector<uint8_t> bits_;
   std::vector<Frame> ready_;

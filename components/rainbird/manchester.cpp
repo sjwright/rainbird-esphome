@@ -64,19 +64,19 @@ class Emitter {
       this->us_ += HALF_BIT_US;
       return;
     }
-    this->flush();
+    this->flush_();
     this->sign_ = sign;
     this->us_ = HALF_BIT_US;
     this->have_ = true;
   }
 
   std::vector<int32_t> take() {
-    this->flush();
+    this->flush_();
     return this->out_;
   }
 
  private:
-  void flush() {
+  void flush_() {
     if (!this->have_) {
       return;
     }

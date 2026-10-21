@@ -660,18 +660,28 @@ events that no entity represents.
 rainbird-esphome/
 ├── README.md, LICENSE, SPEC.md, PLAN.md, WIRE.md
 ├── components/rainbird/
-│   ├── __init__.py              # hub schema, zone/program expansion, final validation, to_code
+│   ├── __init__.py              # hub schema, zone/program expansion, codegen
+│   ├── const.py                 # config keys shared by the Python modules
 │   ├── entity_kinds.py          # THE table of entity kinds (5.3), used by hub and platforms
-│   ├── models.py                # model registry: limits, accepted IDs, implemented flag
-│   ├── automation.h             # rainbird.zone.start / .queue / send_raw; on_nak / on_frame
-│   ├── rainbird.h/.cpp          # hub: state store, publishing, write gate, poll plan
-│   ├── rainbird_link.h/.cpp     # transport over remote_base: queue, timeouts, retries
+│   ├── expand.py                # zones/programs → entity declarations (no ESPHome import)
+│   ├── models.py                # model registry: limits, accepted IDs, program letters
+│   ├── platform.py, schemas.py  # the platform modules and entity schemas, from the kind table
+│   ├── wire.py                  # final validation: wire settings, model limits, dependencies
+│   ├── automation.h             # on_nak / on_frame triggers
+│   ├── rainbird.h/.cpp          # hub: ESPHome glue, publishing, logging, clock sync, actions
 │   ├── rainbird_entities.h/.cpp # one class per writeable domain (5.4)
-│   ├── controller_state.h       # pure: field IDs, values, changed flags
+│   ├── entity_kind.h            # pure: the EntityKind ids, in step with entity_kinds.py
+│   ├── entity_values.h/.cpp     # pure: the C++ kind table, poll plan per binding, values to show
+│   ├── session.h/.cpp           # pure: startup, probes, polls, commands, schedule edits, events
+│   ├── link_core.h/.cpp         # pure: transport queue, timeouts, retries, reply matching
+│   ├── controller_state.h/.cpp  # pure: field IDs, values, changed flags
+│   ├── clock_sync.h/.cpp        # pure: when the controller clock needs setting
+│   ├── countdown.h              # pure: the remaining-time countdown
+│   ├── elapsed.h                # pure: wrap-safe elapsed-time check
 │   ├── manchester.h/.cpp        # pure: raw timings ↔ bits, polarity/phase lock
 │   ├── sip_frame.h/.cpp         # pure: streaming frame parser + encoder, checksum
 │   ├── sip_commands.h/.cpp      # pure: request builders, typed reply parsers, quirk helpers
-│   ├── model.h                  # pure: abstract Model (limits, polls, page map, encodings)
+│   ├── model.h                  # pure: abstract Model (limits, polls, page map, codecs)
 │   ├── model_esp_tm2.h/.cpp     # pure: the one implementation
 │   ├── sensor/__init__.py
 │   ├── binary_sensor/__init__.py
@@ -734,15 +744,21 @@ manchester ──► sip_frame ──► sip_commands      (pure C++: wire forma
                      model  ──►  ControllerState   (pure C++: meaning)
                                    │ changed fields
                                    ▼
-rainbird_link (transport) ◄── RainbirdComponent ──► entities   (ESPHome)
+link_core ◄── session ──► entity_values          (pure C++: behaviour)
+                 ▲  │ events, readout
+                 │  ▼
+          RainbirdComponent ──► entities          (ESPHome)
 ```
 
 1. **One owner per job.**
    - `sip_commands` owns the wire format: bytes ↔ typed structs.
    - The `Model` owns meaning: limits, which requests to poll, the page map
-     and value encodings.
-   - `RainbirdComponent` owns state and publishing.
-   - `rainbird_link` owns scheduling: queue, timeouts and retries.
+     (`locate()`, used for reading pages and editing them) and value codecs.
+   - `Session` owns the controller conversation and `ControllerState`, and
+     reports what happened through one event queue.
+   - `LinkCore` owns scheduling: queue, timeouts and retries.
+   - `entity_values` owns the kind table: what each entity shows, polls and
+     writes. `RainbirdComponent` only publishes and logs.
    - Replies are parsed in exactly one place; the model never re-parses
      bytes.
 2. **Includes only point down the stack.** The pure layers (`manchester`,
@@ -755,9 +771,10 @@ rainbird_link (transport) ◄── RainbirdComponent ──► entities   (ESPH
    republished when a poll changes nothing. The only values outside it are
    local settings that the controller doesn't hold (run durations, test
    duration).
-4. **Every write goes through one function**, `RainbirdComponent::submit()`.
-   The model gate (D12), `allow_writes`, `experimental` and capability checks
-   live there and nowhere else.
+4. **Every write from an entity goes through one function**,
+   `RainbirdComponent::submit()`, which picks the command. The model gate
+   (D12), `allow_writes`, `experimental` and capability checks live in
+   `Session::control()` and `Session::edit_schedule()` and nowhere else.
 5. **Protocol quirks are named functions in `sip_commands`, written once.**
    Examples: `nak_is_unsupported(code)` (bit 0), `queue_program(byte)`
    (`FF` = manual or idle), `queue_seconds()` (big-endian seconds), and
@@ -907,25 +924,20 @@ class RainbirdComponent final : public PollingComponent {
   void dump_config() override;
 
   // The single write path (5.1 rule 4)
-  bool submit(const WriteIntent &intent);
+  bool submit(const EntityBinding &binding, float value);
 
-  // Entity registration: binding → entity, for publish-on-change
-  void register_entity(const Binding &binding, EntityBase *entity);
-
-  const ControllerState &state() const { return this->state_; }
-
-  SUB_SENSOR(remaining_time) /* … */
-  SUB_BINARY_SENSOR(watering) /* … */
+  // Entity registration: each entity carries its binding; the hub polls for it
+  // and publishes to it.
+  void add_switch(RainbirdSwitch *entity);
+  void add_sensor(sensor::Sensor *entity, uint8_t kind, uint8_t zone, uint8_t program, uint8_t index);
+  /* … one per domain … */
 
  protected:
-  void on_reply_(const sip::Reply &reply);   // from the link
-  void publish_changed_();
+  void handle_events_();           // log what the session reports
+  void publish_changed_();         // kind_changed() and *_value() per binding
 
-  RainbirdLink link_;              // owns transmitter/receiver adapters
-  const Model *model_;
-  bool writes_permitted_{false};   // D12
-  ControllerState state_;
-  std::vector<std::pair<Binding, EntityBase *>> bindings_;
+  EspTm2Model model_;
+  std::unique_ptr<Session> session_;  // owns LinkCore and ControllerState
 };
 
 }  // namespace esphome::rainbird
@@ -1078,8 +1090,8 @@ across bursts.
 4. Read the schedule pages that configured entities use.
 5. Clock check and sync if needed. Then the normal poll cycle starts.
 
-Zones that the `03` mask reports as missing are marked unavailable, and a
-warning is logged once.
+Zones that the `03` mask reports as missing get a warning when the link
+reaches running.
 
 ### 6.4 Poll plan
 

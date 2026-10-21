@@ -27,28 +27,28 @@ bool ControllerState::Cell::get(int32_t *out) const {
   return true;
 }
 
-int ControllerState::zone_index(uint8_t zone) {
+int ControllerState::zone_index_(uint8_t zone) {
   if (zone < 1 || zone > STATE_ZONES) {
     return -1;
   }
   return zone - 1;
 }
 
-int ControllerState::program_index(uint8_t program) {
+int ControllerState::program_index_(uint8_t program) {
   if (program >= STATE_PROGRAMS) {
     return -1;
   }
   return program;
 }
 
-ControllerState::Cell *ControllerState::cell_at(Cell *cells, int index, int count) {
+ControllerState::Cell *ControllerState::cell_at_(Cell *cells, int index, int count) {
   if (cells == nullptr || index < 0 || index >= count) {
     return nullptr;
   }
   return &cells[index];
 }
 
-const ControllerState::Cell *ControllerState::cell_at(const Cell *cells, int index, int count) const {
+const ControllerState::Cell *ControllerState::cell_at_(const Cell *cells, int index, int count) const {
   if (cells == nullptr || index < 0 || index >= count) {
     return nullptr;
   }
@@ -94,18 +94,22 @@ void ControllerState::clear_changed() {
   this->station_delay_.changed = false;
   this->global_bypass_.changed = false;
   this->queue_changed_ = false;
-  for (auto &page : this->pages_)
-    page.changed = false;
 }
 
 bool ControllerState::changed(Field field, uint8_t zone, uint8_t program, uint8_t index) const {
-  int zi = zone_index(zone);
-  int pi = program_index(program);
+  int zi = zone_index_(zone);
+  int pi = program_index_(program);
   switch (field) {
     case Field::ZONES_RUNNING:
+      if (zone == 0) {
+        for (const Cell &cell : this->running_) {
+          if (cell.changed) {
+            return true;
+          }
+        }
+        return false;
+      }
       return zi >= 0 && this->running_[zi].changed;
-    case Field::AVAILABLE_ZONES:
-      return zi >= 0 && this->available_[zi].changed;
     case Field::CLOCK:
       return this->hour_.changed || this->minute_.changed || this->second_.changed || this->date_packed_.changed;
     case Field::RAIN_DELAY:
@@ -121,7 +125,9 @@ bool ControllerState::changed(Field field, uint8_t zone, uint8_t program, uint8_
     case Field::REMAINING_TIME:
       return this->remaining_.changed;
     case Field::QUEUE:
-      return this->queue_changed_ || this->queued_count_.changed;
+      return this->queue_changed_;
+    case Field::QUEUED_COUNT:
+      return this->queued_count_.changed;
     case Field::SEASONAL_ADJUST:
       return pi >= 0 && this->seasonal_[pi].changed;
     case Field::SCHEDULE_CHANGED:
@@ -145,6 +151,14 @@ bool ControllerState::changed(Field field, uint8_t zone, uint8_t program, uint8_
     case Field::GLOBAL_SENSOR_BYPASS:
       return this->global_bypass_.changed;
     case Field::ZONE_SENSOR_BYPASS:
+      if (zone == 0) {
+        for (const Cell &cell : this->zone_bypass_) {
+          if (cell.changed) {
+            return true;
+          }
+        }
+        return false;
+      }
       return zi >= 0 && this->zone_bypass_[zi].changed;
     case Field::ZONE_FAULT:
     case Field::COUNT:
@@ -153,15 +167,52 @@ bool ControllerState::changed(Field field, uint8_t zone, uint8_t program, uint8_
   return false;
 }
 
+void ControllerState::set_page_field(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value) {
+  switch (field) {
+    case Field::STATION_DELAY:
+      this->set_station_delay(static_cast<uint16_t>(value));
+      break;
+    case Field::GLOBAL_SENSOR_BYPASS:
+      this->set_global_bypass(value != 0);
+      break;
+    case Field::ZONE_SENSOR_BYPASS:
+      this->set_zone_bypass(zone, value != 0);
+      break;
+    case Field::WATERING_DAY:
+      this->set_watering_day(program, index, value != 0);
+      break;
+    case Field::CYCLE_DAYS:
+      this->set_cycle_days(program, static_cast<uint8_t>(value));
+      break;
+    case Field::DAYS_UNTIL_NEXT:
+      this->set_days_until(program, static_cast<uint8_t>(value));
+      break;
+    case Field::FREQUENCY:
+      this->set_frequency(program, static_cast<uint8_t>(value));
+      break;
+    case Field::START_TIME:
+      this->set_start_minutes(program, index, value);
+      break;
+    case Field::START_ENABLED:
+      this->set_start_enabled(program, index, value != 0);
+      break;
+    case Field::RUN_TIME:
+      this->set_run_minutes(zone, program, static_cast<uint16_t>(value));
+      break;
+    default:
+      break;
+  }
+}
+
 void ControllerState::set_zone_running(uint8_t zone, bool on) {
-  Cell *cell = this->cell_at(this->running_, zone_index(zone), STATE_ZONES);
+  Cell *cell = this->cell_at_(this->running_, zone_index_(zone), STATE_ZONES);
   if (cell != nullptr) {
     cell->set(on ? 1 : 0);
   }
 }
 
 bool ControllerState::zone_running(uint8_t zone, bool *on) const {
-  const Cell *cell = this->cell_at(this->running_, zone_index(zone), STATE_ZONES);
+  const Cell *cell = this->cell_at_(this->running_, zone_index_(zone), STATE_ZONES);
   int32_t value = 0;
   if (cell == nullptr || !cell->get(&value) || on == nullptr) {
     return false;
@@ -171,14 +222,14 @@ bool ControllerState::zone_running(uint8_t zone, bool *on) const {
 }
 
 void ControllerState::set_zone_available(uint8_t zone, bool on) {
-  Cell *cell = this->cell_at(this->available_, zone_index(zone), STATE_ZONES);
+  Cell *cell = this->cell_at_(this->available_, zone_index_(zone), STATE_ZONES);
   if (cell != nullptr) {
     cell->set(on ? 1 : 0);
   }
 }
 
 bool ControllerState::zone_available(uint8_t zone, bool *on) const {
-  const Cell *cell = this->cell_at(this->available_, zone_index(zone), STATE_ZONES);
+  const Cell *cell = this->cell_at_(this->available_, zone_index_(zone), STATE_ZONES);
   int32_t value = 0;
   if (cell == nullptr || !cell->get(&value) || on == nullptr) {
     return false;
@@ -358,14 +409,14 @@ bool ControllerState::queue_item(uint8_t index, QueueItem *out) const {
 }
 
 void ControllerState::set_seasonal(uint8_t program, uint16_t percent) {
-  Cell *cell = this->cell_at(this->seasonal_, program_index(program), STATE_PROGRAMS);
+  Cell *cell = this->cell_at_(this->seasonal_, program_index_(program), STATE_PROGRAMS);
   if (cell != nullptr) {
     cell->set(percent);
   }
 }
 
 bool ControllerState::seasonal(uint8_t program, uint16_t *percent) const {
-  const Cell *cell = this->cell_at(this->seasonal_, program_index(program), STATE_PROGRAMS);
+  const Cell *cell = this->cell_at_(this->seasonal_, program_index_(program), STATE_PROGRAMS);
   int32_t value = 0;
   if (cell == nullptr || percent == nullptr || !cell->get(&value)) {
     return false;
@@ -388,8 +439,8 @@ bool ControllerState::schedule_changed(uint32_t *seconds_since_2000) const {
 }
 
 void ControllerState::set_run_minutes(uint8_t zone, uint8_t program, uint16_t minutes) {
-  int zi = zone_index(zone);
-  int pi = program_index(program);
+  int zi = zone_index_(zone);
+  int pi = program_index_(program);
   if (zi < 0 || pi < 0) {
     return;
   }
@@ -397,8 +448,8 @@ void ControllerState::set_run_minutes(uint8_t zone, uint8_t program, uint16_t mi
 }
 
 bool ControllerState::run_minutes(uint8_t zone, uint8_t program, uint16_t *minutes) const {
-  int zi = zone_index(zone);
-  int pi = program_index(program);
+  int zi = zone_index_(zone);
+  int pi = program_index_(program);
   int32_t value = 0;
   if (zi < 0 || pi < 0 || minutes == nullptr || !this->run_minutes_[zi][pi].get(&value)) {
     return false;
@@ -408,7 +459,7 @@ bool ControllerState::run_minutes(uint8_t zone, uint8_t program, uint16_t *minut
 }
 
 void ControllerState::set_watering_day(uint8_t program, uint8_t index, bool on) {
-  int pi = program_index(program);
+  int pi = program_index_(program);
   if (pi < 0 || index >= 7) {
     return;
   }
@@ -416,7 +467,7 @@ void ControllerState::set_watering_day(uint8_t program, uint8_t index, bool on) 
 }
 
 bool ControllerState::watering_day(uint8_t program, uint8_t index, bool *on) const {
-  int pi = program_index(program);
+  int pi = program_index_(program);
   int32_t value = 0;
   if (pi < 0 || index >= 7 || on == nullptr || !this->watering_day_[pi][index].get(&value)) {
     return false;
@@ -426,14 +477,14 @@ bool ControllerState::watering_day(uint8_t program, uint8_t index, bool *on) con
 }
 
 void ControllerState::set_frequency(uint8_t program, uint8_t frequency) {
-  Cell *cell = this->cell_at(this->frequency_, program_index(program), STATE_PROGRAMS);
+  Cell *cell = this->cell_at_(this->frequency_, program_index_(program), STATE_PROGRAMS);
   if (cell != nullptr) {
     cell->set(frequency);
   }
 }
 
 bool ControllerState::frequency(uint8_t program, uint8_t *frequency) const {
-  const Cell *cell = this->cell_at(this->frequency_, program_index(program), STATE_PROGRAMS);
+  const Cell *cell = this->cell_at_(this->frequency_, program_index_(program), STATE_PROGRAMS);
   int32_t value = 0;
   if (cell == nullptr || frequency == nullptr || !cell->get(&value)) {
     return false;
@@ -443,14 +494,14 @@ bool ControllerState::frequency(uint8_t program, uint8_t *frequency) const {
 }
 
 void ControllerState::set_cycle_days(uint8_t program, uint8_t days) {
-  Cell *cell = this->cell_at(this->cycle_days_, program_index(program), STATE_PROGRAMS);
+  Cell *cell = this->cell_at_(this->cycle_days_, program_index_(program), STATE_PROGRAMS);
   if (cell != nullptr) {
     cell->set(days);
   }
 }
 
 bool ControllerState::cycle_days(uint8_t program, uint8_t *days) const {
-  const Cell *cell = this->cell_at(this->cycle_days_, program_index(program), STATE_PROGRAMS);
+  const Cell *cell = this->cell_at_(this->cycle_days_, program_index_(program), STATE_PROGRAMS);
   int32_t value = 0;
   if (cell == nullptr || days == nullptr || !cell->get(&value)) {
     return false;
@@ -460,14 +511,14 @@ bool ControllerState::cycle_days(uint8_t program, uint8_t *days) const {
 }
 
 void ControllerState::set_days_until(uint8_t program, uint8_t days) {
-  Cell *cell = this->cell_at(this->days_until_, program_index(program), STATE_PROGRAMS);
+  Cell *cell = this->cell_at_(this->days_until_, program_index_(program), STATE_PROGRAMS);
   if (cell != nullptr) {
     cell->set(days);
   }
 }
 
 bool ControllerState::days_until(uint8_t program, uint8_t *days) const {
-  const Cell *cell = this->cell_at(this->days_until_, program_index(program), STATE_PROGRAMS);
+  const Cell *cell = this->cell_at_(this->days_until_, program_index_(program), STATE_PROGRAMS);
   int32_t value = 0;
   if (cell == nullptr || days == nullptr || !cell->get(&value)) {
     return false;
@@ -477,7 +528,7 @@ bool ControllerState::days_until(uint8_t program, uint8_t *days) const {
 }
 
 void ControllerState::set_start_minutes(uint8_t program, uint8_t index, int32_t minutes) {
-  int pi = program_index(program);
+  int pi = program_index_(program);
   if (pi < 0 || index >= STATE_STARTS) {
     return;
   }
@@ -486,7 +537,7 @@ void ControllerState::set_start_minutes(uint8_t program, uint8_t index, int32_t 
 }
 
 bool ControllerState::start_minutes(uint8_t program, uint8_t index, int32_t *minutes) const {
-  int pi = program_index(program);
+  int pi = program_index_(program);
   if (pi < 0 || index >= STATE_STARTS || minutes == nullptr) {
     return false;
   }
@@ -494,7 +545,7 @@ bool ControllerState::start_minutes(uint8_t program, uint8_t index, int32_t *min
 }
 
 void ControllerState::set_start_enabled(uint8_t program, uint8_t index, bool on) {
-  int pi = program_index(program);
+  int pi = program_index_(program);
   if (pi < 0 || index >= STATE_STARTS) {
     return;
   }
@@ -502,7 +553,7 @@ void ControllerState::set_start_enabled(uint8_t program, uint8_t index, bool on)
 }
 
 bool ControllerState::start_enabled(uint8_t program, uint8_t index, bool *on) const {
-  int pi = program_index(program);
+  int pi = program_index_(program);
   int32_t value = 0;
   if (pi < 0 || index >= STATE_STARTS || on == nullptr || !this->start_enabled_[pi][index].get(&value)) {
     return false;
@@ -522,38 +573,39 @@ bool ControllerState::station_delay(uint16_t *seconds) const {
   return true;
 }
 
-void ControllerState::set_global_bypass(uint8_t wire) { this->global_bypass_.set(wire); }
+void ControllerState::set_global_bypass(bool bypassed) { this->global_bypass_.set(bypassed ? 1 : 0); }
 
-bool ControllerState::global_bypass(uint8_t *wire) const {
+bool ControllerState::global_bypass(bool *bypassed) const {
   int32_t value = 0;
-  if (wire == nullptr || !this->global_bypass_.get(&value)) {
+  if (bypassed == nullptr || !this->global_bypass_.get(&value)) {
     return false;
   }
-  *wire = static_cast<uint8_t>(value);
+  *bypassed = value != 0;
   return true;
 }
 
-void ControllerState::set_zone_bypass(uint8_t zone, uint8_t wire) {
-  Cell *cell = this->cell_at(this->zone_bypass_, zone_index(zone), STATE_ZONES);
+void ControllerState::set_zone_bypass(uint8_t zone, bool bypassed) {
+  Cell *cell = this->cell_at_(this->zone_bypass_, zone_index_(zone), STATE_ZONES);
   if (cell != nullptr) {
-    cell->set(wire);
+    cell->set(bypassed ? 1 : 0);
   }
 }
 
-bool ControllerState::zone_bypass(uint8_t zone, uint8_t *wire) const {
-  const Cell *cell = this->cell_at(this->zone_bypass_, zone_index(zone), STATE_ZONES);
+bool ControllerState::zone_bypass(uint8_t zone, bool *bypassed) const {
+  const Cell *cell = this->cell_at_(this->zone_bypass_, zone_index_(zone), STATE_ZONES);
   int32_t value = 0;
-  if (cell == nullptr || wire == nullptr || !cell->get(&value)) {
+  if (cell == nullptr || bypassed == nullptr || !cell->get(&value)) {
     return false;
   }
-  *wire = static_cast<uint8_t>(value);
+  *bypassed = value != 0;
   return true;
 }
 
 void ControllerState::set_page(uint8_t page, const uint8_t *data, uint8_t size) {
-  if (data == nullptr || size > sizeof(PageImage::data)) {
+  if (data == nullptr || size > MAX_PAGE_BYTES) {
     return;
   }
+  // The slot already holding this page, else the first free one.
   PageImage *slot = nullptr;
   for (auto &image : this->pages_) {
     if (image.known && image.page == page) {
@@ -567,25 +619,12 @@ void ControllerState::set_page(uint8_t page, const uint8_t *data, uint8_t size) 
   if (slot == nullptr) {
     return;
   }
-  bool same = slot->known && slot->page == page && slot->size == size;
-  if (same) {
-    for (uint8_t i = 0; i < size; i++) {
-      if (slot->data[i] != data[i]) {
-        same = false;
-        break;
-      }
-    }
-  }
-  if (same) {
-    return;
-  }
   slot->page = page;
   slot->size = size;
   for (uint8_t i = 0; i < size; i++) {
     slot->data[i] = data[i];
   }
   slot->known = true;
-  slot->changed = true;
 }
 
 bool ControllerState::copy_page(uint8_t page, uint8_t *data, size_t cap, uint8_t *size) const {
@@ -601,15 +640,6 @@ bool ControllerState::copy_page(uint8_t page, uint8_t *data, size_t cap, uint8_t
     }
     *size = image.size;
     return true;
-  }
-  return false;
-}
-
-bool ControllerState::page_changed(uint8_t page) const {
-  for (const auto &image : this->pages_) {
-    if (image.known && image.page == page) {
-      return image.changed;
-    }
   }
   return false;
 }

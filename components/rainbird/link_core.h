@@ -92,10 +92,10 @@ class LinkCore {
     Delivery delivery{Delivery::NORMAL};
   };
 
-  bool take_next(Pending *out);
-  bool push_front(const Pending &pending);
-  void complete(const Completion &completion);
-  void fail(const Pending &pending);
+  bool take_next_(Pending *out);
+  bool push_front_(const Pending &pending);
+  void complete_(const Completion &completion);
+  void fail_(const Pending &pending);
 
   LinkTiming timing_;
   Pending queue_[QUEUE_CAP]{};

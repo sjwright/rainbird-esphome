@@ -43,42 +43,47 @@ from esphome.const import (
 )
 from esphome.core import CORE, ID
 
-from .entity_kinds import FREQUENCY_OPTIONS, KINDS_BY_ID, EntityKind, KindId, Write
+from .const import (
+    ACTION_SEND_RAW,
+    ACTION_ZONE_QUEUE,
+    ACTION_ZONE_START,
+    CONF_ACCEPT_MODEL_IDS,
+    CONF_ALLOW_WRITES,
+    CONF_CLOCK_SYNC,
+    CONF_DISABLED,
+    CONF_EXPERIMENTAL,
+    CONF_GENERATED,
+    CONF_LISTEN_ONLY,
+    CONF_MAX_DRIFT,
+    CONF_MONITOR_RECEIVER_ID,
+    CONF_ON_FRAME,
+    CONF_ON_NAK,
+    CONF_PROGRAM,
+    CONF_PROGRAM_DEFAULTS,
+    CONF_PROGRAMS,
+    CONF_REFRESH_INTERVAL,
+    CONF_SCHEDULE,
+    CONF_VALVE_SWITCH_MODE,
+    CONF_ZONE,
+    CONF_ZONE_DEFAULTS,
+    CONF_ZONES,
+    GENERATED_CONFIG,
+    GENERATED_INDEX,
+    GENERATED_KIND,
+)
+from .entity_kinds import FREQUENCY_OPTIONS, KINDS_BY_ID, EntityKind, KindId
 from .errors import ConfigError
 from .expand import expand
-from .models import resolve_model
+from .models import ANY_MODEL_LETTERS, program_index, resolve_model
 from .schemas import build_entity_schema
 from .wire import validate_hub
 
-DOMAIN = "rainbird"
 CODEOWNERS = ["@sjwright"]
 MULTI_CONF = True
 DEPENDENCIES = ["remote_receiver"]
 # The domains the hub can generate from zones/programs. sensor and text_sensor
 # entities are only hand-written, so those domains load with their platforms.
 AUTO_LOAD = ["switch", "number", "button", "binary_sensor", "select", "datetime"]
-
-CONF_RAINBIRD_ID = "rainbird_id"
-CONF_LISTEN_ONLY = "listen_only"
-CONF_MONITOR_RECEIVER_ID = "monitor_receiver_id"
-CONF_ACCEPT_MODEL_IDS = "accept_model_ids"
-CONF_VALVE_SWITCH_MODE = "valve_switch_mode"
-CONF_CLOCK_SYNC = "clock_sync"
-CONF_MAX_DRIFT = "max_drift"
-CONF_SCHEDULE = "schedule"
-CONF_REFRESH_INTERVAL = "refresh_interval"
-CONF_ALLOW_WRITES = "allow_writes"
-CONF_EXPERIMENTAL = "experimental"
-CONF_ZONE_DEFAULTS = "zone_defaults"
-CONF_ZONES = "zones"
-CONF_PROGRAM_DEFAULTS = "program_defaults"
-CONF_PROGRAMS = "programs"
-CONF_ZONE = "zone"
-CONF_PROGRAM = "program"
-CONF_DISABLED = "disabled"
-CONF_ON_NAK = "on_nak"
-CONF_ON_FRAME = "on_frame"
-CONF_GENERATED = "generated"
 
 rainbird_ns = cg.esphome_ns.namespace("rainbird")
 RainbirdComponent = rainbird_ns.class_("RainbirdComponent", cg.PollingComponent)
@@ -137,11 +142,12 @@ def entity_schema(kind: EntityKind):
 
 
 def program_letter(value):
-    """A–D covers every model in the registry. The hub's model narrows it later."""
+    """Any letter some model uses. The hub's model narrows it in final validation."""
     text = cv.string(value).upper()
     # Exact match: `in` on a string is a substring test, so "AB" or "" would pass.
-    if len(text) != 1 or text not in "ABCD":
-        raise cv.Invalid(f"Program {text} is not a program letter (A–D)")
+    if len(text) != 1 or text not in ANY_MODEL_LETTERS:
+        letters = f"{ANY_MODEL_LETTERS[0]}–{ANY_MODEL_LETTERS[-1]}"
+        raise cv.Invalid(f"Program {text} is not a program letter ({letters})")
     return text
 
 
@@ -290,11 +296,11 @@ def _validate(config):
             raise cv.Invalid(f"{entity.id}: {err}") from err
         generated.append(
             {
-                "kind_id": int(entity.kind.kind_id),
-                "zone": entity.zone,
-                "program": entity.program,
-                "index": entity.index,
-                "config": validated,
+                GENERATED_KIND: int(entity.kind.kind_id),
+                CONF_ZONE: entity.zone,
+                CONF_PROGRAM: entity.program,
+                GENERATED_INDEX: entity.index,
+                GENERATED_CONFIG: validated,
             }
         )
     config[CONF_GENERATED] = generated
@@ -351,7 +357,6 @@ async def build_entity(parent, kind: EntityKind, entity_config, zone, program, i
             cg.add(var.set_initial_value(entity_config[CONF_INITIAL_VALUE]))
         if CONF_RESTORE_VALUE in entity_config:
             cg.add(var.set_restore_value(entity_config[CONF_RESTORE_VALUE]))
-        cg.add(var.set_command(kind.write != Write.LOCAL))
     elif kind.domain == "button":
         var = await button_comp.new_button(entity_config)
     elif kind.domain == "select":
@@ -439,7 +444,7 @@ async def _zone_action_to_code(config, action_id, template_arg, args, queue: boo
 
 
 @automation.register_action(
-    "rainbird.zone.start",
+    ACTION_ZONE_START,
     RainbirdZoneAction,
     _zone_action_schema(),
     synchronous=True,
@@ -449,7 +454,7 @@ async def zone_start_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "rainbird.zone.queue",
+    ACTION_ZONE_QUEUE,
     RainbirdZoneAction,
     _zone_action_schema(),
     synchronous=True,
@@ -459,7 +464,7 @@ async def zone_queue_to_code(config, action_id, template_arg, args):
 
 
 @automation.register_action(
-    "rainbird.send_raw",
+    ACTION_SEND_RAW,
     RainbirdSendRawAction,
     cv.maybe_simple_value(
         {
@@ -533,18 +538,17 @@ async def to_code(config):
         cg.add(var.add_zone(zone_var))
     for program in config[CONF_PROGRAMS]:
         program_var = cg.new_Pvariable(program[CONF_ID])
-        cg.add(program_var.set_program("ABCD".index(program[CONF_PROGRAM])))
+        cg.add(program_var.set_program(program_index(program[CONF_PROGRAM])))
         cg.add(program_var.set_name(program[CONF_NAME]))
         cg.add(var.add_program(program_var))
     for item in config[CONF_GENERATED]:
-        kind = KINDS_BY_ID[item["kind_id"]]
         await build_entity(
             var,
-            kind,
-            item["config"],
-            item["zone"],
-            item["program"],
-            item["index"],
+            KINDS_BY_ID[item[GENERATED_KIND]],
+            item[GENERATED_CONFIG],
+            item[CONF_ZONE],
+            item[CONF_PROGRAM],
+            item[GENERATED_INDEX],
         )
     for conf in config.get(CONF_ON_NAK, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])

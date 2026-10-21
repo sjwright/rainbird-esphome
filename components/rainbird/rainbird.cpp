@@ -11,7 +11,7 @@
 #endif
 
 #include "clock_sync.h"
-#include "entity_values.h"
+#include "elapsed.h"
 #include "log_tag.h"
 #include "rainbird_entities.h"
 #include "sip_commands.h"
@@ -30,10 +30,12 @@ constexpr uint32_t SILENCE_INTERVAL_ID = 2;
 constexpr uint32_t SILENCE_CHECK_MS = 5000;
 // A clock set the controller did not take is tried again after this long, not on every reading.
 constexpr uint32_t CLOCK_SYNC_RETRY_MS = 60000;
-// 39 and 4B take whole minutes in one byte.
+// 39, 4B and 3A take whole minutes in one byte.
 constexpr uint32_t MAX_RUN_MINUTES = 255;
 // 4A timestamps count from 2000-01-01 (SPEC 5.3).
 constexpr time_t SECONDS_1970_TO_2000 = 946684800;
+// Room for a whole page as "AA.BB.CC…".
+constexpr size_t PAGE_HEX_SIZE = format_hex_pretty_size(MAX_PAGE_BYTES);
 
 int32_t rounded(float value) {
   if (value >= 0)
@@ -41,40 +43,17 @@ int32_t rounded(float value) {
   return static_cast<int32_t>(value - 0.5f);
 }
 
-bool schedule_field(EntityKind kind, Field *field) {
-  if (field == nullptr)
+// A local minutes setting as the one byte 39, 4B and 3A take.
+bool whole_minutes(float value, uint8_t *minutes) {
+  if (std::isnan(value))
     return false;
-  switch (kind) {
-    case EntityKind::RUN_TIME:
-      *field = Field::RUN_TIME;
-      return true;
-    case EntityKind::WATERING_DAY:
-      *field = Field::WATERING_DAY;
-      return true;
-    case EntityKind::FREQUENCY:
-      *field = Field::FREQUENCY;
-      return true;
-    case EntityKind::CYCLE_DAYS:
-      *field = Field::CYCLE_DAYS;
-      return true;
-    case EntityKind::DAYS_UNTIL_NEXT:
-      *field = Field::DAYS_UNTIL_NEXT;
-      return true;
-    case EntityKind::START_TIME:
-      *field = Field::START_TIME;
-      return true;
-    case EntityKind::STATION_DELAY:
-      *field = Field::STATION_DELAY;
-      return true;
-    case EntityKind::GLOBAL_BYPASS:
-      *field = Field::GLOBAL_SENSOR_BYPASS;
-      return true;
-    case EntityKind::ZONE_BYPASS:
-      *field = Field::ZONE_SENSOR_BYPASS;
-      return true;
-    default:
-      return false;
-  }
+  int32_t whole = rounded(value);
+  if (whole < 1)
+    whole = 1;
+  if (whole > static_cast<int32_t>(MAX_RUN_MINUTES))
+    whole = MAX_RUN_MINUTES;
+  *minutes = static_cast<uint8_t>(whole);
+  return true;
 }
 
 const char *stage_text(SessionStage stage) {
@@ -99,6 +78,46 @@ const char *stage_text(SessionStage stage) {
 
 }  // namespace
 
+// Every registered entity's binding, writable and read-only alike.
+template<typename F> void RainbirdComponent::for_each_binding_(F &&visit) const {
+#ifdef USE_SWITCH
+  for (auto *entity : this->switches_)
+    visit(entity->binding());
+#endif
+#ifdef USE_NUMBER
+  for (auto *entity : this->numbers_)
+    visit(entity->binding());
+#endif
+#ifdef USE_BUTTON
+  for (auto *entity : this->buttons_)
+    visit(entity->binding());
+#endif
+#ifdef USE_SELECT
+  for (auto *entity : this->selects_)
+    visit(entity->binding());
+#endif
+#ifdef USE_DATETIME_TIME
+  for (auto *entity : this->times_)
+    visit(entity->binding());
+#endif
+#ifdef USE_DATETIME_DATETIME
+  for (auto *entity : this->datetimes_)
+    visit(entity->binding());
+#endif
+#ifdef USE_SENSOR
+  for (const auto &bound : this->sensors_)
+    visit(bound.binding);
+#endif
+#ifdef USE_BINARY_SENSOR
+  for (const auto &bound : this->binary_sensors_)
+    visit(bound.binding);
+#endif
+#ifdef USE_TEXT_SENSOR
+  for (const auto &bound : this->text_sensors_)
+    visit(bound.binding);
+#endif
+}
+
 void RainbirdComponent::setup() {
   SessionConfig config;
   config.listen_only = this->listen_only_;
@@ -107,50 +126,27 @@ void RainbirdComponent::setup() {
   config.update_interval_ms = this->base_interval_;
   config.refresh_interval_ms = this->refresh_interval_ms_;
   config.allow_writes = this->allow_writes_;
+  config.experimental = this->experimental_;
+  config.valve_queue = this->valve_queue_;
   config.accept_ids = this->accept_ids_;
-  // The fields configured entities read decide what is polled (PLAN 6.4).
-  // Schedule masks stay 0 until an entity needs a page, and 0 means every zone or program.
-#ifdef USE_SWITCH
-  for (auto *entity : this->switches_)
-    this->note_binding_(entity->kind(), entity->zone(), entity->program(), &config);
-#endif
-#ifdef USE_NUMBER
-  for (auto *entity : this->numbers_)
-    this->note_binding_(entity->kind(), entity->zone(), entity->program(), &config);
-#endif
-#ifdef USE_BUTTON
-  for (auto *entity : this->buttons_)
-    this->note_binding_(entity->kind(), entity->zone(), entity->program(), &config);
-#endif
-#ifdef USE_SELECT
-  for (auto *entity : this->selects_)
-    this->note_binding_(entity->kind(), NO_ZONE, entity->program(), &config);
-#endif
-#ifdef USE_DATETIME_TIME
-  for (auto *entity : this->times_)
-    this->note_binding_(entity->kind(), NO_ZONE, entity->program(), &config);
-#endif
-#ifdef USE_DATETIME_DATETIME
-  for (auto *entity : this->datetimes_)
-    this->note_binding_(entity->kind(), NO_ZONE, NO_PROGRAM, &config);
-#endif
-#ifdef USE_SENSOR
-  for (auto &binding : this->sensors_)
-    this->note_binding_(binding.kind, binding.zone, binding.program, &config);
-#endif
-#ifdef USE_BINARY_SENSOR
-  for (auto &binding : this->binary_sensors_)
-    this->note_binding_(binding.kind, binding.zone, binding.program, &config);
-#endif
-#ifdef USE_TEXT_SENSOR
-  for (auto &binding : this->text_sensors_)
-    this->note_binding_(binding.kind, binding.zone, binding.program, &config);
-#endif
+  // What the configured entities show decides what is polled and which schedule pages are read (PLAN 6.4).
+  this->for_each_binding_([&](const EntityBinding &binding) { note_binding(this->model_, binding, &config); });
   if (this->clock_sync_)
     config.used.add(Field::CLOCK);
+#ifdef USE_SENSOR
+  for (const auto &bound : this->sensors_) {
+    if (bound.binding.kind == EntityKind::REMAINING_TIME)
+      this->remaining_sensors_.push_back(bound.entity);
+  }
+#endif
+
+  this->text_.zone = [this](uint8_t zone) { return this->zone_name_(zone); };
+  this->text_.program = [this](uint8_t program) { return this->program_name_(program); };
+  this->text_.model = this->model_name_;
+  this->text_.timestamp = [this](uint32_t seconds, std::string *out) { return this->local_timestamp_(seconds, out); };
+
   this->session_ = std::make_unique<Session>(this->model_, config);
   this->session_->start(millis());
-  this->last_stage_ = this->session_->stage();
   this->release_receiver_pads_();
   if (this->listen_only_) {
     // With `update_interval: never`, update() never runs, so silence has its own timer.
@@ -161,6 +157,26 @@ void RainbirdComponent::setup() {
   }
   this->after_activity_();
 }
+
+#ifdef USE_NUMBER
+void RainbirdComponent::add_number(RainbirdNumber *entity) {
+  this->numbers_.push_back(entity);
+  const EntityBinding &binding = entity->binding();
+  if (binding.kind == EntityKind::RUN_DURATION && binding.zone >= 1 && binding.zone <= STATE_ZONES)
+    this->run_durations_[binding.zone - 1] = entity;
+  if (binding.kind == EntityKind::TEST_DURATION)
+    this->test_duration_ = entity;
+}
+#endif
+
+#ifdef USE_DATETIME_TIME
+void RainbirdComponent::add_time(RainbirdTime *entity) {
+  this->times_.push_back(entity);
+  const EntityBinding &binding = entity->binding();
+  if (binding.program < STATE_PROGRAMS && binding.index < STATE_STARTS)
+    this->start_times_[binding.program][binding.index] = entity;
+}
+#endif
 
 void RainbirdComponent::release_receiver_pads_() {
 #ifdef USE_ESP32
@@ -187,8 +203,8 @@ void RainbirdComponent::loop() {
   }
   uint32_t now = App.get_loop_component_start_time();
   this->session_->tick(now);
-  // The page write is queued by the read that just finished. Log it before it goes out.
-  this->log_page_edit_();
+  // A page write queued by the read that just finished is logged before it goes out.
+  this->handle_events_();
   Transmission tx;
   if (this->session_->next_transmission(now, &tx))
     this->transmit_(tx);
@@ -204,33 +220,9 @@ void RainbirdComponent::update() {
 }
 
 void RainbirdComponent::after_activity_() {
+  this->handle_events_();
   this->publish_changed_();
-
-  SessionStage stage = this->session_->stage();
-  if (stage != this->last_stage_) {
-    ESP_LOGD(TAG, "Link: %s", stage_text(stage));
-    if (stage == SessionStage::RUNNING) {
-      const Identity &identity = this->session_->identity();
-      ESP_LOGI(TAG, "Controller %s, firmware %s", model_text(identity, this->model_name_).c_str(),
-               firmware_text(identity).c_str());
-      if (!this->session_->writes_permitted()) {
-        ESP_LOGW(TAG, "Model id is not one %s accepts; commands stay off. See accept_model_ids.", this->model_name_);
-      }
-    }
-    this->last_stage_ = stage;
-  }
-  // Log the link going up or down once, not on every failed request.
-  if (this->session_->connected_known() && (!this->link_logged_ || this->link_up_ != this->session_->connected())) {
-    this->link_logged_ = true;
-    this->link_up_ = this->session_->connected();
-    if (this->link_up_) {
-      ESP_LOGI(TAG, "Controller link up");
-      this->status_clear_warning();
-    } else {
-      ESP_LOGW(TAG, "Controller link down");
-      this->status_set_warning();
-    }
-  }
+  this->check_clock_();
 
   // Fast while watering or just after a command (PLAN 6.3). One poller, no second timer.
   if (this->base_interval_ != SCHEDULER_DONT_RUN) {
@@ -241,18 +233,69 @@ void RainbirdComponent::after_activity_() {
     }
   }
 
-  const char *reason = nullptr;
-  if (this->session_->take_edit_failure(&reason) && reason != nullptr)
-    ESP_LOGE(TAG, "Schedule edit failed: %s", reason);
-
-  // A clock command queued here waits for the next loop. Calling loop() from here would recurse.
-  this->check_clock_();
-
   // loop() only runs while the link has work: a request queued, in flight or finishing.
   if (this->session_->busy()) {
     this->enable_loop();
   } else {
     this->disable_loop();
+  }
+}
+
+void RainbirdComponent::handle_events_() {
+  SessionEvent event;
+  while (this->session_->take_event(&event)) {
+    switch (event.kind) {
+      case SessionEventKind::STAGE:
+        ESP_LOGD(TAG, "Link: %s", stage_text(event.stage));
+        if (event.stage == SessionStage::RUNNING)
+          this->log_controller_();
+        break;
+      case SessionEventKind::LINK_UP:
+        ESP_LOGI(TAG, "Controller link up");
+        this->status_clear_warning();
+        break;
+      case SessionEventKind::LINK_DOWN:
+        ESP_LOGW(TAG, "Controller link down");
+        this->status_set_warning();
+        break;
+      case SessionEventKind::NAK:
+        // Bit 0 is "not supported", and the session has dropped that capability. Any other code
+        // is more likely a request this component got wrong (SPEC 3.3, question 15).
+        if (nak_is_unsupported(event.code)) {
+          ESP_LOGI(TAG, "The controller does not support %02X", event.opcode);
+        } else {
+          ESP_LOGW(TAG, "The controller refused %02X with code %02X", event.opcode, event.code);
+        }
+        break;
+      case SessionEventKind::PAGE_WRITE: {
+        const PageEditLog &edit = this->session_->page_write();
+        char before[PAGE_HEX_SIZE];
+        char after[PAGE_HEX_SIZE];
+        ESP_LOGI(TAG, "Schedule page %02X before: %s", edit.page, format_hex_pretty_to(before, edit.before, edit.size));
+        ESP_LOGI(TAG, "Schedule page %02X write:  %s", edit.page, format_hex_pretty_to(after, edit.after, edit.size));
+        break;
+      }
+      case SessionEventKind::EDIT_FAILED:
+        ESP_LOGE(TAG, "Schedule edit failed: %s", event.reason);
+        break;
+    }
+  }
+}
+
+void RainbirdComponent::log_controller_() {
+  const Identity &identity = this->session_->identity();
+  ESP_LOGI(TAG, "Controller %s, firmware %s", model_text(identity, this->model_name_).c_str(),
+           firmware_text(identity).c_str());
+  if (!this->session_->writes_permitted()) {
+    ESP_LOGW(TAG, "Model id is not one %s accepts; commands stay off. See accept_model_ids.", this->model_name_);
+  }
+  // 03 00 at startup says which zones the controller has.
+  for (const RainbirdZone *zone : this->zones_) {
+    bool available = true;
+    if (this->session_->state().zone_available(zone->get_zone(), &available) && !available) {
+      ESP_LOGW(TAG, "Zone %u (%s) is not on this controller", static_cast<unsigned>(zone->get_zone()),
+               this->zone_name_(zone->get_zone()).c_str());
+    }
   }
 }
 
@@ -320,97 +363,55 @@ void RainbirdComponent::deliver_frame_(const Frame &frame, const char *which, bo
   }
 }
 
-bool RainbirdComponent::send_raw(const uint8_t *data, size_t size) {
-  if (!this->experimental_) {
-    ESP_LOGW(TAG, "send_raw needs experimental: true");
+bool RainbirdComponent::submitted_(ControlResult result) {
+  if (result != ControlResult::QUEUED) {
+    ESP_LOGW(TAG, "Refused: %s", control_result_text(result));
     return false;
   }
+  // loop() sends it. It sleeps while the link is idle, so wake it.
+  this->enable_loop();
+  return true;
+}
+
+bool RainbirdComponent::send_raw(const uint8_t *data, size_t size) {
   if (this->transmitter_ == nullptr || !this->session_) {
     ESP_LOGW(TAG, "send_raw needs a transmitter");
     return false;
   }
-  if (size == 0 || size > MAX_PAYLOAD) {
-    ESP_LOGW(TAG, "send_raw payload is %u bytes; it must be 1 to %u", static_cast<unsigned>(size),
-             static_cast<unsigned>(MAX_PAYLOAD));
-    return false;
-  }
   // Queued on the link like any request, so it never collides with a poll in flight.
-  if (!this->session_->send_raw(data, size, millis())) {
-    ESP_LOGW(TAG, "send_raw could not be queued");
-    return false;
-  }
-  this->after_activity_();
-  // loop() is off while the link is idle. The action runs from the scheduler,
-  // outside the component phase, so send the queued frame in this turn.
-  this->loop();
-  return true;
+  return this->submitted_(this->session_->send_raw(data, size, millis()));
 }
 
-void RainbirdComponent::note_binding_(EntityKind kind, uint8_t zone, uint8_t program, SessionConfig *config) {
-  add_fields(kind, &config->used);
-  // One zone's run time must not pull every zone's page. Other schedule pages are one per program.
-  if (kind == EntityKind::RUN_TIME && zone >= 1 && zone <= 16)
-    config->zone_mask |= static_cast<uint16_t>(1u << (zone - 1));
-  // In queue mode, turning a valve off moves on to the next queued zone, which the queue list names.
-  if (kind == EntityKind::VALVE && this->valve_queue_ && this->experimental_)
-    config->used.add(Field::QUEUE);
-  if (program != NO_PROGRAM && program < 8 &&
-      (kind == EntityKind::WATERING_DAY || kind == EntityKind::FREQUENCY || kind == EntityKind::CYCLE_DAYS ||
-       kind == EntityKind::DAYS_UNTIL_NEXT || kind == EntityKind::START_TIME || kind == EntityKind::START_ENABLED)) {
-    config->program_mask |= static_cast<uint8_t>(1u << program);
-  }
-}
-
-bool RainbirdComponent::zone_run_minutes_(uint8_t zone, uint8_t *minutes) const {
+bool RainbirdComponent::run_minutes_(uint8_t zone, uint8_t *minutes) const {
 #ifdef USE_NUMBER
-  for (auto *entity : this->numbers_) {
-    if (entity->kind() != EntityKind::RUN_DURATION || entity->zone() != zone || std::isnan(entity->state))
-      continue;
-    int32_t value = rounded(entity->state);
-    if (value < 1)
-      value = 1;
-    if (value > 255)
-      value = 255;
-    *minutes = static_cast<uint8_t>(value);
-    return true;
-  }
+  return zone >= 1 && zone <= STATE_ZONES && this->run_durations_[zone - 1] != nullptr &&
+         whole_minutes(this->run_durations_[zone - 1]->state, minutes);
 #else
   (void) zone;
-#endif
   (void) minutes;
   return false;
+#endif
 }
 
 bool RainbirdComponent::test_minutes_(uint8_t *minutes) const {
 #ifdef USE_NUMBER
-  for (auto *entity : this->numbers_) {
-    if (entity->kind() != EntityKind::TEST_DURATION || std::isnan(entity->state))
-      continue;
-    int32_t value = rounded(entity->state);
-    if (value < 1)
-      value = 1;
-    if (value > 255)
-      value = 255;
-    *minutes = static_cast<uint8_t>(value);
-    return true;
-  }
-#endif
+  return this->test_duration_ != nullptr && whole_minutes(this->test_duration_->state, minutes);
+#else
   (void) minutes;
   return false;
+#endif
 }
 
-bool RainbirdComponent::start_minutes_(uint8_t program, uint8_t index, uint16_t *minutes) const {
+bool RainbirdComponent::slot_minutes_(uint8_t program, uint8_t index, uint16_t *minutes) const {
 #ifdef USE_DATETIME_TIME
-  for (auto *entity : this->times_) {
-    if (entity->kind() == EntityKind::START_TIME && entity->program() == program && entity->index() == index)
-      return entity->minutes(minutes);
-  }
+  return program < STATE_PROGRAMS && index < STATE_STARTS && this->start_times_[program][index] != nullptr &&
+         this->start_times_[program][index]->minutes(minutes);
 #else
   (void) program;
   (void) index;
-#endif
   (void) minutes;
   return false;
+#endif
 }
 
 bool RainbirdComponent::start_slot_is_on(uint8_t program, uint8_t index) const {
@@ -420,17 +421,8 @@ bool RainbirdComponent::start_slot_is_on(uint8_t program, uint8_t index) const {
   return this->session_->state().start_enabled(program, index, &on) && on;
 }
 
-ControlResult RainbirdComponent::queue_control_(const Control &command) {
-  ControlResult result = this->session_->control(command, millis());
-  if (result != ControlResult::QUEUED)
-    ESP_LOGW(TAG, "Refused command: %s", control_result_text(result));
-  return result;
-}
-
 bool RainbirdComponent::queue_clock_(uint8_t hour, uint8_t minute, uint8_t second, uint8_t day, uint8_t month,
                                      uint16_t year) {
-  if (!this->session_)
-    return false;
   uint32_t now = millis();
   Control time;
   time.op = ControlOp::SET_TIME;
@@ -476,204 +468,135 @@ bool RainbirdComponent::run_zone(int32_t zone, uint32_t duration_ms, bool queue)
   command.zone = static_cast<uint8_t>(zone);
   // Whole minutes, so a part minute rounds up.
   command.value = static_cast<uint16_t>((duration_ms + 59999u) / 60000u);
-  if (this->queue_control_(command) != ControlResult::QUEUED)
-    return false;
-  this->loop();
-  return true;
+  return this->submitted_(this->session_->control(command, millis()));
 }
 
 bool RainbirdComponent::set_controller_clock(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
                                              uint8_t second) {
-  if (!this->queue_clock_(hour, minute, second, day, month, year))
+  if (!this->session_ || !this->queue_clock_(hour, minute, second, day, month, year))
     return false;
-  this->loop();
+  this->enable_loop();
   return true;
 }
 
-bool RainbirdComponent::submit(const WriteIntent &intent) {
+bool RainbirdComponent::sync_clock_() {
+#ifdef USE_TIME
+  if (this->time_ != nullptr) {
+    ESPTime local = this->time_->now();
+    if (local.is_valid())
+      return this->set_controller_clock(local.year, local.month, local.day_of_month, local.hour, local.minute,
+                                        local.second);
+    ESP_LOGW(TAG, "Sync needs a valid clock");
+    return false;
+  }
+#endif
+  ESP_LOGW(TAG, "Sync needs time_id");
+  return false;
+}
+
+bool RainbirdComponent::submit(const EntityBinding &binding, float value) {
   if (!this->session_) {
     ESP_LOGW(TAG, "Refused command: the link has not started");
     return false;
   }
-  bool queued = false;
-  switch (intent.kind) {
-    case EntityKind::VALVE: {
-      Control command;
-      command.zone = intent.zone;
-      command.queue_mode = this->valve_queue_;
-      command.experimental = this->experimental_;
-      if (intent.value == 0) {
-        command.op = ControlOp::STOP_ZONE;
-      } else {
-        uint8_t minutes = 0;
-        if (!this->zone_run_minutes_(intent.zone, &minutes)) {
-          ESP_LOGW(TAG, "Zone %u has no run duration", static_cast<unsigned>(intent.zone));
-          return false;
-        }
-        command.op = this->valve_queue_ ? ControlOp::QUEUE_ZONE : ControlOp::RUN_ZONE;
-        command.value = minutes;
-      }
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
-      break;
-    }
+  uint32_t now = millis();
+  Control command;
+  switch (binding.kind) {
+    case EntityKind::VALVE:
     case EntityKind::QUEUE_ZONE: {
+      command.zone = binding.zone;
+      if (binding.kind == EntityKind::VALVE && value == 0) {
+        command.op = ControlOp::STOP_ZONE;
+        break;
+      }
       uint8_t minutes = 0;
-      if (!this->zone_run_minutes_(intent.zone, &minutes)) {
-        ESP_LOGW(TAG, "Zone %u has no run duration", static_cast<unsigned>(intent.zone));
+      if (!this->run_minutes_(binding.zone, &minutes)) {
+        ESP_LOGW(TAG, "Zone %u has no run duration", static_cast<unsigned>(binding.zone));
         return false;
       }
-      Control command;
-      command.op = ControlOp::QUEUE_ZONE;
-      command.zone = intent.zone;
+      bool queue = binding.kind == EntityKind::QUEUE_ZONE || this->valve_queue_;
+      command.op = queue ? ControlOp::QUEUE_ZONE : ControlOp::RUN_ZONE;
       command.value = minutes;
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
       break;
     }
-    case EntityKind::PROGRAM_START: {
-      Control command;
+    case EntityKind::PROGRAM_START:
       command.op = ControlOp::RUN_PROGRAM;
-      command.program = intent.program;
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
+      command.program = binding.program;
       break;
-    }
-    case EntityKind::STOP: {
-      Control command;
+    case EntityKind::STOP:
       command.op = ControlOp::STOP;
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
       break;
-    }
-    case EntityKind::ADVANCE: {
-      Control command;
+    case EntityKind::ADVANCE:
       command.op = ControlOp::ADVANCE;
-      command.experimental = this->experimental_;
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
       break;
-    }
     case EntityKind::TEST_ALL: {
       uint8_t minutes = 0;
       if (!this->test_minutes_(&minutes)) {
         ESP_LOGW(TAG, "Test all zones needs a test duration");
         return false;
       }
-      Control command;
       command.op = ControlOp::TEST_ZONES;
       command.value = minutes;
-      command.experimental = this->experimental_;
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
       break;
     }
-    case EntityKind::REFRESH: {
-      Control command;
-      command.op = ControlOp::REFRESH;
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
-      break;
-    }
-    case EntityKind::SEASONAL_ADJUST: {
-      Control command;
+    case EntityKind::SEASONAL_ADJUST:
       command.op = ControlOp::SET_SEASONAL;
-      command.program = intent.program;
-      command.value = static_cast<uint16_t>(rounded(intent.value));
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
+      command.program = binding.program;
+      command.value = static_cast<uint16_t>(rounded(value));
       break;
-    }
-    case EntityKind::RAIN_DELAY: {
-      Control command;
+    case EntityKind::RAIN_DELAY:
       command.op = ControlOp::SET_RAIN_DELAY;
-      command.value = static_cast<uint16_t>(rounded(intent.value));
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
+      command.value = static_cast<uint16_t>(rounded(value));
       break;
-    }
-    case EntityKind::IRRIGATION_SET: {
-      Control command;
+    case EntityKind::IRRIGATION_SET:
       command.op = ControlOp::SET_IRRIGATION;
-      command.value = intent.value != 0 ? 1 : 0;
-      command.experimental = this->experimental_;
-      queued = this->queue_control_(command) == ControlResult::QUEUED;
+      command.value = value != 0 ? 1 : 0;
       break;
-    }
-    case EntityKind::SYNC_CLOCK: {
-#ifdef USE_TIME
-      if (this->time_ == nullptr) {
-        ESP_LOGW(TAG, "Sync needs time_id");
-        return false;
-      }
-      ESPTime local = this->time_->now();
-      if (!local.is_valid()) {
-        ESP_LOGW(TAG, "Sync needs a valid clock");
-        return false;
-      }
-      queued = this->queue_clock_(local.hour, local.minute, local.second, local.day_of_month, local.month, local.year);
-#else
-      ESP_LOGW(TAG, "Sync needs time_id");
-      return false;
-#endif
-      break;
-    }
+    case EntityKind::REFRESH:
+      return this->submitted_(this->session_->refresh(now));
+    case EntityKind::SYNC_CLOCK:
+      return this->sync_clock_();
     case EntityKind::START_ENABLED: {
-      ControlResult result;
-      if (intent.value == 0) {
-        result =
-            this->session_->edit_schedule(Field::START_ENABLED, NO_ZONE, intent.program, intent.index, 0, millis());
-      } else {
-        // Turning a slot on writes the time entity's minutes. START_ENABLED=1 would invent a time.
-        uint16_t minutes = 0;
-        if (!this->start_minutes_(intent.program, intent.index, &minutes)) {
-          ESP_LOGW(TAG, "That start slot has no time set");
-          return false;
-        }
-        result =
-            this->session_->edit_schedule(Field::START_TIME, NO_ZONE, intent.program, intent.index, minutes, millis());
+      if (value == 0) {
+        return this->submitted_(
+            this->session_->edit_schedule(Field::START_ENABLED, NO_ZONE, binding.program, binding.index, 0, now));
       }
-      queued = result == ControlResult::QUEUED;
-      if (!queued)
-        ESP_LOGW(TAG, "Refused schedule edit: %s", control_result_text(result));
-      break;
+      // Turning a slot on writes the time its time entity shows. START_ENABLED=1 would invent one.
+      uint16_t minutes = 0;
+      if (!this->slot_minutes_(binding.program, binding.index, &minutes)) {
+        ESP_LOGW(TAG, "That start slot has no time set");
+        return false;
+      }
+      return this->submitted_(
+          this->session_->edit_schedule(Field::START_TIME, NO_ZONE, binding.program, binding.index, minutes, now));
     }
     default: {
-      Field field;
-      if (!schedule_field(intent.kind, &field)) {
-        ESP_LOGW(TAG, "Refused command: kind %u is not writable", static_cast<unsigned>(intent.kind));
+      const KindInfo &info = kind_info(binding.kind);
+      if (info.write != WritePath::SCHEDULE_PAGE) {
+        ESP_LOGW(TAG, "Refused command: kind %u is not writable", static_cast<unsigned>(binding.kind));
         return false;
       }
-      ControlResult result = this->session_->edit_schedule(field, intent.zone, intent.program, intent.index,
-                                                           rounded(intent.value), millis());
-      queued = result == ControlResult::QUEUED;
-      if (!queued)
-        ESP_LOGW(TAG, "Refused schedule edit: %s", control_result_text(result));
-      break;
+      return this->submitted_(
+          this->session_->edit_schedule(info.field, binding.zone, binding.program, binding.index, rounded(value), now));
     }
   }
-  if (!queued)
-    return false;
-  // The action runs outside the component phase, and loop() is off while the link is idle.
-  this->loop();
-  return true;
-}
-
-void RainbirdComponent::log_page_edit_() {
-  PageEditLog edit;
-  if (!this->session_->take_page_log(&edit))
-    return;
-  char before[160];
-  char after[160];
-  ESP_LOGI(TAG, "Schedule page %02X before: %s", edit.page, format_hex_pretty_to(before, edit.before, edit.size));
-  ESP_LOGI(TAG, "Schedule page %02X write:  %s", edit.page, format_hex_pretty_to(after, edit.after, edit.size));
+  return this->submitted_(this->session_->control(command, now));
 }
 
 void RainbirdComponent::check_clock_() {
 #ifdef USE_TIME
-  if (!this->clock_sync_ || this->time_ == nullptr || !this->session_)
+  if (!this->clock_sync_ || this->time_ == nullptr)
     return;
   // Once per controller reading, and only while commands can reach the controller.
   uint32_t serial = this->session_->clock_serial();
   if (serial == 0 || serial == this->clock_checked_serial_)
     return;
   if (this->session_->stage() != SessionStage::RUNNING || !this->session_->writes_permitted() ||
-      !this->session_->connected())
+      !this->session_->link().connected)
     return;
   this->clock_checked_serial_ = serial;
   uint32_t now = millis();
-  if (this->clock_synced_ && now - this->clock_sync_at_ < CLOCK_SYNC_RETRY_MS)
+  if (this->clock_synced_ && !elapsed(now, this->clock_sync_at_, CLOCK_SYNC_RETRY_MS))
     return;
   ESPTime local = this->time_->now();
   if (!local.is_valid())
@@ -714,15 +637,14 @@ std::string RainbirdComponent::program_name_(uint8_t program) const {
   return std::string("Program ") + static_cast<char>('A' + program);
 }
 
-bool RainbirdComponent::schedule_changed_text_(std::string *out) const {
+bool RainbirdComponent::local_timestamp_(uint32_t seconds_since_2000, std::string *out) const {
 #ifdef USE_TIME
-  uint32_t seconds = 0;
-  if (this->time_ == nullptr || !this->session_->state().schedule_changed(&seconds)) {
+  if (this->time_ == nullptr || out == nullptr) {
     return false;
   }
   // The controller stamps its own wall clock (SPEC 8.11). Read those fields as
   // local time in time_id's zone to get the instant, then publish it in UTC.
-  ESPTime local = ESPTime::from_epoch_utc(SECONDS_1970_TO_2000 + static_cast<time_t>(seconds));
+  ESPTime local = ESPTime::from_epoch_utc(SECONDS_1970_TO_2000 + static_cast<time_t>(seconds_since_2000));
   local.recalc_timestamp_local();
   time_t utc = local.timestamp;
   struct tm tm{};
@@ -732,184 +654,110 @@ bool RainbirdComponent::schedule_changed_text_(std::string *out) const {
   *out = buf;
   return true;
 #else
+  (void) seconds_since_2000;
   (void) out;
   return false;
 #endif
 }
 
 void RainbirdComponent::publish_changed_() {
-  const ControllerState &state = this->session_->state();
-  bool diagnostics = this->session_->diagnostics_changed();
-  bool identity = this->session_->identity_changed();
-  Names names;
-  names.zone = [this](uint8_t zone) { return this->zone_name_(zone); };
-  names.program = [this](uint8_t program) { return this->program_name_(program); };
-
+  const Readout shown = readout(*this->session_);
 #ifdef USE_SWITCH
   for (auto *entity : this->switches_) {
     bool value = false;
-    if (kind_changed(entity->kind(), state, entity->zone(), entity->program(), entity->index()) &&
-        bool_value(entity->kind(), state, entity->zone(), entity->program(), &value, entity->index())) {
+    if (kind_changed(entity->binding(), shown) && bool_value(entity->binding(), shown, &value))
       entity->publish_state(value);
-    }
   }
 #endif
 #ifdef USE_NUMBER
   for (auto *entity : this->numbers_) {
     float value = 0;
-    if (entity->is_command() &&
-        kind_changed(entity->kind(), state, entity->zone(), entity->program(), entity->index()) &&
-        number_value(entity->kind(), state, entity->zone(), entity->program(), &value, entity->index())) {
+    if (entity->is_command() && kind_changed(entity->binding(), shown) &&
+        number_value(entity->binding(), shown, &value))
       entity->publish_state(value);
-    }
   }
 #endif
 #ifdef USE_BINARY_SENSOR
-  for (auto &binding : this->binary_sensors_) {
-    if (binding.kind == EntityKind::CONNECTED) {
-      if (diagnostics && this->session_->connected_known()) {
-        binding.entity->publish_state(this->session_->connected());
-      }
-      continue;
-    }
+  for (auto &bound : this->binary_sensors_) {
     bool value = false;
-    if (kind_changed(binding.kind, state, binding.zone, binding.program, binding.index) &&
-        bool_value(binding.kind, state, binding.zone, binding.program, &value, binding.index)) {
-      binding.entity->publish_state(value);
-    }
+    if (kind_changed(bound.binding, shown) && bool_value(bound.binding, shown, &value))
+      bound.entity->publish_state(value);
   }
 #endif
 #ifdef USE_SENSOR
-  for (auto &binding : this->sensors_) {
+  for (auto &bound : this->sensors_) {
     float value = 0;
-    switch (binding.kind) {
-      case EntityKind::RESPONSE_TIME:
-        if (diagnostics && this->session_->response_known()) {
-          binding.entity->publish_state(this->session_->response_ms());
-        }
-        break;
-      case EntityKind::LINK_ERRORS:
-        if (diagnostics) {
-          binding.entity->publish_state(this->session_->link_errors());
-        }
-        break;
-      case EntityKind::REMAINING_TIME:
-        // Every reading re-anchors the countdown, not only a new value: a paused controller repeats
-        // the same value, and counting on from the old anchor would run down to 0. A steady 0 is
-        // not published again.
-        if (state.remaining_refreshed() &&
-            number_value(binding.kind, state, binding.zone, binding.program, &value, binding.index) &&
-            (value > 0 || kind_changed(binding.kind, state, binding.zone, binding.program, binding.index))) {
-          binding.entity->publish_state(value);
-          // Count down locally between polls, so Home Assistant sees time pass smoothly.
-          this->countdown_from_ = static_cast<uint16_t>(value);
-          this->countdown_at_ = millis();
-          if (value > 0 && !this->countdown_running_) {
-            this->countdown_running_ = true;
-            this->set_interval(COUNTDOWN_INTERVAL_ID, 1000, [this]() { this->publish_countdown_(); });
-          } else if (value <= 0 && this->countdown_running_) {
-            this->countdown_running_ = false;
-            this->cancel_interval(COUNTDOWN_INTERVAL_ID);
-          }
-        }
-        break;
-      default:
-        if (kind_changed(binding.kind, state, binding.zone, binding.program, binding.index) &&
-            number_value(binding.kind, state, binding.zone, binding.program, &value, binding.index)) {
-          binding.entity->publish_state(value);
-        }
-        break;
-    }
+    // Remaining time has its own countdown rules (publish_remaining_).
+    if (bound.binding.kind != EntityKind::REMAINING_TIME && kind_changed(bound.binding, shown) &&
+        number_value(bound.binding, shown, &value))
+      bound.entity->publish_state(value);
   }
 #endif
 #ifdef USE_TEXT_SENSOR
-  for (auto &binding : this->text_sensors_) {
+  for (auto &bound : this->text_sensors_) {
     std::string text;
-    bool publish = false;
-    const Identity &who = this->session_->identity();
-    switch (binding.kind) {
-      case EntityKind::MODEL:
-        text = model_text(who, this->model_name_);
-        publish = identity && !text.empty();
-        break;
-      case EntityKind::FIRMWARE_VERSION:
-        text = firmware_text(who);
-        publish = identity && !text.empty();
-        break;
-      case EntityKind::SERIAL_NUMBER:
-        text = serial_text(who);
-        publish = identity && !text.empty();
-        break;
-      case EntityKind::ACTIVE_PROGRAM:
-        publish = kind_changed(binding.kind, state, binding.zone, binding.program, binding.index) &&
-                  active_program_text(state, names, &text);
-        break;
-      case EntityKind::QUEUE:
-        publish = kind_changed(binding.kind, state, binding.zone, binding.program, binding.index) &&
-                  queue_text(state, names, &text);
-        break;
-      case EntityKind::SCHEDULE_CHANGED:
-        publish = kind_changed(binding.kind, state, binding.zone, binding.program, binding.index) &&
-                  this->schedule_changed_text_(&text);
-        break;
-      default:
-        break;
-    }
-    if (publish) {
-      binding.entity->publish_state(text);
-    }
+    if (kind_changed(bound.binding, shown) && text_value(bound.binding, shown, this->text_, &text))
+      bound.entity->publish_state(text);
   }
 #endif
 #ifdef USE_SELECT
   for (auto *entity : this->selects_) {
     uint8_t index = 0;
-    if (kind_changed(entity->kind(), state, NO_ZONE, entity->program()) &&
-        select_index(entity->kind(), state, NO_ZONE, entity->program(), &index)) {
+    if (kind_changed(entity->binding(), shown) && select_index(entity->binding(), shown, &index))
       entity->publish_state(index);
-    }
   }
 #endif
 #ifdef USE_DATETIME_TIME
   for (auto *entity : this->times_) {
-    int32_t minutes = 0;
-    if (!kind_changed(entity->kind(), state, NO_ZONE, entity->program(), entity->index()) ||
-        !start_slot_minutes(state, entity->program(), entity->index(), &minutes) || minutes < 0 ||
-        minutes > 23 * 60 + 59)
-      continue;
-    entity->show(static_cast<uint8_t>(minutes / 60), static_cast<uint8_t>(minutes % 60));
+    uint8_t hour = 0;
+    uint8_t minute = 0;
+    if (kind_changed(entity->binding(), shown) && start_time(entity->binding(), shown, &hour, &minute))
+      entity->show(hour, minute);
   }
 #endif
 #ifdef USE_DATETIME_DATETIME
   for (auto *entity : this->datetimes_) {
-    uint8_t hour = 0;
-    uint8_t minute = 0;
-    uint8_t second = 0;
-    uint8_t day = 0;
-    uint8_t month = 0;
-    uint16_t year = 0;
-    if (kind_changed(entity->kind(), state, NO_ZONE, NO_PROGRAM) && state.clock(&hour, &minute, &second) &&
-        state.date(&day, &month, &year)) {
-      entity->show(year, month, day, hour, minute, second);
-    }
+    WallClock clock;
+    if (kind_changed(entity->binding(), shown) && controller_clock(shown, &clock))
+      entity->show(clock.year, clock.month, clock.day, clock.hour, clock.minute, clock.second);
   }
 #endif
-  this->session_->state().clear_changed();
+  this->publish_remaining_(shown.state);
   this->session_->clear_changed();
 }
 
-void RainbirdComponent::publish_countdown_() {
+void RainbirdComponent::publish_remaining_(const ControllerState &state) {
 #ifdef USE_SENSOR
-  uint32_t elapsed = (millis() - this->countdown_at_) / 1000;
-  uint32_t remaining = this->countdown_from_ > elapsed ? this->countdown_from_ - elapsed : 0;
-  for (auto &binding : this->sensors_) {
-    if (binding.kind == EntityKind::REMAINING_TIME) {
-      binding.entity->publish_state(remaining);
-    }
-  }
-  if (remaining == 0) {
-    this->countdown_running_ = false;
+  uint16_t seconds = 0;
+  if (this->remaining_sensors_.empty() || !state.remaining_refreshed() || !state.remaining_seconds(&seconds))
+    return;
+  if (!this->countdown_.reading(seconds, millis()))
+    return;
+  this->publish_remaining_sensors_(seconds);
+  if (seconds > 0) {
+    // Count down locally between polls. Restarting the interval lines its ticks up with this reading.
+    this->set_interval(COUNTDOWN_INTERVAL_ID, 1000, [this]() { this->tick_countdown_(); });
+  } else {
     this->cancel_interval(COUNTDOWN_INTERVAL_ID);
   }
+#else
+  (void) state;
+#endif
+}
+
+void RainbirdComponent::tick_countdown_() {
+  uint32_t remaining = this->countdown_.remaining(millis());
+  this->publish_remaining_sensors_(remaining);
+  if (remaining == 0)
+    this->cancel_interval(COUNTDOWN_INTERVAL_ID);
+}
+
+void RainbirdComponent::publish_remaining_sensors_(uint32_t seconds) {
+#ifdef USE_SENSOR
+  for (sensor::Sensor *entity : this->remaining_sensors_)
+    entity->publish_state(seconds);
+#else
+  (void) seconds;
 #endif
 }
 

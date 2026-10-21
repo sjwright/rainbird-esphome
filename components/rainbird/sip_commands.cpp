@@ -14,9 +14,6 @@ QueueProgram queue_program(uint8_t byte) {
 }
 
 bool nak_is_unsupported(uint8_t code) { return (code & 0x01) != 0; }
-bool nak_is_bad_length(uint8_t code) { return (code & 0x02) != 0; }
-bool nak_is_incompatible(uint8_t code) { return (code & 0x04) != 0; }
-bool nak_is_checksum(uint8_t code) { return (code & 0x08) != 0; }
 
 uint8_t run_time_page(uint8_t zone) {
   if (zone == 0) {
@@ -35,8 +32,6 @@ uint8_t run_time_offset(uint8_t zone, uint8_t program) {
 
 uint8_t program_settings_page(uint8_t program) { return static_cast<uint8_t>(0x10 + program); }
 uint8_t start_time_page(uint8_t program) { return static_cast<uint8_t>(0x60 + program); }
-
-bool station_obeys_rain_sensor(uint8_t page20_byte) { return page20_byte == 0x01; }
 
 bool station_bit(const uint8_t mask[4], uint8_t page, uint8_t zone) {
   if (mask == nullptr || zone == 0) {
@@ -397,56 +392,6 @@ bool parse_schedule_page(const uint8_t *payload, size_t size, SchedulePage *out)
   return true;
 }
 
-bool parse_global_page(const SchedulePage &page, GlobalSettings *out) {
-  if (out == nullptr || page.page != 0x0000 || page.size != 4) {
-    return false;
-  }
-  out->station_delay_seconds = be16(page.data[0], page.data[1]);
-  out->rain_delay_days = page.data[2];
-  out->rain_sensor = page.data[3];
-  return true;
-}
-
-bool parse_program_page(const SchedulePage &page, ProgramSettings *out) {
-  if (out == nullptr || page.page < 0x10 || page.page > 0x12 || page.size != 6) {
-    return false;
-  }
-  out->program = static_cast<uint8_t>(page.page - 0x10);
-  out->days = page.data[0];
-  out->period = page.data[1];
-  out->synchro = page.data[2];
-  out->permanent_days_off = page.data[3];
-  out->unknown = page.data[4];
-  out->frequency = page.data[5];
-  return true;
-}
-
-bool parse_start_times(const SchedulePage &page, StartTimes *out) {
-  if (out == nullptr || page.page < 0x60 || page.page > 0x62 || page.size != 8) {
-    return false;
-  }
-  out->program = static_cast<uint8_t>(page.page - 0x60);
-  for (int i = 0; i < 4; i++) {
-    out->minutes[i] = be16(page.data[i * 2], page.data[i * 2 + 1]);
-  }
-  return true;
-}
-
-bool run_time_minutes(const SchedulePage &page, uint8_t zone, uint8_t program, uint16_t *minutes) {
-  if (minutes == nullptr || zone == 0 || program > 2) {
-    return false;
-  }
-  if (page.page != run_time_page(zone)) {
-    return false;
-  }
-  uint8_t offset = run_time_offset(zone, program);
-  if (static_cast<size_t>(offset) + 2 > page.size) {
-    return false;
-  }
-  *minutes = be16(page.data[offset], page.data[offset + 1]);
-  return true;
-}
-
 bool parse_reply(const uint8_t *payload, size_t size, Reply *out) {
   if (out == nullptr || payload == nullptr || size == 0) {
     return false;
@@ -607,23 +552,6 @@ bool reply_matches(const uint8_t *request, size_t request_size, const uint8_t *r
     default:
       return true;
   }
-}
-
-bool patch_program_field(uint8_t *data, size_t size, ProgramField field, uint8_t value) {
-  if (data == nullptr || size < 6) {
-    return false;
-  }
-  switch (field) {
-    case ProgramField::DAYS:
-    case ProgramField::PERIOD:
-    case ProgramField::SYNCHRO:
-    case ProgramField::PERMANENT_OFF:
-    case ProgramField::FREQUENCY:
-      // Enumerator values are the byte offsets. Byte 4 is not one of them.
-      data[static_cast<uint8_t>(field)] = value;
-      return true;
-  }
-  return false;
 }
 
 }  // namespace esphome::rainbird

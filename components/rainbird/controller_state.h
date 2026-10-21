@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "sip_commands.h"
+
 namespace esphome::rainbird {
 
 // Sized for the ESP-TM2. There is one C++ model, so the store matches its limits.
@@ -11,7 +13,8 @@ static constexpr uint8_t STATE_PROGRAMS = 3;
 static constexpr uint8_t STATE_STARTS = 4;
 static constexpr uint8_t STATE_QUEUE = 11;
 
-// Names match the fields the poll plan and locate() use. Entity rows point at these later.
+// What the controller reports, one entry per kind of value. The poll plan polls by field,
+// the page map (Model::locate) places schedule fields, and each entity kind shows one.
 enum class Field : uint8_t {
   ZONES_RUNNING = 0,
   CLOCK,
@@ -21,7 +24,8 @@ enum class Field : uint8_t {
   ACTIVE_ZONE,
   ACTIVE_PROGRAM,
   REMAINING_TIME,
-  QUEUE,
+  QUEUE,         // the queue list, 3B 01
+  QUEUED_COUNT,  // how many zones are queued, 3B 00
   SEASONAL_ADJUST,
   SCHEDULE_CHANGED,
   ZONE_FAULT,
@@ -35,9 +39,11 @@ enum class Field : uint8_t {
   STATION_DELAY,
   GLOBAL_SENSOR_BYPASS,
   ZONE_SENSOR_BYPASS,
-  AVAILABLE_ZONES,
   COUNT,
 };
+
+// No field: a kind that shows nothing from the controller.
+static constexpr Field NO_FIELD = Field::COUNT;
 
 // FF with a zone running is a manual run. FF with zone 0 is idle.
 enum class Activity : uint8_t { UNKNOWN = 0, IDLE, MANUAL, PROGRAM };
@@ -47,6 +53,14 @@ struct FieldSet {
 
   void add(Field field) { this->bits |= 1u << static_cast<uint8_t>(field); }
   bool has(Field field) const { return (this->bits & (1u << static_cast<uint8_t>(field))) != 0; }
+};
+
+// Schedule page numbers, 00 to FF.
+struct PageSet {
+  uint32_t bits[8]{};
+
+  void add(uint8_t page) { this->bits[page / 32] |= 1u << (page % 32); }
+  bool has(uint8_t page) const { return (this->bits[page / 32] & (1u << (page % 32))) != 0; }
 };
 
 struct QueueItem {
@@ -60,7 +74,10 @@ struct QueueItem {
 class ControllerState {
  public:
   void clear_changed();
+  // Zone 0 on a per-zone field means any zone.
   bool changed(Field field, uint8_t zone = 0, uint8_t program = 0, uint8_t index = 0) const;
+  // One schedule page field, as Model::locate places it and read_codec decodes it.
+  void set_page_field(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value);
 
   void set_zone_running(uint8_t zone, bool on);
   bool zone_running(uint8_t zone, bool *on) const;
@@ -125,14 +142,15 @@ class ControllerState {
 
   void set_station_delay(uint16_t seconds);
   bool station_delay(uint16_t *seconds) const;
-  void set_global_bypass(uint8_t wire);
-  bool global_bypass(uint8_t *wire) const;
-  void set_zone_bypass(uint8_t zone, uint8_t wire);
-  bool zone_bypass(uint8_t zone, uint8_t *wire) const;
+  // True when the rain sensor is ignored, controller-wide or for one zone.
+  void set_global_bypass(bool bypassed);
+  bool global_bypass(bool *bypassed) const;
+  void set_zone_bypass(uint8_t zone, bool bypassed);
+  bool zone_bypass(uint8_t zone, bool *bypassed) const;
 
+  // The raw page an edit patches. The values in it are also in the cells above.
   void set_page(uint8_t page, const uint8_t *data, uint8_t size);
   bool copy_page(uint8_t page, uint8_t *data, size_t cap, uint8_t *size) const;
-  bool page_changed(uint8_t page) const;
 
  private:
   struct Cell {
@@ -147,16 +165,18 @@ class ControllerState {
 
   struct PageImage {
     uint8_t page{0};
-    uint8_t data[40]{};
+    uint8_t data[MAX_PAGE_BYTES]{};
     uint8_t size{0};
     bool known{false};
-    bool changed{false};
   };
 
-  static int zone_index(uint8_t zone);
-  static int program_index(uint8_t program);
-  Cell *cell_at(Cell *cells, int index, int count);
-  const Cell *cell_at(const Cell *cells, int index, int count) const;
+  // Page 00, 1P, 20, 6P and 8N: 14 on a TM2.
+  static constexpr size_t PAGE_SLOTS = 16;
+
+  static int zone_index_(uint8_t zone);
+  static int program_index_(uint8_t program);
+  Cell *cell_at_(Cell *cells, int index, int count);
+  const Cell *cell_at_(const Cell *cells, int index, int count) const;
 
   Cell running_[STATE_ZONES]{};
   Cell available_[STATE_ZONES]{};
@@ -188,7 +208,7 @@ class ControllerState {
   uint8_t queue_count_{0};
   bool queue_known_{false};
   bool queue_changed_{false};
-  PageImage pages_[16]{};
+  PageImage pages_[PAGE_SLOTS]{};
 };
 
 }  // namespace esphome::rainbird

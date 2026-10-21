@@ -78,8 +78,8 @@ class Model {
   virtual bool accepts(uint16_t model_id) const = 0;
   virtual void short_poll(const Capabilities &caps, FieldSet used, RequestList *out) const = 0;
   virtual void slow_poll(const Capabilities &caps, FieldSet used, RequestList *out) const = 0;
-  // zone_mask bit 0 is zone 1. program_mask bit 0 is program A. A zero mask means every zone or program.
-  virtual void schedule_pages(FieldSet used, uint16_t zone_mask, uint8_t program_mask, RequestList *out) const = 0;
+  // The page map: where a schedule field lives. Reading a page and editing one use this
+  // and nothing else, so the two cannot disagree. No value: not a page field, or out of range.
   virtual std::optional<PageField> locate(Field field, uint8_t zone, uint8_t program, uint8_t index) const = 0;
   virtual ValueCodec codec(Field field) const = 0;
   virtual OptionList frequency_options() const = 0;
@@ -90,6 +90,10 @@ class Model {
                      uint8_t index, int32_t value, uint8_t *out, size_t *out_size) const = 0;
 };
 
+// The logical value of one page field: minutes, days, 0/1 for a day bit or a bypass, -1 for an
+// off start slot. False when the field does not fit in `size`.
+bool read_codec(const ValueCodec &codec, const PageField &field, const uint8_t *data, size_t size, int32_t *value);
+// The inverse. Other bytes and other bits of the same byte are left as they are.
 bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value, uint8_t *data, size_t size);
 
 }  // namespace esphome::rainbird

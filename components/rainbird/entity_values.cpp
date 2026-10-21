@@ -4,175 +4,130 @@
 
 namespace esphome::rainbird {
 
-void add_fields(EntityKind kind, FieldSet *used) {
-  if (used == nullptr) {
+namespace {
+
+// One row per EntityKind, in enum order. tests/python/test_entity_kinds.py reads the
+// WritePath column, so keep one row per line in this shape.
+constexpr KindInfo KINDS[] = {
+    {EntityKind::VALVE, Field::ZONES_RUNNING, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::RUN_DURATION, NO_FIELD, NO_FIELD, Source::STATE, WritePath::LOCAL},
+    {EntityKind::PROGRAM_START, NO_FIELD, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::SEASONAL_ADJUST, Field::SEASONAL_ADJUST, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::ZONE_RUNNING, Field::ZONES_RUNNING, NO_FIELD, Source::STATE, WritePath::NONE},
+    // "Manual" depends on the zone as well as the program byte. 3B 00 carries both.
+    {EntityKind::PROGRAM_RUNNING, Field::ACTIVE_PROGRAM, Field::ACTIVE_ZONE, Source::STATE, WritePath::NONE},
+    {EntityKind::REMAINING_TIME, Field::REMAINING_TIME, NO_FIELD, Source::STATE, WritePath::NONE},
+    {EntityKind::ACTIVE_ZONE, Field::ACTIVE_ZONE, NO_FIELD, Source::STATE, WritePath::NONE},
+    {EntityKind::QUEUED_ZONES, Field::QUEUED_COUNT, NO_FIELD, Source::STATE, WritePath::NONE},
+    {EntityKind::RESPONSE_TIME, NO_FIELD, NO_FIELD, Source::LINK, WritePath::NONE},
+    {EntityKind::LINK_ERRORS, NO_FIELD, NO_FIELD, Source::LINK, WritePath::NONE},
+    // Any zone running, or an active zone when another entity polls it.
+    {EntityKind::WATERING, Field::ZONES_RUNNING, Field::ACTIVE_ZONE, Source::STATE, WritePath::NONE},
+    {EntityKind::RAIN_SENSOR, Field::RAIN_SENSOR, NO_FIELD, Source::STATE, WritePath::NONE},
+    {EntityKind::IRRIGATION_ENABLED, Field::IRRIGATION_ENABLED, NO_FIELD, Source::STATE, WritePath::NONE},
+    {EntityKind::CONNECTED, NO_FIELD, NO_FIELD, Source::LINK, WritePath::NONE},
+    {EntityKind::ACTIVE_PROGRAM, Field::ACTIVE_PROGRAM, Field::ACTIVE_ZONE, Source::STATE, WritePath::NONE},
+    {EntityKind::QUEUE, Field::QUEUE, NO_FIELD, Source::STATE, WritePath::NONE},
+    {EntityKind::MODEL, NO_FIELD, NO_FIELD, Source::IDENTITY, WritePath::NONE},
+    {EntityKind::FIRMWARE_VERSION, NO_FIELD, NO_FIELD, Source::IDENTITY, WritePath::NONE},
+    {EntityKind::SERIAL_NUMBER, NO_FIELD, NO_FIELD, Source::IDENTITY, WritePath::NONE},
+    {EntityKind::SCHEDULE_CHANGED, Field::SCHEDULE_CHANGED, NO_FIELD, Source::STATE, WritePath::NONE},
+    {EntityKind::QUEUE_ZONE, NO_FIELD, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::STOP, NO_FIELD, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    // The zone to advance to comes from the queue list (3B 01).
+    {EntityKind::ADVANCE, Field::QUEUE, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::TEST_ALL, NO_FIELD, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::SYNC_CLOCK, NO_FIELD, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::REFRESH, NO_FIELD, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::RAIN_DELAY, Field::RAIN_DELAY, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::STATION_DELAY, Field::STATION_DELAY, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::TEST_DURATION, NO_FIELD, NO_FIELD, Source::STATE, WritePath::LOCAL},
+    {EntityKind::CYCLE_DAYS, Field::CYCLE_DAYS, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::DAYS_UNTIL_NEXT, Field::DAYS_UNTIL_NEXT, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::RUN_TIME, Field::RUN_TIME, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::IRRIGATION_SET, Field::IRRIGATION_ENABLED, NO_FIELD, Source::STATE, WritePath::COMMAND},
+    {EntityKind::GLOBAL_BYPASS, Field::GLOBAL_SENSOR_BYPASS, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::ZONE_BYPASS, Field::ZONE_SENSOR_BYPASS, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::WATERING_DAY, Field::WATERING_DAY, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::START_ENABLED, Field::START_ENABLED, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    // Polled when the probe said 3D works. There is no decoder yet, so the sensor stays unknown.
+    {EntityKind::ZONE_FAULT, Field::ZONE_FAULT, NO_FIELD, Source::STATE, WritePath::NONE},
+    {EntityKind::FREQUENCY, Field::FREQUENCY, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::START_TIME, Field::START_TIME, NO_FIELD, Source::STATE, WritePath::SCHEDULE_PAGE},
+    {EntityKind::CONTROLLER_CLOCK, Field::CLOCK, NO_FIELD, Source::STATE, WritePath::COMMAND},
+};
+
+constexpr size_t KIND_COUNT = sizeof(KINDS) / sizeof(KINDS[0]);
+
+constexpr bool rows_in_order() {
+  for (size_t i = 0; i < KIND_COUNT; i++) {
+    if (static_cast<size_t>(KINDS[i].kind) != i + 1) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static_assert(rows_in_order(), "KINDS has one row per EntityKind, in enum order");
+
+constexpr KindInfo UNKNOWN_KIND{EntityKind::VALVE, NO_FIELD, NO_FIELD, Source::STATE, WritePath::NONE};
+
+}  // namespace
+
+const KindInfo &kind_info(EntityKind kind) {
+  size_t index = static_cast<size_t>(kind) - 1;
+  return index < KIND_COUNT ? KINDS[index] : UNKNOWN_KIND;
+}
+
+void note_binding(const Model &model, const EntityBinding &binding, SessionConfig *config) {
+  if (config == nullptr) {
     return;
   }
-  switch (kind) {
-    case EntityKind::VALVE:
-    case EntityKind::ZONE_RUNNING:
-    case EntityKind::WATERING:
-      used->add(Field::ZONES_RUNNING);
-      break;
-    case EntityKind::SEASONAL_ADJUST:
-      used->add(Field::SEASONAL_ADJUST);
-      break;
-    case EntityKind::PROGRAM_RUNNING:
-    case EntityKind::ACTIVE_PROGRAM:
-      used->add(Field::ACTIVE_PROGRAM);
-      break;
-    case EntityKind::REMAINING_TIME:
-      used->add(Field::REMAINING_TIME);
-      break;
-    case EntityKind::ACTIVE_ZONE:
-    case EntityKind::QUEUED_ZONES:  // the queued count is in 3B 00 with the active zone
-      used->add(Field::ACTIVE_ZONE);
-      break;
-    case EntityKind::QUEUE:
-    case EntityKind::ADVANCE:  // the zone to advance to comes from the queue list (3B 01)
-      used->add(Field::QUEUE);
-      break;
-    case EntityKind::RAIN_SENSOR:
-      used->add(Field::RAIN_SENSOR);
-      break;
-    case EntityKind::IRRIGATION_ENABLED:
-      used->add(Field::IRRIGATION_ENABLED);
-      break;
-    case EntityKind::SCHEDULE_CHANGED:
-      used->add(Field::SCHEDULE_CHANGED);
-      break;
-    case EntityKind::RUN_DURATION:   // local setting
-    case EntityKind::TEST_DURATION:  // local setting, used by the test-all button
-    case EntityKind::PROGRAM_START:  // command only
-    case EntityKind::QUEUE_ZONE:
-    case EntityKind::STOP:
-    case EntityKind::TEST_ALL:
-    case EntityKind::SYNC_CLOCK:
-    case EntityKind::REFRESH:
-    case EntityKind::RESPONSE_TIME:  // link diagnostics
-    case EntityKind::LINK_ERRORS:
-    case EntityKind::CONNECTED:
-    case EntityKind::MODEL:  // read once at startup
-    case EntityKind::FIRMWARE_VERSION:
-    case EntityKind::SERIAL_NUMBER:
-      break;
-    case EntityKind::RAIN_DELAY:
-      used->add(Field::RAIN_DELAY);
-      break;
-    case EntityKind::STATION_DELAY:
-      used->add(Field::STATION_DELAY);
-      break;
-    case EntityKind::CYCLE_DAYS:
-      used->add(Field::CYCLE_DAYS);
-      break;
-    case EntityKind::DAYS_UNTIL_NEXT:
-      used->add(Field::DAYS_UNTIL_NEXT);
-      break;
-    case EntityKind::RUN_TIME:
-      used->add(Field::RUN_TIME);
-      break;
-    case EntityKind::IRRIGATION_SET:
-      used->add(Field::IRRIGATION_ENABLED);
-      break;
-    case EntityKind::GLOBAL_BYPASS:
-      used->add(Field::GLOBAL_SENSOR_BYPASS);
-      break;
-    case EntityKind::ZONE_BYPASS:
-      used->add(Field::ZONE_SENSOR_BYPASS);
-      break;
-    case EntityKind::WATERING_DAY:
-      used->add(Field::WATERING_DAY);
-      break;
-    case EntityKind::START_ENABLED:
-      used->add(Field::START_ENABLED);
-      break;
-    case EntityKind::ZONE_FAULT:
-      // Polled when the probe said 3D works. There is no decoder yet, so the sensor stays unknown.
-      used->add(Field::ZONE_FAULT);
-      break;
-    case EntityKind::FREQUENCY:
-      used->add(Field::FREQUENCY);
-      break;
-    case EntityKind::START_TIME:
-      used->add(Field::START_TIME);
-      break;
-    case EntityKind::CONTROLLER_CLOCK:
-      used->add(Field::CLOCK);
-      break;
+  const KindInfo &info = kind_info(binding.kind);
+  if (info.field != NO_FIELD) {
+    config->used.add(info.field);
+    // Schedule fields live on pages, and only the pages an entity shows are read.
+    std::optional<PageField> located = model.locate(info.field, binding.zone, binding.program, binding.index);
+    if (located.has_value()) {
+      config->pages.add(located->page);
+    }
+  }
+  // In queue mode, turning a valve off moves on to the next queued zone, which the queue list names.
+  if (binding.kind == EntityKind::VALVE && config->valve_queue && config->experimental) {
+    config->used.add(Field::QUEUE);
   }
 }
 
-bool kind_changed(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, uint8_t index) {
-  switch (kind) {
-    case EntityKind::VALVE:
-    case EntityKind::ZONE_RUNNING:
-      return state.changed(Field::ZONES_RUNNING, zone);
-    case EntityKind::WATERING:
-      for (uint8_t z = 1; z <= STATE_ZONES; z++) {
-        if (state.changed(Field::ZONES_RUNNING, z)) {
-          return true;
-        }
-      }
-      return state.changed(Field::ACTIVE_ZONE);
-    case EntityKind::SEASONAL_ADJUST:
-      return state.changed(Field::SEASONAL_ADJUST, 0, program);
-    case EntityKind::PROGRAM_RUNNING:
-    case EntityKind::ACTIVE_PROGRAM:
-      // "Manual" depends on the zone as well as the program byte.
-      return state.changed(Field::ACTIVE_PROGRAM) || state.changed(Field::ACTIVE_ZONE);
-    case EntityKind::REMAINING_TIME:
-      return state.changed(Field::REMAINING_TIME);
-    case EntityKind::ACTIVE_ZONE:
-      return state.changed(Field::ACTIVE_ZONE);
-    case EntityKind::QUEUED_ZONES:
-    case EntityKind::QUEUE:
-      return state.changed(Field::QUEUE);
-    case EntityKind::RAIN_SENSOR:
-      return state.changed(Field::RAIN_SENSOR);
-    case EntityKind::IRRIGATION_ENABLED:
-      return state.changed(Field::IRRIGATION_ENABLED);
-    case EntityKind::SCHEDULE_CHANGED:
-      return state.changed(Field::SCHEDULE_CHANGED);
-    case EntityKind::RAIN_DELAY:
-      return state.changed(Field::RAIN_DELAY);
-    case EntityKind::STATION_DELAY:
-      return state.changed(Field::STATION_DELAY);
-    case EntityKind::CYCLE_DAYS:
-      return state.changed(Field::CYCLE_DAYS, 0, program);
-    case EntityKind::DAYS_UNTIL_NEXT:
-      return state.changed(Field::DAYS_UNTIL_NEXT, 0, program);
-    case EntityKind::RUN_TIME:
-      return state.changed(Field::RUN_TIME, zone, program);
-    case EntityKind::IRRIGATION_SET:
-      return state.changed(Field::IRRIGATION_ENABLED);
-    case EntityKind::GLOBAL_BYPASS:
-      return state.changed(Field::GLOBAL_SENSOR_BYPASS);
-    case EntityKind::ZONE_BYPASS:
-      return state.changed(Field::ZONE_SENSOR_BYPASS, zone);
-    case EntityKind::WATERING_DAY:
-      return state.changed(Field::WATERING_DAY, 0, program, index);
-    case EntityKind::START_ENABLED:
-      return state.changed(Field::START_ENABLED, 0, program, index);
-    case EntityKind::FREQUENCY:
-      return state.changed(Field::FREQUENCY, 0, program);
-    case EntityKind::START_TIME:
-      return state.changed(Field::START_TIME, 0, program, index);
-    case EntityKind::CONTROLLER_CLOCK:
-      return state.changed(Field::CLOCK);
-    default:
-      return false;
-  }
+Readout readout(const Session &session) {
+  return Readout{session.state(), session.identity(), session.link(), session.identity_changed(),
+                 session.link_changed()};
 }
 
-bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, bool *out,
-                uint8_t index) {
+bool kind_changed(const EntityBinding &binding, const Readout &readout) {
+  const KindInfo &info = kind_info(binding.kind);
+  switch (info.source) {
+    case Source::LINK:
+      return readout.link_changed;
+    case Source::IDENTITY:
+      return readout.identity_changed;
+    case Source::STATE:
+      break;
+  }
+  auto changed = [&](Field field) {
+    return field != NO_FIELD && readout.state.changed(field, binding.zone, binding.program, binding.index);
+  };
+  return changed(info.field) || changed(info.also);
+}
+
+bool bool_value(const EntityBinding &binding, const Readout &readout, bool *out) {
   if (out == nullptr) {
     return false;
   }
-  switch (kind) {
+  const ControllerState &state = readout.state;
+  switch (binding.kind) {
     case EntityKind::VALVE:
     case EntityKind::ZONE_RUNNING:
-      return state.zone_running(zone, out);
+      return state.zone_running(binding.zone, out);
     case EntityKind::WATERING: {
       bool any_known = false;
       for (uint8_t z = 1; z <= STATE_ZONES; z++) {
@@ -201,7 +156,7 @@ bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uin
       if (activity == Activity::UNKNOWN || !state.program_byte(&byte)) {
         return false;
       }
-      *out = activity == Activity::PROGRAM && byte == program;
+      *out = activity == Activity::PROGRAM && byte == binding.program;
       return true;
     }
     case EntityKind::RAIN_SENSOR: {
@@ -223,26 +178,19 @@ bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uin
       return true;
     }
     case EntityKind::WATERING_DAY:
-      return state.watering_day(program, index, out);
+      return state.watering_day(binding.program, binding.index, out);
     case EntityKind::START_ENABLED:
-      return state.start_enabled(program, index, out);
-    case EntityKind::GLOBAL_BYPASS: {
-      uint8_t wire = 0;
-      if (!state.global_bypass(&wire)) {
+      return state.start_enabled(binding.program, binding.index, out);
+    case EntityKind::GLOBAL_BYPASS:
+      return state.global_bypass(out);
+    case EntityKind::ZONE_BYPASS:
+      return state.zone_bypass(binding.zone, out);
+    case EntityKind::CONNECTED:
+      if (!readout.link.connected_known) {
         return false;
       }
-      *out = wire == GLOBAL_SENSOR_BYPASSED;
+      *out = readout.link.connected;
       return true;
-    }
-    case EntityKind::ZONE_BYPASS: {
-      // Page 20 stores 0x00 for bypass, which is this switch being on.
-      uint8_t wire = 0;
-      if (!state.zone_bypass(zone, &wire)) {
-        return false;
-      }
-      *out = wire == 0x00;
-      return true;
-    }
     case EntityKind::ZONE_FAULT:
       // 3D has no decoder yet (SPEC 8.4). Stay unknown rather than invent a layout.
       return false;
@@ -251,16 +199,15 @@ bool bool_value(EntityKind kind, const ControllerState &state, uint8_t zone, uin
   }
 }
 
-bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, float *out,
-                  uint8_t index) {
-  (void) index;
+bool number_value(const EntityBinding &binding, const Readout &readout, float *out) {
   if (out == nullptr) {
     return false;
   }
-  switch (kind) {
+  const ControllerState &state = readout.state;
+  switch (binding.kind) {
     case EntityKind::SEASONAL_ADJUST: {
       uint16_t percent = 0;
-      if (!state.seasonal(program, &percent)) {
+      if (!state.seasonal(binding.program, &percent)) {
         return false;
       }
       *out = percent;
@@ -308,7 +255,7 @@ bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, u
     }
     case EntityKind::CYCLE_DAYS: {
       uint8_t days = 0;
-      if (!state.cycle_days(program, &days)) {
+      if (!state.cycle_days(binding.program, &days)) {
         return false;
       }
       *out = days;
@@ -316,7 +263,7 @@ bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, u
     }
     case EntityKind::DAYS_UNTIL_NEXT: {
       uint8_t days = 0;
-      if (!state.days_until(program, &days)) {
+      if (!state.days_until(binding.program, &days)) {
         return false;
       }
       *out = days;
@@ -324,30 +271,74 @@ bool number_value(EntityKind kind, const ControllerState &state, uint8_t zone, u
     }
     case EntityKind::RUN_TIME: {
       uint16_t minutes = 0;
-      if (!state.run_minutes(zone, program, &minutes)) {
+      if (!state.run_minutes(binding.zone, binding.program, &minutes)) {
         return false;
       }
       *out = minutes;
       return true;
+    }
+    case EntityKind::RESPONSE_TIME:
+      if (!readout.link.response_known) {
+        return false;
+      }
+      *out = static_cast<float>(readout.link.response_ms);
+      return true;
+    case EntityKind::LINK_ERRORS:
+      *out = static_cast<float>(readout.link.errors);
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool text_value(const EntityBinding &binding, const Readout &readout, const TextContext &context, std::string *out) {
+  if (out == nullptr) {
+    return false;
+  }
+  switch (binding.kind) {
+    case EntityKind::MODEL:
+      *out = model_text(readout.identity, context.model);
+      return !out->empty();
+    case EntityKind::FIRMWARE_VERSION:
+      *out = firmware_text(readout.identity);
+      return !out->empty();
+    case EntityKind::SERIAL_NUMBER:
+      *out = serial_text(readout.identity);
+      return !out->empty();
+    case EntityKind::ACTIVE_PROGRAM:
+      return active_program_text(readout.state, context, out);
+    case EntityKind::QUEUE:
+      return queue_text(readout.state, context, out);
+    case EntityKind::SCHEDULE_CHANGED: {
+      uint32_t seconds = 0;
+      return context.timestamp && readout.state.schedule_changed(&seconds) && context.timestamp(seconds, out);
     }
     default:
       return false;
   }
 }
 
-bool select_index(EntityKind kind, const ControllerState &state, uint8_t zone, uint8_t program, uint8_t *out) {
-  (void) zone;
-  if (out == nullptr || kind != EntityKind::FREQUENCY) {
+bool select_index(const EntityBinding &binding, const Readout &readout, uint8_t *out) {
+  if (out == nullptr || binding.kind != EntityKind::FREQUENCY) {
     return false;
   }
-  return state.frequency(program, out);
+  return readout.state.frequency(binding.program, out);
 }
 
-bool start_slot_minutes(const ControllerState &state, uint8_t program, uint8_t index, int32_t *minutes) {
-  if (minutes == nullptr) {
+bool start_time(const EntityBinding &binding, const Readout &readout, uint8_t *hour, uint8_t *minute) {
+  int32_t minutes = 0;
+  if (hour == nullptr || minute == nullptr || binding.kind != EntityKind::START_TIME ||
+      !readout.state.start_minutes(binding.program, binding.index, &minutes) || minutes < 0 || minutes >= 24 * 60) {
     return false;
   }
-  return state.start_minutes(program, index, minutes);
+  *hour = static_cast<uint8_t>(minutes / 60);
+  *minute = static_cast<uint8_t>(minutes % 60);
+  return true;
+}
+
+bool controller_clock(const Readout &readout, WallClock *out) {
+  return out != nullptr && readout.state.clock(&out->hour, &out->minute, &out->second) &&
+         readout.state.date(&out->day, &out->month, &out->year);
 }
 
 std::string duration_text(uint32_t seconds) {
@@ -362,7 +353,7 @@ std::string duration_text(uint32_t seconds) {
   return buf;
 }
 
-bool active_program_text(const ControllerState &state, const Names &names, std::string *out) {
+bool active_program_text(const ControllerState &state, const TextContext &context, std::string *out) {
   if (out == nullptr) {
     return false;
   }
@@ -380,17 +371,14 @@ bool active_program_text(const ControllerState &state, const Names &names, std::
       if (!state.program_byte(&byte)) {
         return false;
       }
-      *out = names.program ? names.program(byte) : std::string("Program ") + static_cast<char>('A' + byte);
+      *out = context.program ? context.program(byte) : std::string("Program ") + static_cast<char>('A' + byte);
       return true;
   }
   return false;
 }
 
-bool queue_text(const ControllerState &state, const Names &names, std::string *out) {
-  if (out == nullptr) {
-    return false;
-  }
-  if (!state.queue_known()) {
+bool queue_text(const ControllerState &state, const TextContext &context, std::string *out) {
+  if (out == nullptr || !state.queue_known()) {
     return false;
   }
   QueueItem item;
@@ -402,7 +390,7 @@ bool queue_text(const ControllerState &state, const Names &names, std::string *o
     if (!text.empty()) {
       text += ", ";
     }
-    text += names.zone ? names.zone(item.zone) : "Zone " + std::to_string(item.zone);
+    text += context.zone ? context.zone(item.zone) : "Zone " + std::to_string(item.zone);
     text += " ";
     text += duration_text(item.seconds);
   }

@@ -45,12 +45,12 @@ void FrameParser::reset() {
 
 void FrameParser::push_bit(bool one) {
   this->bits_.push_back(one ? 1 : 0);
-  this->pump();
+  this->pump_();
 }
 
 void FrameParser::finish() {
   this->finishing_ = true;
-  this->pump();
+  this->pump_();
   this->finishing_ = false;
 }
 
@@ -63,7 +63,7 @@ bool FrameParser::pop(Frame *out) {
   return true;
 }
 
-uint8_t FrameParser::byte_at(size_t bit) const {
+uint8_t FrameParser::byte_at_(size_t bit) const {
   uint8_t value = 0;
   for (size_t i = 0; i < 8; i++) {
     value = static_cast<uint8_t>((value << 1) | this->bits_[bit + i]);
@@ -71,7 +71,7 @@ uint8_t FrameParser::byte_at(size_t bit) const {
   return value;
 }
 
-bool FrameParser::find_preamble(size_t *at) {
+bool FrameParser::find_preamble_(size_t *at) {
   size_t size = this->bits_.size();
   if (size < 24 || this->scan_from_ + 24 > size) {
     return false;
@@ -94,10 +94,10 @@ bool FrameParser::find_preamble(size_t *at) {
   return false;
 }
 
-void FrameParser::pump() {
+void FrameParser::pump_() {
   while (true) {
     size_t at = 0;
-    if (!this->find_preamble(&at)) {
+    if (!this->find_preamble_(&at)) {
       // Bits that cannot start a preamble are dropped once there are many of them.
       if (this->scan_from_ > 4096) {
         this->bits_.erase(this->bits_.begin(),
@@ -113,7 +113,7 @@ void FrameParser::pump() {
       this->scan_from_ = at + 1;
       continue;
     }
-    uint8_t length = this->byte_at(at + 24);
+    uint8_t length = this->byte_at_(at + 24);
     if (length > MAX_PAYLOAD) {
       this->scan_from_ = at + 1;
       continue;
@@ -130,10 +130,10 @@ void FrameParser::pump() {
     Frame frame{};
     frame.length = length;
     for (uint8_t i = 0; i < length; i++) {
-      frame.payload[i] = this->byte_at(at + 32 + static_cast<size_t>(i) * 8);
+      frame.payload[i] = this->byte_at_(at + 32 + static_cast<size_t>(i) * 8);
     }
-    uint8_t checksum = this->byte_at(at + 32 + static_cast<size_t>(length) * 8);
-    uint8_t end = this->byte_at(at + 40 + static_cast<size_t>(length) * 8);
+    uint8_t checksum = this->byte_at_(at + 32 + static_cast<size_t>(length) * 8);
+    uint8_t end = this->byte_at_(at + 40 + static_cast<size_t>(length) * 8);
     if (checksum != frame_checksum(length, frame.payload) || end != FRAME_END) {
       this->scan_from_ = at + 1;
       continue;

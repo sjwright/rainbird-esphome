@@ -11,6 +11,14 @@ from .errors import ConfigError
 ISSUES_URL = "https://github.com/sjwright/rainbird-esphome/issues"
 _IMPLEMENTED = "ESP-TM2"
 
+# Program A is wire program 0. A model uses the first `programs` letters.
+PROGRAM_LETTERS = "ABCDEFGH"
+
+
+def program_index(letter: str) -> int:
+    """Wire program number for a validated letter: A is 0."""
+    return PROGRAM_LETTERS.index(letter.upper())
+
 
 @dataclass(frozen=True)
 class Model:
@@ -23,7 +31,7 @@ class Model:
 
     @property
     def letters(self) -> str:
-        return "ABCDEFGH"[: self.programs]
+        return PROGRAM_LETTERS[: self.programs]
 
 
 def _model(
@@ -99,3 +107,8 @@ def resolve_model(name: str) -> Model:
             f"model this component builds. {ISSUES_URL}"
         )
     return model
+
+
+# Every letter some model in the registry uses. A platform entry is checked against
+# its hub's model in final validation, once the hub is known.
+ANY_MODEL_LETTERS = PROGRAM_LETTERS[: max(model.programs for model in MODELS.values())]

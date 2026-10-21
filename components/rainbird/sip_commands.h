@@ -43,12 +43,9 @@ struct QueueProgram {
 
 QueueProgram queue_program(uint8_t byte);
 
-// NAK code bits from the pyrainbird docs. SPEC question 15 is still open: the TM2
-// may not use these meanings. Bit 0 is the one the link treats as "unsupported".
+// NAK code bit 0, from the pyrainbird docs: the command is not supported. SPEC question 15
+// is still open: the TM2 may not use the other bits the same way, so nothing reads them.
 bool nak_is_unsupported(uint8_t code);
-bool nak_is_bad_length(uint8_t code);
-bool nak_is_incompatible(uint8_t code);
-bool nak_is_checksum(uint8_t code);
 
 // Run-time pages 0x80–0x85 hold two 1-based zones each. Zone 1 is page 0x80.
 // Zone 0 has no page; the functions return 0.
@@ -75,10 +72,11 @@ static constexpr uint8_t FREQ_EVEN = 3;
 static constexpr uint16_t START_TIME_OFF = 0xFFFF;
 
 // Page 00 byte 3: 0 obeys the sensor, 1 bypasses it.
-// Page 20 is the opposite: 1 obeys, 0 bypasses. No page 20 capture exists yet.
+// Page 20, one byte per zone, is the opposite: 1 obeys, 0 bypasses. No page 20 capture exists yet.
 static constexpr uint8_t GLOBAL_SENSOR_OBEYED = 0x00;
 static constexpr uint8_t GLOBAL_SENSOR_BYPASSED = 0x01;
-bool station_obeys_rain_sensor(uint8_t page20_byte);
+static constexpr uint8_t ZONE_SENSOR_OBEYED = 0x01;
+static constexpr uint8_t ZONE_SENSOR_BYPASSED = 0x00;
 
 // Absolute zone, page 0 covering zones 1–32. Bit 0 of each byte is the lowest zone.
 bool station_bit(const uint8_t mask[4], uint8_t page, uint8_t zone);
@@ -226,39 +224,13 @@ struct RainSensorState {
   uint8_t state{0};
 };
 
+// The longest schedule page kept. TM2 pages are 4 to 12 bytes.
+static constexpr size_t MAX_PAGE_BYTES = 40;
+
 struct SchedulePage {
   uint16_t page{0};
-  uint8_t data[40]{};
+  uint8_t data[MAX_PAGE_BYTES]{};
   uint8_t size{0};
-};
-
-struct GlobalSettings {
-  uint16_t station_delay_seconds{0};
-  uint8_t rain_delay_days{0};
-  uint8_t rain_sensor{0};
-};
-
-struct ProgramSettings {
-  uint8_t program{0};
-  uint8_t days{0};
-  uint8_t period{0};
-  uint8_t synchro{0};
-  uint8_t permanent_days_off{0};
-  uint8_t unknown{0};  // byte 4, written back unchanged
-  uint8_t frequency{0};
-};
-
-struct StartTimes {
-  uint8_t program{0};
-  uint16_t minutes[4]{};
-};
-
-enum class ProgramField : uint8_t {
-  DAYS = 0,
-  PERIOD = 1,
-  SYNCHRO = 2,
-  PERMANENT_OFF = 3,
-  FREQUENCY = 5,
 };
 
 bool parse_model(const uint8_t *payload, size_t size, ModelVersion *out);
@@ -279,15 +251,8 @@ bool parse_rain_sensor(const uint8_t *payload, size_t size, RainSensorState *out
 bool parse_event_timestamp(const uint8_t *payload, size_t size, EventTimestamp *out);
 bool parse_rain_delay(const uint8_t *payload, size_t size, RainDelay *out);
 bool parse_water_budget(const uint8_t *payload, size_t size, WaterBudget *out);
+// The raw page. Which bytes mean what is the model's page map (Model::locate).
 bool parse_schedule_page(const uint8_t *payload, size_t size, SchedulePage *out);
-bool parse_global_page(const SchedulePage &page, GlobalSettings *out);
-bool parse_program_page(const SchedulePage &page, ProgramSettings *out);
-bool parse_start_times(const SchedulePage &page, StartTimes *out);
-bool run_time_minutes(const SchedulePage &page, uint8_t zone, uint8_t program, uint16_t *minutes);
-
-// Copies bytes 3 and 4 as they stand. There is no field for byte 4: the ME/TM2 doc
-// hard-codes 0x64 there, and that would throw away the controller's value.
-bool patch_program_field(uint8_t *data, size_t size, ProgramField field, uint8_t value);
 
 // One parsed reply. Only the member named by kind is set. The model maps this onto
 // controller state and does not look at the raw opcode again.

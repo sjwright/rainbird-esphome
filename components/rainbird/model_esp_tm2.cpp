@@ -14,43 +14,44 @@ constexpr ModelLimits LIMITS{"ESP-TM2", STATE_ZONES, STATE_PROGRAMS, STATE_START
 constexpr uint8_t DAY_MASKS[] = {DAY_MONDAY, DAY_TUESDAY,  DAY_WEDNESDAY, DAY_THURSDAY,
                                  DAY_FRIDAY, DAY_SATURDAY, DAY_SUNDAY};
 
+// Every field read from a schedule page, and the bindings it fans out over. locate() says
+// where each one is; a page reply reads whichever of them land on that page.
+// START_ENABLED is not listed: it is the same bytes as START_TIME, and ControllerState
+// derives it from the time.
+struct PageFieldSpan {
+  Field field;
+  bool per_zone;
+  bool per_program;
+  uint8_t indices;
+};
+
+constexpr PageFieldSpan PAGE_FIELDS[] = {
+    {Field::STATION_DELAY, false, false, 1},
+    {Field::GLOBAL_SENSOR_BYPASS, false, false, 1},
+    {Field::ZONE_SENSOR_BYPASS, true, false, 1},
+    {Field::WATERING_DAY, false, true, 7},
+    {Field::CYCLE_DAYS, false, true, 1},
+    {Field::DAYS_UNTIL_NEXT, false, true, 1},
+    {Field::FREQUENCY, false, true, 1},
+    {Field::START_TIME, false, true, STATE_STARTS},
+    {Field::RUN_TIME, true, true, 1},
+};
+
 bool status_group(FieldSet used) {
   return used.has(Field::CLOCK) || used.has(Field::RAIN_DELAY) || used.has(Field::RAIN_SENSOR) ||
          used.has(Field::IRRIGATION_ENABLED);
 }
 
 bool schedule_interest(FieldSet used) {
-  return used.has(Field::SCHEDULE_CHANGED) || used.has(Field::RUN_TIME) || used.has(Field::WATERING_DAY) ||
-         used.has(Field::FREQUENCY) || used.has(Field::CYCLE_DAYS) || used.has(Field::DAYS_UNTIL_NEXT) ||
-         used.has(Field::START_TIME) || used.has(Field::START_ENABLED) || used.has(Field::STATION_DELAY) ||
-         used.has(Field::GLOBAL_SENSOR_BYPASS) || used.has(Field::ZONE_SENSOR_BYPASS);
-}
-
-bool zone_selected(uint16_t mask, uint8_t zone) {
-  if (mask == 0) {
+  if (used.has(Field::SCHEDULE_CHANGED) || used.has(Field::START_ENABLED)) {
     return true;
   }
-  if (zone < 1 || zone > 16) {
-    return false;
-  }
-  return (mask & static_cast<uint16_t>(1u << (zone - 1))) != 0;
-}
-
-bool program_selected(uint8_t mask, uint8_t program) {
-  if (mask == 0) {
-    return true;
-  }
-  return (mask & static_cast<uint8_t>(1u << program)) != 0;
-}
-
-void add_page(RequestList *out, uint8_t page) {
-  for (uint8_t i = 0; i < out->count; i++) {
-    const ByteBuf &have = out->items[i];
-    if (have.size == 3 && have.data[0] == 0x20 && have.data[2] == page) {
-      return;
+  for (const PageFieldSpan &span : PAGE_FIELDS) {
+    if (used.has(span.field)) {
+      return true;
     }
   }
-  out->add(request_read_page(page));
+  return false;
 }
 
 void apply_running_mask(ControllerState *state, uint8_t page, const uint8_t mask[4]) {
@@ -71,40 +72,6 @@ void apply_available_mask(ControllerState *state, uint8_t page, const uint8_t ma
   }
 }
 
-void apply_program_page(ControllerState *state, const ProgramSettings &program) {
-  for (uint8_t day = 0; day < 7; day++) {
-    state->set_watering_day(program.program, day, (program.days & DAY_MASKS[day]) != 0);
-  }
-  state->set_cycle_days(program.program, program.period);
-  state->set_days_until(program.program, program.synchro);
-  state->set_frequency(program.program, program.frequency);
-}
-
-void apply_start_page(ControllerState *state, const StartTimes &starts) {
-  for (uint8_t slot = 0; slot < STATE_STARTS; slot++) {
-    uint16_t minutes = starts.minutes[slot];
-    if (minutes == START_TIME_OFF) {
-      state->set_start_minutes(starts.program, slot, -1);
-    } else {
-      state->set_start_minutes(starts.program, slot, minutes);
-    }
-  }
-}
-
-void apply_run_page(ControllerState *state, const SchedulePage &page) {
-  for (uint8_t zone = 1; zone <= STATE_ZONES; zone++) {
-    if (run_time_page(zone) != page.page) {
-      continue;
-    }
-    for (uint8_t program = 0; program < STATE_PROGRAMS; program++) {
-      uint16_t minutes = 0;
-      if (run_time_minutes(page, zone, program, &minutes)) {
-        state->set_run_minutes(zone, program, minutes);
-      }
-    }
-  }
-}
-
 void apply_date(ControllerState *state, const PackedDate &date) {
   if (date_valid(date)) {
     state->set_date(date.day, date.month, date.year);
@@ -113,19 +80,53 @@ void apply_date(ControllerState *state, const PackedDate &date) {
   }
 }
 
-// Page 20 holds one byte per zone, zone 1 first. The wire byte is stored as is;
-// the codec maps it (01 obeys the sensor, 00 bypasses it). The reply length for a
-// TM2 is not captured yet, so only the zones present in the reply are set.
-void apply_bypass_page(ControllerState *state, const SchedulePage &page) {
-  if (page.page != 0x20) {
-    return;
-  }
-  for (uint8_t zone = 1; zone <= STATE_ZONES && zone <= page.size; zone++) {
-    state->set_zone_bypass(zone, page.data[zone - 1]);
-  }
-}
-
 }  // namespace
+
+bool read_codec(const ValueCodec &codec, const PageField &field, const uint8_t *data, size_t size, int32_t *value) {
+  if (data == nullptr || value == nullptr || field.width == 0 ||
+      static_cast<size_t>(field.offset) + field.width > size) {
+    return false;
+  }
+  const uint8_t *at = data + field.offset;
+  switch (codec.kind) {
+    case CodecKind::U8:
+    case CodecKind::GLOBAL_BYPASS:
+    case CodecKind::ZONE_BYPASS:
+    case CodecKind::BIT:
+      if (field.width != 1 || (codec.kind == CodecKind::BIT && field.mask == 0)) {
+        return false;
+      }
+      if (codec.kind == CodecKind::GLOBAL_BYPASS) {
+        *value = at[0] == GLOBAL_SENSOR_BYPASSED ? 1 : 0;
+      } else if (codec.kind == CodecKind::ZONE_BYPASS) {
+        *value = at[0] == ZONE_SENSOR_BYPASSED ? 1 : 0;
+      } else if (codec.kind == CodecKind::BIT) {
+        *value = (at[0] & field.mask) != 0 ? 1 : 0;
+      } else {
+        *value = at[0];
+      }
+      return true;
+    case CodecKind::U16_BE:
+    case CodecKind::START_SLOT:
+    case CodecKind::SLOT_ENABLED: {
+      if (field.width != 2) {
+        return false;
+      }
+      uint16_t word = be16(at[0], at[1]);
+      if (codec.kind == CodecKind::START_SLOT) {
+        *value = word == START_TIME_OFF ? -1 : word;
+      } else if (codec.kind == CodecKind::SLOT_ENABLED) {
+        *value = word == START_TIME_OFF ? 0 : 1;
+      } else {
+        *value = word;
+      }
+      return true;
+    }
+    case CodecKind::NONE:
+      return false;
+  }
+  return false;
+}
 
 bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value, uint8_t *data, size_t size) {
   if (data == nullptr || static_cast<size_t>(field.offset) + field.width > size || field.width == 0) {
@@ -142,8 +143,7 @@ bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value,
       if (codec.kind == CodecKind::GLOBAL_BYPASS) {
         *at = value != 0 ? GLOBAL_SENSOR_BYPASSED : GLOBAL_SENSOR_OBEYED;
       } else if (codec.kind == CodecKind::ZONE_BYPASS) {
-        // Page 20: 0x00 bypasses the sensor, which is the switch being on.
-        *at = value != 0 ? 0x00 : 0x01;
+        *at = value != 0 ? ZONE_SENSOR_BYPASSED : ZONE_SENSOR_OBEYED;
       } else {
         *at = static_cast<uint8_t>(value);
       }
@@ -265,7 +265,7 @@ void EspTm2Model::short_poll(const Capabilities &caps, FieldSet used, RequestLis
   }
   // 3B 00 carries the running zone, program, time left and the queued count.
   if (used.has(Field::ACTIVE_ZONE) || used.has(Field::ACTIVE_PROGRAM) || used.has(Field::REMAINING_TIME) ||
-      used.has(Field::QUEUE)) {
+      used.has(Field::QUEUED_COUNT) || used.has(Field::QUEUE)) {
     out->add(request_queue(0));
   }
   // 3B 01 is the queue list itself.
@@ -292,41 +292,6 @@ void EspTm2Model::slow_poll(const Capabilities &caps, FieldSet used, RequestList
   }
 }
 
-void EspTm2Model::schedule_pages(FieldSet used, uint16_t zone_mask, uint8_t program_mask, RequestList *out) const {
-  if (out == nullptr) {
-    return;
-  }
-  out->count = 0;
-  if (used.has(Field::STATION_DELAY) || used.has(Field::GLOBAL_SENSOR_BYPASS)) {
-    add_page(out, 0x00);
-  }
-  if (used.has(Field::WATERING_DAY) || used.has(Field::FREQUENCY) || used.has(Field::CYCLE_DAYS) ||
-      used.has(Field::DAYS_UNTIL_NEXT)) {
-    for (uint8_t program = 0; program < STATE_PROGRAMS; program++) {
-      if (program_selected(program_mask, program)) {
-        add_page(out, program_settings_page(program));
-      }
-    }
-  }
-  if (used.has(Field::ZONE_SENSOR_BYPASS)) {
-    add_page(out, 0x20);
-  }
-  if (used.has(Field::START_TIME) || used.has(Field::START_ENABLED)) {
-    for (uint8_t program = 0; program < STATE_PROGRAMS; program++) {
-      if (program_selected(program_mask, program)) {
-        add_page(out, start_time_page(program));
-      }
-    }
-  }
-  if (used.has(Field::RUN_TIME)) {
-    for (uint8_t zone = 1; zone <= STATE_ZONES; zone++) {
-      if (zone_selected(zone_mask, zone)) {
-        add_page(out, run_time_page(zone));
-      }
-    }
-  }
-}
-
 std::optional<PageField> EspTm2Model::locate(Field field, uint8_t zone, uint8_t program, uint8_t index) const {
   PageField located;
   switch (field) {
@@ -347,28 +312,15 @@ std::optional<PageField> EspTm2Model::locate(Field field, uint8_t zone, uint8_t 
       located.width = 1;
       located.mask = DAY_MASKS[index];
       return located;
-    case Field::FREQUENCY:
-      if (program >= STATE_PROGRAMS) {
-        return std::nullopt;
-      }
-      located.page = program_settings_page(program);
-      located.offset = 5;
-      located.width = 1;
-      return located;
     case Field::CYCLE_DAYS:
-      if (program >= STATE_PROGRAMS) {
-        return std::nullopt;
-      }
-      located.page = program_settings_page(program);
-      located.offset = 1;
-      located.width = 1;
-      return located;
     case Field::DAYS_UNTIL_NEXT:
+    case Field::FREQUENCY:
+      // Bytes 3 and 4 are never located, so an edit leaves them as the controller had them.
       if (program >= STATE_PROGRAMS) {
         return std::nullopt;
       }
       located.page = program_settings_page(program);
-      located.offset = 2;
+      located.offset = field == Field::CYCLE_DAYS ? 1 : field == Field::DAYS_UNTIL_NEXT ? 2 : 5;
       located.width = 1;
       return located;
     case Field::START_TIME:
@@ -408,8 +360,6 @@ ValueCodec EspTm2Model::codec(Field field) const {
   switch (field) {
     case Field::RUN_TIME:
     case Field::STATION_DELAY:
-    case Field::SEASONAL_ADJUST:
-    case Field::RAIN_DELAY:
       codec.kind = CodecKind::U16_BE;
       break;
     case Field::START_TIME:
@@ -441,6 +391,27 @@ ValueCodec EspTm2Model::codec(Field field) const {
 
 OptionList EspTm2Model::frequency_options() const {
   return OptionList{FREQUENCY_NAMES, static_cast<uint8_t>(sizeof(FREQUENCY_NAMES) / sizeof(FREQUENCY_NAMES[0]))};
+}
+
+void EspTm2Model::apply_page_(const SchedulePage &page, ControllerState *state) const {
+  for (const PageFieldSpan &span : PAGE_FIELDS) {
+    const uint8_t zones = span.per_zone ? STATE_ZONES : 1;
+    const uint8_t programs = span.per_program ? STATE_PROGRAMS : 1;
+    for (uint8_t z = 0; z < zones; z++) {
+      const uint8_t zone = span.per_zone ? static_cast<uint8_t>(z + 1) : 0;
+      for (uint8_t program = 0; program < programs; program++) {
+        for (uint8_t index = 0; index < span.indices; index++) {
+          std::optional<PageField> located = this->locate(span.field, zone, program, index);
+          int32_t value = 0;
+          // A short reply carries only some fields; the rest stay as they were.
+          if (located.has_value() && located->page == page.page &&
+              read_codec(this->codec(span.field), *located, page.data, page.size, &value)) {
+            state->set_page_field(span.field, zone, program, index, value);
+          }
+        }
+      }
+    }
+  }
 }
 
 void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const {
@@ -510,30 +481,14 @@ void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const 
         state->set_schedule_changed(reply.event.seconds_since_2000);
       }
       break;
-    case ReplyKind::SCHEDULE: {
-      const SchedulePage &page = reply.schedule;
-      if (page.page > 0xFF) {
+    case ReplyKind::SCHEDULE:
+      if (reply.schedule.page > 0xFF) {
         break;
       }
-      state->set_page(static_cast<uint8_t>(page.page), page.data, page.size);
-      GlobalSettings global;
-      if (parse_global_page(page, &global)) {
-        state->set_station_delay(global.station_delay_seconds);
-        state->set_rain_delay(global.rain_delay_days);
-        state->set_global_bypass(global.rain_sensor);
-      }
-      ProgramSettings program;
-      if (parse_program_page(page, &program)) {
-        apply_program_page(state, program);
-      }
-      StartTimes starts;
-      if (parse_start_times(page, &starts)) {
-        apply_start_page(state, starts);
-      }
-      apply_run_page(state, page);
-      apply_bypass_page(state, page);
+      // The raw image is what an edit patches. The fields are what entities show.
+      state->set_page(static_cast<uint8_t>(reply.schedule.page), reply.schedule.data, reply.schedule.size);
+      this->apply_page_(reply.schedule, state);
       break;
-    }
     case ReplyKind::ACK:
     case ReplyKind::NAK:
     case ReplyKind::MODEL:

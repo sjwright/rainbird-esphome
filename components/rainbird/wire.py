@@ -1,12 +1,29 @@
 """Final validation for the wire layer (PLAN.md 6.1) and model limits."""
 
 from esphome.components import esp32
+from esphome.components.remote_base import CONF_RECEIVER_ID, CONF_TRANSMITTER_ID
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PLATFORM, CONF_RMT_SYMBOLS
+from esphome.const import CONF_ID, CONF_MODEL, CONF_PLATFORM, CONF_RMT_SYMBOLS, CONF_TIME_ID
 from esphome.core import CORE
 import esphome.final_validate as fv
 
+from .const import (
+    ACTION_SEND_RAW,
+    CONF_DAY,
+    CONF_EXPERIMENTAL,
+    CONF_GENERATED,
+    CONF_LISTEN_ONLY,
+    CONF_MONITOR_RECEIVER_ID,
+    CONF_PROGRAM,
+    CONF_RAINBIRD_ID,
+    CONF_SLOT,
+    CONF_ZONE,
+    GENERATED_CONFIG,
+    GENERATED_INDEX,
+    GENERATED_KIND,
+)
 from .entity_kinds import (
+    KINDS_BY_ID,
     NO_PROGRAM,
     NO_ZONE,
     FanOut,
@@ -203,7 +220,7 @@ def _check_rmt_memory(variant: str) -> None:
 
 def _collect_send_raw(node, found: list) -> None:
     if isinstance(node, dict):
-        action = node.get("rainbird.send_raw")
+        action = node.get(ACTION_SEND_RAW)
         if isinstance(action, dict):
             found.append(action)
         for value in node.values():
@@ -221,11 +238,11 @@ def _check_send_raw(config: dict) -> None:
     for action in found:
         if action.get(CONF_ID) != hub_id:
             continue
-        if config.get("listen_only"):
+        if config.get(CONF_LISTEN_ONLY):
             raise cv.Invalid(
                 "rainbird.send_raw needs a transmitter. listen_only does not have one."
             )
-        if not config.get("experimental"):
+        if not config.get(CONF_EXPERIMENTAL):
             raise cv.Invalid("rainbird.send_raw needs experimental: true on the rainbird hub.")
 
 
@@ -243,7 +260,7 @@ def validate_hub(config: dict) -> None:
             )
 
     seen = set()
-    for key in ("receiver_id", "monitor_receiver_id"):
+    for key in (CONF_RECEIVER_ID, CONF_MONITOR_RECEIVER_ID):
         if key not in config:
             continue
         ident = config[key]
@@ -252,14 +269,22 @@ def validate_hub(config: dict) -> None:
         seen.add(ident)
         _check_receiver(_declaring(ident), variant)
 
-    if not config.get("listen_only") and "transmitter_id" in config:
-        _check_transmitter(_declaring(config["transmitter_id"]))
+    if not config.get(CONF_LISTEN_ONLY) and CONF_TRANSMITTER_ID in config:
+        _check_transmitter(_declaring(config[CONF_TRANSMITTER_ID]))
     _check_send_raw(config)
     _check_dependencies(config)
 
     if variant is None:
         return
     _check_rmt_memory(variant)
+
+
+def _key(kind_id: KindId) -> str:
+    return KINDS_BY_ID[int(kind_id)].key
+
+
+def _generated_binding(item: dict) -> tuple[int, int, int, int]:
+    return (item[GENERATED_KIND], item[CONF_ZONE], item[CONF_PROGRAM], item[GENERATED_INDEX])
 
 
 def _entry_bindings(entry: dict, domain: str, model) -> list[tuple[tuple[int, int, int, int], str]]:
@@ -269,8 +294,8 @@ def _entry_bindings(entry: dict, domain: str, model) -> list[tuple[tuple[int, in
     second read-only sensor for the same value is harmless.
     """
     out = []
-    zone = entry.get("zone")
-    program = entry.get("program")
+    zone = entry.get(CONF_ZONE)
+    program = entry.get(CONF_PROGRAM)
     program_index = NO_PROGRAM
     if isinstance(program, str) and len(program) == 1 and program.upper() in model.letters:
         program_index = model.letters.index(program.upper())
@@ -282,9 +307,9 @@ def _entry_bindings(entry: dict, domain: str, model) -> list[tuple[tuple[int, in
             continue
         index = 0
         if kind.fan_out is FanOut.DAY:
-            index = entry.get("day", 0)
-        elif kind.fan_out is FanOut.SLOT and isinstance(entry.get("slot"), int):
-            index = entry["slot"] - 1
+            index = entry.get(CONF_DAY, 0)
+        elif kind.fan_out is FanOut.SLOT and isinstance(entry.get(CONF_SLOT), int):
+            index = entry[CONF_SLOT] - 1
         uses_program = kind.scope is Scope.PROGRAM or kind.fan_out is FanOut.PROGRAM
         binding = (
             int(kind.kind_id),
@@ -294,7 +319,7 @@ def _entry_bindings(entry: dict, domain: str, model) -> list[tuple[tuple[int, in
         )
         where = f"zone {zone}" if kind.scope is Scope.ZONE else f"program {program}"
         if kind.fan_out is FanOut.SLOT:
-            where += f" slot {entry.get('slot')}"
+            where += f" slot {entry.get(CONF_SLOT)}"
         elif kind.fan_out is FanOut.DAY:
             where += f" day {index}"
         out.append((binding, f"{domain} {kind.key} for {where}"))
@@ -315,7 +340,7 @@ def _platform_entries(hub_id):
         for entry in entries:
             if not isinstance(entry, dict) or entry.get(CONF_PLATFORM) != "rainbird":
                 continue
-            if entry.get("rainbird_id") != hub_id:
+            if entry.get(CONF_RAINBIRD_ID) != hub_id:
                 continue
             yield domain, entry
 
@@ -327,11 +352,11 @@ def _check_duplicates(config: dict, domain: str, hub: dict, model) -> None:
         return
     counts: dict[tuple[int, int, int, int], int] = {}
     generated_ids: dict[tuple[int, int, int, int], str] = {}
-    for item in hub.get("generated", []):
-        binding = (item["kind_id"], item["zone"], item["program"], item["index"])
+    for item in hub.get(CONF_GENERATED, []):
+        binding = _generated_binding(item)
         counts[binding] = counts.get(binding, 0) + 1
-        generated_ids[binding] = str(item["config"][CONF_ID])
-    for entry_domain, entry in _platform_entries(config["rainbird_id"]):
+        generated_ids[binding] = str(item[GENERATED_CONFIG][CONF_ID])
+    for entry_domain, entry in _platform_entries(config[CONF_RAINBIRD_ID]):
         for binding, _ in _entry_bindings(entry, entry_domain, model):
             counts[binding] = counts.get(binding, 0) + 1
     for binding, label in mine:
@@ -351,11 +376,8 @@ def _check_dependencies(hub: dict) -> None:
 
     Without it the control only logs a warning when used, so the config fails here instead.
     """
-    model = MODELS[str(hub["model"]).upper()]
-    bindings = {
-        (item["kind_id"], item["zone"], item["program"], item["index"])
-        for item in hub.get("generated", [])
-    }
+    model = MODELS[str(hub[CONF_MODEL]).upper()]
+    bindings = {_generated_binding(item) for item in hub.get(CONF_GENERATED, [])}
     for domain, entry in _platform_entries(hub[CONF_ID]):
         bindings.update(binding for binding, _ in _entry_bindings(entry, domain, model))
     kinds = {binding[0] for binding in bindings}
@@ -385,10 +407,10 @@ def validate_entity_platform(domain: str):
 
 
 def _validate_entity_platform(config: dict, domain: str) -> None:
-    hub = _declaring(config["rainbird_id"])
-    model = MODELS[str(hub["model"]).upper()]
-    zone = config.get("zone")
-    program = config.get("program")
+    hub = _declaring(config[CONF_RAINBIRD_ID])
+    model = MODELS[str(hub[CONF_MODEL]).upper()]
+    zone = config.get(CONF_ZONE)
+    program = config.get(CONF_PROGRAM)
     if isinstance(program, str):
         program = program.upper()
     if zone is not None and not 1 <= zone <= model.zones:
@@ -397,15 +419,19 @@ def _validate_entity_platform(config: dict, domain: str) -> None:
         raise cv.Invalid(
             f"Program {program} is not valid for {model.name} (programs {', '.join(model.letters)})"
         )
-    slot = config.get("slot")
+    slot = config.get(CONF_SLOT)
     if isinstance(slot, int) and not 1 <= slot <= model.starts:
         raise cv.Invalid(f"Slot {slot} is outside 1–{model.starts} for {model.name}")
-    if domain == "text_sensor" and "schedule_changed" in config and "time_id" not in hub:
+    if (
+        domain == "text_sensor"
+        and _key(KindId.SCHEDULE_CHANGED) in config
+        and CONF_TIME_ID not in hub
+    ):
         raise cv.Invalid(
             "schedule_changed needs time_id on the rainbird hub: the controller stamps it in "
             "local time, and the time zone converts it."
         )
-    if domain == "button" and "sync_clock" in config and "time_id" not in hub:
+    if domain == "button" and _key(KindId.SYNC_CLOCK) in config and CONF_TIME_ID not in hub:
         raise cv.Invalid(
             "sync_clock needs time_id on the rainbird hub: it sets the controller to that clock's local time."
         )

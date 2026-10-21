@@ -194,12 +194,12 @@ TEST_CASE("schedule pages fill run times, days and start slots") {
   uint16_t delay = 1;
   REQUIRE(state.station_delay(&delay));
   CHECK(delay == 0);
+  // Byte 2 is also the rain delay, but that comes from 4C or 36. Page fields are the editable ones.
   uint16_t rain = 0;
-  REQUIRE(state.rain_delay(&rain));
-  CHECK(rain == 4);
-  uint8_t bypass = 0xFF;
-  REQUIRE(state.global_bypass(&bypass));
-  CHECK(bypass == GLOBAL_SENSOR_OBEYED);
+  CHECK_FALSE(state.rain_delay(&rain));
+  bool bypassed = true;
+  REQUIRE(state.global_bypass(&bypassed));
+  CHECK_FALSE(bypassed);
 
   APPLY(model, "A0 00 10 6A 06 01 00 64 01", &state);
   bool on = false;
@@ -381,26 +381,33 @@ TEST_CASE("slow poll and schedule pages follow the fields in use") {
   RequestList quiet;
   model.slow_poll(caps, used, &quiet);
   expect_requests(quiet, {"30 00", "30 01", "30 02"});
+}
 
-  FieldSet runs;
-  runs.add(Field::RUN_TIME);
-  RequestList pages;
-  model.schedule_pages(runs, (1u << 0) | (1u << 1), 0, &pages);
-  expect_requests(pages, {"20 00 80"});
-
-  RequestList split;
-  model.schedule_pages(runs, (1u << 0) | (1u << 2), 0, &split);
-  expect_requests(split, {"20 00 80", "20 00 81"});
-
-  RequestList last;
-  model.schedule_pages(runs, 1u << 11, 0, &last);
-  expect_requests(last, {"20 00 85"});
-
-  FieldSet frequency;
-  frequency.add(Field::FREQUENCY);
-  RequestList programs;
-  model.schedule_pages(frequency, 0, 0x1, &programs);
-  expect_requests(programs, {"20 00 10"});
+TEST_CASE("reading a page and editing it use the same map") {
+  // locate() is the only place that knows where a field lives. Write a value with it,
+  // read it back with it, and the two must agree for every field, zone, program and slot.
+  EspTm2Model model;
+  const Field fields[] = {Field::RUN_TIME,  Field::WATERING_DAY, Field::CYCLE_DAYS,
+                          Field::DAYS_UNTIL_NEXT, Field::FREQUENCY,    Field::START_TIME,
+                          Field::STATION_DELAY,   Field::GLOBAL_SENSOR_BYPASS, Field::ZONE_SENSOR_BYPASS};
+  for (Field field : fields) {
+    for (uint8_t zone = 0; zone <= STATE_ZONES; zone++) {
+      for (uint8_t program = 0; program < STATE_PROGRAMS; program++) {
+        for (uint8_t index = 0; index < 7; index++) {
+          auto located = model.locate(field, zone, program, index);
+          if (!located.has_value()) {
+            continue;
+          }
+          uint8_t page[MAX_PAGE_BYTES] = {};
+          int32_t written = field == Field::START_TIME ? 365 : 1;
+          REQUIRE(write_codec(model.codec(field), *located, written, page, sizeof(page)));
+          int32_t read = -2;
+          REQUIRE(read_codec(model.codec(field), *located, page, sizeof(page), &read));
+          CHECK(read == written);
+        }
+      }
+    }
+  }
 }
 
 TEST_CASE("a non-FFFF 4C budget is not program A's") {
@@ -424,21 +431,21 @@ TEST_CASE("page 20 fills each zone's rain-sensor bypass") {
   ControllerState state;
   // Zone 1 obeys the sensor (01), zone 2 bypasses it (00), the rest obey.
   APPLY(model, "A0 00 20 01 00 01 01 01 01 01 01 01 01 01 01", &state);
-  uint8_t wire = 0xAA;
-  REQUIRE(state.zone_bypass(1, &wire));
-  CHECK(wire == 0x01);
-  REQUIRE(state.zone_bypass(2, &wire));
-  CHECK(wire == 0x00);
-  REQUIRE(state.zone_bypass(12, &wire));
-  CHECK(wire == 0x01);
+  bool bypassed = true;
+  REQUIRE(state.zone_bypass(1, &bypassed));
+  CHECK_FALSE(bypassed);
+  REQUIRE(state.zone_bypass(2, &bypassed));
+  CHECK(bypassed);
+  REQUIRE(state.zone_bypass(12, &bypassed));
+  CHECK_FALSE(bypassed);
   CHECK(state.changed(Field::ZONE_SENSOR_BYPASS, 2));
 
   // A shorter reply sets only the zones it carries.
   ControllerState partial;
   APPLY(model, "A0 00 20 00 01", &partial);
-  REQUIRE(partial.zone_bypass(2, &wire));
-  CHECK(wire == 0x01);
-  CHECK_FALSE(partial.zone_bypass(3, &wire));
+  REQUIRE(partial.zone_bypass(2, &bypassed));
+  CHECK_FALSE(bypassed);
+  CHECK_FALSE(partial.zone_bypass(3, &bypassed));
 }
 
 TEST_CASE("the start-slot switch turns a slot off but never writes a time") {

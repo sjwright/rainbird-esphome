@@ -12,24 +12,28 @@
 namespace esphome::rainbird {
 
 // Everything the hub does with the controller apart from ESPHome itself
-// (PLAN 6.3, 6.4): startup, capability probes, the poll plan, the model gate
-// and diagnostics. Replies are applied to ControllerState here; the hub only
-// sends what next_transmission() returns and publishes what changed.
+// (PLAN 6.3, 6.4): startup, capability probes, the poll plan, the model gate,
+// commands, schedule edits and diagnostics. Replies are applied to ControllerState
+// here; the hub sends what next_transmission() returns, publishes what changed and
+// reports what take_event() hands over.
 
 struct SessionConfig {
   bool listen_only{false};
   // False with `update_interval: never`: nothing is sent except send_raw.
   bool polling{true};
+  bool experimental{false};  // 42, 3A, 49 and send_raw
+  // Valve switches queue their zone (4B) instead of starting it (39), and turning one off
+  // moves on to the next queued zone (42, with experimental) instead of stopping everything.
+  bool valve_queue{false};
+  bool allow_writes{false};  // schedule page writes (21)
   uint32_t update_interval_ms{15000};
   uint32_t fast_interval_ms{3000};
   uint32_t fast_hold_ms{30000};  // fast polling after a command
   uint32_t refresh_interval_ms{3600000};
   uint32_t silence_ms{60000};            // listen-only: no frame for this long is "not connected"
   uint32_t reidentify_after_ms{300000};  // link down this long: start again at identification
-  bool allow_writes{false};              // schedule page writes (21)
-  FieldSet used{};                       // fields that configured entities read
-  uint16_t zone_mask{0};                 // zones that read schedule pages, 0 = all
-  uint8_t program_mask{0};               // programs that read schedule pages, 0 = all
+  FieldSet used{};                       // fields that configured entities show
+  PageSet pages{};                       // schedule pages that configured entities show
   std::vector<uint16_t> accept_ids{};    // accept_model_ids
   LinkTiming timing{};
 };
@@ -41,6 +45,15 @@ struct Identity {
   ModelVersion model{};
   FirmwareVersion firmware{};
   SerialNumber serial{};
+};
+
+// What the link has seen of the controller, for the diagnostic entities.
+struct LinkStatus {
+  bool connected_known{false};
+  bool connected{false};
+  bool response_known{false};
+  uint32_t response_ms{0};  // the last reply, from the end of the first request copy
+  uint32_t errors{0};       // requests that timed out, retries included
 };
 
 enum class SessionStage : uint8_t {
@@ -69,7 +82,7 @@ enum class TagKind : uint8_t {
 enum class ControlOp : uint8_t {
   RUN_ZONE,
   QUEUE_ZONE,
-  STOP_ZONE,
+  STOP_ZONE,  // a valve switch turned off
   RUN_PROGRAM,
   STOP,
   ADVANCE,
@@ -79,7 +92,6 @@ enum class ControlOp : uint8_t {
   TEST_ZONES,
   SET_TIME,
   SET_DATE,
-  REFRESH,
 };
 
 struct Control {
@@ -93,14 +105,12 @@ struct Control {
   uint8_t day{0};
   uint8_t month{0};
   uint16_t year{0};
-  bool queue_mode{false};
-  bool experimental{false};
 };
 
 enum class ControlResult : uint8_t {
   QUEUED,
   REFUSED_NOT_READY,     // not identified, model refused, listen-only, or writes off
-  REFUSED_EXPERIMENTAL,  // 42, 3A and 49
+  REFUSED_EXPERIMENTAL,  // 42, 3A, 49 and send_raw
   REFUSED_UNSUPPORTED,   // the 04 probe said no
   REFUSED_RANGE,
   REFUSED_NOT_RUNNING,  // valve off, and this zone is not the one running
@@ -114,8 +124,26 @@ const char *control_result_text(ControlResult result);
 struct PageEditLog {
   uint8_t page{0};
   uint8_t size{0};
-  uint8_t before[40]{};
-  uint8_t after[40]{};
+  uint8_t before[MAX_PAGE_BYTES]{};
+  uint8_t after[MAX_PAGE_BYTES]{};
+};
+
+// Something for the hub to report. take_event() hands each over once, in order.
+enum class SessionEventKind : uint8_t {
+  STAGE,        // stage() changed; `stage` is the new one
+  LINK_UP,      // the first reply, or the first after the link was down
+  LINK_DOWN,    // three requests in a row failed, or listen-only heard nothing for silence_ms
+  NAK,          // the controller refused `opcode` with `code`
+  PAGE_WRITE,   // a schedule page write is queued and page_write() has its bytes. Log it before it goes.
+  EDIT_FAILED,  // a schedule edit stopped; `reason` says why
+};
+
+struct SessionEvent {
+  SessionEventKind kind{SessionEventKind::STAGE};
+  SessionStage stage{SessionStage::IDLE};
+  uint8_t opcode{0};
+  uint8_t code{0};
+  const char *reason{nullptr};  // a static string
 };
 
 class Session {
@@ -125,6 +153,8 @@ class Session {
   void start(uint32_t now_ms);
   // PollingComponent::update(). Enqueues a poll cycle unless one is pending.
   void poll(uint32_t now_ms);
+  // The refresh button: a poll cycle now, or identification again if that failed.
+  ControlResult refresh(uint32_t now_ms);
   // listen_only: no frame for silence_ms marks the controller not connected. The hub calls
   // this on its own timer, because with `update_interval: never` poll() never runs.
   void check_silence(uint32_t now_ms);
@@ -133,17 +163,18 @@ class Session {
   bool next_transmission(uint32_t now_ms, Transmission *out);
   // Every valid frame from the controller's receiver.
   void on_frame(const uint8_t *payload, size_t size, uint32_t now_ms);
-  // Experimental raw send. The experimental gate is the hub's; this only queues it.
-  bool send_raw(const uint8_t *payload, size_t size, uint32_t now_ms);
+  // Experimental: any payload, never retried. Needs experimental.
+  ControlResult send_raw(const uint8_t *payload, size_t size, uint32_t now_ms);
   // One control command, sent once. A lost reply must not run it again.
   ControlResult control(const Control &command, uint32_t now_ms);
   // Read the page, change one field, write it back, read it again. One at a time.
   ControlResult edit_schedule(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value,
                               uint32_t now_ms);
-  // The hub logs this before the write is transmitted. False when there is nothing new.
-  bool take_page_log(PageEditLog *out);
-  // A failed edit, once. The text is a static reason.
-  bool take_edit_failure(const char **reason);
+
+  // The next event, oldest first. False when there are none.
+  bool take_event(SessionEvent *out);
+  // The bytes of the latest schedule write, for a PAGE_WRITE event.
+  const PageEditLog &page_write() const { return this->page_write_; }
 
   // Fast while watering or just after a command, otherwise update_interval.
   uint32_t desired_interval(uint32_t now_ms) const;
@@ -151,9 +182,9 @@ class Session {
   bool busy() const { return !this->link_.idle(); }
 
   SessionStage stage() const { return this->stage_; }
-  ControllerState &state() { return this->state_; }
   const ControllerState &state() const { return this->state_; }
   const Identity &identity() const { return this->identity_; }
+  const LinkStatus &link() const { return this->link_status_; }
   const Capabilities &capabilities() const { return this->caps_; }
   // D12: control and write commands are allowed only for an accepted model id.
   bool writes_permitted() const { return this->writes_permitted_; }
@@ -163,45 +194,42 @@ class Session {
   uint32_t clock_serial() const { return this->clock_serial_; }
   uint32_t clock_read_at() const { return this->clock_read_at_; }
 
-  bool connected_known() const { return this->connected_known_; }
-  bool connected() const { return this->connected_; }
-  bool response_known() const { return this->response_known_; }
-  uint32_t response_ms() const { return this->response_ms_; }
-  uint32_t link_errors() const { return this->link_.link_errors(); }
-  uint32_t duplicates() const { return this->link_.duplicates(); }
-
-  // Change flags for values outside ControllerState. The hub clears them after publishing.
+  // Change flags for identity() and link(). ControllerState keeps its own per field.
   bool identity_changed() const { return this->identity_changed_; }
-  bool diagnostics_changed() const { return this->diagnostics_changed_; }
+  bool link_changed() const { return this->link_changed_; }
+  // After publishing: clears these and every ControllerState cell.
   void clear_changed();
 
  private:
-  bool enqueue(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail = 0,
-               Delivery delivery = Delivery::NORMAL);
-  void follow_up_(uint32_t now_ms);
-  bool enqueue_command_(const ByteBuf &request, uint32_t now_ms);
-  bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
+  bool enqueue_(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail = 0,
+                Delivery delivery = Delivery::NORMAL);
+  void enqueue_list_(const RequestList &list, Priority priority, TagKind kind, size_t *count = nullptr);
+  void push_event_(const SessionEvent &event);
+  void set_stage_(SessionStage stage);
+  void set_connected_(bool connected, uint32_t now_ms);
+  void identify_();
+  void restart_();
+  void handle_(const Completion &done, uint32_t now_ms);
+  void finish_probes_(uint32_t now_ms);
+  void begin_running_(uint32_t now_ms);
+  bool schedule_due_(uint32_t now_ms) const;
+  void read_schedule_(uint32_t now_ms, Priority priority, size_t *count);
+  void note_unsupported_(uint8_t opcode);
+  void note_clock_reading_(uint32_t at_ms);
+  bool watering_() const;
   bool ready_for_command_() const;
+  bool enqueue_command_(const ByteBuf &request, uint32_t now_ms);
+  void follow_up_(uint32_t now_ms);
+  bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
   void fail_edit_(const char *reason);
   void handle_page_(const Completion &done);
-  void enqueue_list(const RequestList &list, Priority priority, TagKind kind, size_t *count = nullptr);
-  void identify();
-  void restart_();
-  void note_clock_reading_(uint32_t at_ms);
-  void handle(const Completion &done, uint32_t now_ms);
-  void finish_probes(uint32_t now_ms);
-  void begin_running(uint32_t now_ms);
-  bool schedule_due(uint32_t now_ms) const;
-  void read_schedule(uint32_t now_ms, Priority priority, size_t *count);
-  void note_unsupported(uint8_t opcode);
-  void set_connected(bool connected, uint32_t now_ms);
-  bool watering() const;
 
   const Model &model_;
   SessionConfig config_;
   LinkCore link_;
   ControllerState state_{};
   Identity identity_{};
+  LinkStatus link_status_{};
   Capabilities caps_{};
   SessionStage stage_{SessionStage::IDLE};
 
@@ -218,20 +246,19 @@ class Session {
   uint32_t hold_from_{0};
   bool hold_{false};
 
-  bool connected_known_{false};
-  bool connected_{false};
   uint32_t down_since_{0};
-  bool response_known_{false};
-  uint32_t response_ms_{0};
-  uint32_t last_link_errors_{0};
   uint32_t last_frame_at_{0};
   bool frame_seen_{false};
   bool identity_changed_{false};
-  bool diagnostics_changed_{false};
+  bool link_changed_{false};
   uint32_t clock_serial_{0};
   uint32_t clock_read_at_{0};
   bool time_pending_{false};  // a 10 reply waiting for its 12
   uint32_t time_at_{0};
+
+  static constexpr size_t EVENT_CAP = 8;
+  SessionEvent events_[EVENT_CAP]{};
+  size_t event_count_{0};
 
   enum class EditStep : uint8_t { READING, WRITING, CONFIRMING };
 
@@ -244,14 +271,10 @@ class Session {
     uint8_t index{0};
     int32_t value{0};
     uint8_t page{0};
-    bool log_ready{false};
-    uint8_t size{0};
-    uint8_t before[40]{};
-    uint8_t after[40]{};
   };
 
   ScheduleEdit edit_{};
-  const char *edit_failure_{nullptr};
+  PageEditLog page_write_{};
 };
 
 }  // namespace esphome::rainbird

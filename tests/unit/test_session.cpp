@@ -22,10 +22,24 @@ static bool seen(const FakeController &fake, const std::string &request) {
   return std::find(fake.requests.begin(), fake.requests.end(), request) != fake.requests.end();
 }
 
+// Drains events up to the first of `kind`.
+static bool take_event_of(Session &session, SessionEventKind kind, SessionEvent *out = nullptr) {
+  SessionEvent event;
+  while (session.take_event(&event)) {
+    if (event.kind == kind) {
+      if (out != nullptr) {
+        *out = event;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 TEST_CASE("startup identifies, probes, reads the schedule in use, then polls") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::ZONES_RUNNING, Field::CLOCK, Field::RUN_TIME});
-  config.zone_mask = 1u << 0;  // zone 1's run times only: page 80
+  config.pages.add(0x80);  // zone 1's run times only
   Session session(model, config);
   FakeController fake = FakeController::upgraded_tm2();
 
@@ -58,10 +72,10 @@ TEST_CASE("startup identifies, probes, reads the schedule in use, then polls") {
   uint16_t minutes = 0;
   REQUIRE(session.state().run_minutes(1, 0, &minutes));
   CHECK(minutes == 25);
-  CHECK(session.connected_known());
-  CHECK(session.connected());
-  CHECK(session.response_known());
-  CHECK(session.response_ms() == 30);
+  CHECK(session.link().connected_known);
+  CHECK(session.link().connected);
+  CHECK(session.link().response_known);
+  CHECK(session.link().response_ms == 30);
 }
 
 TEST_CASE("an unknown model id keeps the hub read-only unless accept_model_ids lists it") {
@@ -91,7 +105,7 @@ TEST_CASE("a silent controller leaves the session idle, then the next poll tries
   uint32_t now = run_session(session, silent, 0, 5000);
   CHECK(session.stage() == SessionStage::IDLE);
   CHECK(silent.requests == std::vector<std::string>{"02", "02", "02"});
-  CHECK(session.link_errors() == 3);
+  CHECK(session.link().errors == 3);
 
   session.poll(now);
   CHECK(session.stage() == SessionStage::IDENTIFY);
@@ -103,19 +117,19 @@ TEST_CASE("three failed requests in a row mark the link down; any answer brings 
   FakeController fake = FakeController::upgraded_tm2();
   session.start(0);
   uint32_t now = run_session(session, fake, 0, 10000);
-  REQUIRE(session.connected());
+  REQUIRE(session.link().connected);
 
   fake.replies.clear();
   for (int i = 0; i < 3; i++) {
     session.poll(now);
     now = run_session(session, fake, now, 5000);
   }
-  CHECK_FALSE(session.connected());
+  CHECK_FALSE(session.link().connected);
 
   fake = FakeController::upgraded_tm2();
   session.poll(now);
   run_session(session, fake, now, 5000);
-  CHECK(session.connected());
+  CHECK(session.link().connected);
 }
 
 TEST_CASE("without 04 every optional command is tried; a NAK then switches it off") {
@@ -150,33 +164,38 @@ TEST_CASE("listen_only never transmits and decodes what it hears") {
   session.poll(0);
   Transmission tx;
   CHECK_FALSE(session.next_transmission(0, &tx));
-  CHECK_FALSE(session.send_raw(from_hex("02").data(), 1, 0));
+  CHECK(session.send_raw(from_hex("02").data(), 1, 0) == ControlResult::REFUSED_NOT_READY);
 
   auto bf = from_hex("BF 00 02 00 00 00");
   session.on_frame(bf.data(), bf.size(), 100);
   bool on = false;
   REQUIRE(session.state().zone_running(2, &on));
   CHECK(on);
-  CHECK(session.connected());
+  CHECK(session.link().connected);
 
   // update() may never run in listen_only, so silence has its own check.
   session.check_silence(100 + 59999);
-  CHECK(session.connected());
+  CHECK(session.link().connected);
   session.check_silence(100 + 60000);
-  CHECK_FALSE(session.connected());
+  CHECK_FALSE(session.link().connected);
 }
 
-TEST_CASE("with polling off only send_raw transmits") {
+TEST_CASE("with polling off only send_raw transmits, and only with experimental") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::ZONES_RUNNING});
   config.polling = false;
+  Session plain(model, config);
+  plain.start(0);
+  CHECK(plain.send_raw(from_hex("02").data(), 1, 0) == ControlResult::REFUSED_EXPERIMENTAL);
+
+  config.experimental = true;
   Session session(model, config);
   session.start(0);
   CHECK(session.stage() == SessionStage::MANUAL);
   session.poll(0);
   Transmission tx;
   CHECK_FALSE(session.next_transmission(0, &tx));
-  REQUIRE(session.send_raw(from_hex("02").data(), 1, 0));
+  REQUIRE(session.send_raw(from_hex("02").data(), 1, 0) == ControlResult::QUEUED);
   REQUIRE(session.next_transmission(0, &tx));
   CHECK(to_hex(tx.bytes, tx.size) == "F5 F5 1C 01 02 03 1D");
 }
@@ -185,10 +204,11 @@ TEST_CASE("send_raw is sent once when nothing answers") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::ZONES_RUNNING});
   config.polling = false;
+  config.experimental = true;
   Session session(model, config);
   FakeController silent;
   session.start(0);
-  REQUIRE(session.send_raw(from_hex("42").data(), 1, 0));
+  REQUIRE(session.send_raw(from_hex("42").data(), 1, 0) == ControlResult::QUEUED);
   run_session(session, silent, 0, 5000);
   CHECK(silent.requests == std::vector<std::string>{"42"});
 }
@@ -196,6 +216,7 @@ TEST_CASE("send_raw is sent once when nothing answers") {
 TEST_CASE("polling is fast while a zone runs and after a command, otherwise update_interval") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::ZONES_RUNNING});
+  config.experimental = true;
   Session session(model, config);
   FakeController fake = FakeController::upgraded_tm2();
   fake.replies["3F 00"] = "BF 00 00 00 00 00";
@@ -213,7 +234,7 @@ TEST_CASE("polling is fast while a zone runs and after a command, otherwise upda
   now = run_session(session, fake, now, 2000);
   CHECK(session.desired_interval(now) == 15000);
 
-  REQUIRE(session.send_raw(from_hex("4C").data(), 1, now));
+  REQUIRE(session.send_raw(from_hex("4C").data(), 1, now) == ControlResult::QUEUED);
   CHECK(session.desired_interval(now + 29999) == 3000);
   CHECK(session.desired_interval(now + 30000) == 15000);
   // A hold from a month ago does not look active again after the clock moves on.
@@ -286,50 +307,50 @@ TEST_CASE("turning a zone off stops only when that zone is running") {
 }
 
 TEST_CASE("queue mode advances to the next queued zone when that is allowed") {
-  Running live(config_with({Field::ZONES_RUNNING, Field::QUEUE}));
-  REQUIRE(live.session.capabilities().advance);
-  Session &session = live.session;
-  uint32_t &now = live.now;
-  auto running = from_hex("BF 00 01 00 00 00");
-  session.on_frame(running.data(), running.size(), now);
-  auto queued = from_hex("BB 01 21 05 D0 22 04 B0 00 00 00");
-  session.on_frame(queued.data(), queued.size(), now);
-  Control off;
-  off.op = ControlOp::STOP_ZONE;
-  off.zone = 1;
-  off.queue_mode = true;
-  off.experimental = true;
-  FakeController fake;
-  REQUIRE(session.control(off, now) == ControlResult::QUEUED);
-  run_session(session, fake, now, 5000);
-  CHECK(fake.requests == std::vector<std::string>{"42 02"});
-
-  off.experimental = false;
-  fake.requests.clear();
-  REQUIRE(session.control(off, now) == ControlResult::QUEUED);
-  run_session(session, fake, now, 5000);
-  CHECK(fake.requests == std::vector<std::string>{"40"});
+  for (bool experimental : {true, false}) {
+    SessionConfig config = config_with({Field::ZONES_RUNNING, Field::QUEUE});
+    config.valve_queue = true;
+    config.experimental = experimental;
+    Running live(config);
+    REQUIRE(live.session.capabilities().advance);
+    Session &session = live.session;
+    uint32_t &now = live.now;
+    auto running = from_hex("BF 00 01 00 00 00");
+    session.on_frame(running.data(), running.size(), now);
+    auto queued = from_hex("BB 01 21 05 D0 22 04 B0 00 00 00");
+    session.on_frame(queued.data(), queued.size(), now);
+    Control off;
+    off.op = ControlOp::STOP_ZONE;
+    off.zone = 1;
+    FakeController fake;
+    REQUIRE(session.control(off, now) == ControlResult::QUEUED);
+    run_session(session, fake, now, 5000);
+    // 42 is experimental. Without it, turning the valve off stops everything.
+    CHECK(fake.requests == std::vector<std::string>{experimental ? "42 02" : "40"});
+  }
 }
 
 TEST_CASE("experimental commands stay off until the config and the probe allow them") {
-  Running live(config_with({Field::IRRIGATION_ENABLED}));
-  Session &session = live.session;
-  uint32_t &now = live.now;
   // This script answers 04 49 with "not supported" and 04 3A with "supported".
-  CHECK_FALSE(session.capabilities().controller_state);
-  REQUIRE(session.capabilities().test_stations);
   Control irrigation;
   irrigation.op = ControlOp::SET_IRRIGATION;
   irrigation.value = 0;
-  CHECK(session.control(irrigation, now) == ControlResult::REFUSED_EXPERIMENTAL);
-  irrigation.experimental = true;
-  CHECK(session.control(irrigation, now) == ControlResult::REFUSED_UNSUPPORTED);
-
   Control test_all;
   test_all.op = ControlOp::TEST_ZONES;
   test_all.value = 2;
-  CHECK(session.control(test_all, now) == ControlResult::REFUSED_EXPERIMENTAL);
-  test_all.experimental = true;
+
+  Running plain(config_with({Field::IRRIGATION_ENABLED}));
+  CHECK(plain.session.control(irrigation, plain.now) == ControlResult::REFUSED_EXPERIMENTAL);
+  CHECK(plain.session.control(test_all, plain.now) == ControlResult::REFUSED_EXPERIMENTAL);
+
+  SessionConfig config = config_with({Field::IRRIGATION_ENABLED});
+  config.experimental = true;
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  CHECK_FALSE(session.capabilities().controller_state);
+  REQUIRE(session.capabilities().test_stations);
+  CHECK(session.control(irrigation, now) == ControlResult::REFUSED_UNSUPPORTED);
   FakeController fake;
   REQUIRE(session.control(test_all, now) == ControlResult::QUEUED);
   run_session(session, fake, now, 5000);
@@ -339,7 +360,7 @@ TEST_CASE("experimental commands stay off until the config and the probe allow t
 TEST_CASE("a schedule edit changes one field and checks the page that comes back") {
   SessionConfig config = config_with({Field::FREQUENCY});
   config.allow_writes = true;
-  config.program_mask = 0x1;
+  config.pages.add(0x10);
   Running live(config);
   Session &session = live.session;
   uint32_t &now = live.now;
@@ -357,8 +378,8 @@ TEST_CASE("a schedule edit changes one field and checks the page that comes back
   std::vector<uint8_t> reply = from_hex("A0 00 10 6A 06 01 00 64 01");
   session.on_frame(reply.data(), reply.size(), now);
 
-  PageEditLog log;
-  REQUIRE(session.take_page_log(&log));
+  REQUIRE(take_event_of(session, SessionEventKind::PAGE_WRITE));
+  const PageEditLog &log = session.page_write();
   CHECK(log.page == 0x10);
   CHECK(log.before[5] == FREQ_CYCLIC);
   CHECK(log.after[5] == FREQ_CUSTOM);
@@ -369,15 +390,14 @@ TEST_CASE("a schedule edit changes one field and checks the page that comes back
   fake.replies["21 00 10 6A 06 01 00 64 00"] = "01 21";
   fake.replies["20 00 10"] = "A0 00 10 6A 06 01 00 64 00";
   now = run_session(session, fake, now, 5000);
-  const char *reason = nullptr;
-  CHECK_FALSE(session.take_edit_failure(&reason));
+  CHECK_FALSE(take_event_of(session, SessionEventKind::EDIT_FAILED));
   CHECK(std::find(fake.requests.begin(), fake.requests.end(), "21 00 10 6A 06 01 00 64 00") != fake.requests.end());
 }
 
 TEST_CASE("a new schedule timestamp re-reads the schedule on the next poll") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::FREQUENCY});
-  config.program_mask = 0x1;
+  config.pages.add(0x10);
   Session session(model, config);
   FakeController fake = FakeController::upgraded_tm2();
   session.start(0);
@@ -427,9 +447,10 @@ TEST_CASE("a 2-byte command goes as one copy; polls and send_raw keep the LNK2's
 
   SessionConfig manual = config_with({Field::ZONES_RUNNING});
   manual.polling = false;
+  manual.experimental = true;
   Session raw(live.model, manual);
   raw.start(0);
-  REQUIRE(raw.send_raw(from_hex("3F 00").data(), 2, 0));
+  REQUIRE(raw.send_raw(from_hex("3F 00").data(), 2, 0) == ControlResult::QUEUED);
   REQUIRE(raw.next_transmission(0, &tx));
   CHECK(to_hex(tx.bytes, tx.size) == "F5 F5 1C 02 3F 00 41 1D F5 F5 1C 02 3F 00 41 1D");
 }
@@ -486,7 +507,8 @@ TEST_CASE("each complete clock reading moves the clock serial on once") {
 TEST_CASE("a schedule page that timed out is read again on the next poll; a NAKed one is not") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::FREQUENCY, Field::START_TIME});
-  config.program_mask = 0x1;
+  config.pages.add(0x10);
+  config.pages.add(0x60);
   Session session(model, config);
   FakeController fake = FakeController::upgraded_tm2();
   fake.replies.erase("20 00 10");         // silent: the read times out
@@ -512,7 +534,8 @@ TEST_CASE("a schedule page that timed out is read again on the next poll; a NAKe
 TEST_CASE("a confirming read the queue refuses ends the edit, and the next edit can start") {
   SessionConfig config = config_with({Field::FREQUENCY});
   config.allow_writes = true;
-  config.program_mask = 0x1;
+  config.experimental = true;  // send_raw fills the queue below
+  config.pages.add(0x10);
   Running live(config);
   Session &session = live.session;
   uint32_t &now = live.now;
@@ -528,14 +551,14 @@ TEST_CASE("a confirming read the queue refuses ends the edit, and the next edit 
 
   // The write is in flight. Fill the queue so the confirming read has nowhere to go.
   auto model_query = from_hex("02");
-  while (session.send_raw(model_query.data(), 1, now)) {
+  while (session.send_raw(model_query.data(), 1, now) == ControlResult::QUEUED) {
   }
   now += tx.first_copy_ms + 30;
   auto ack = from_hex("01 21");
   session.on_frame(ack.data(), ack.size(), now);
-  const char *reason = nullptr;
-  REQUIRE(session.take_edit_failure(&reason));
-  CHECK(std::string(reason).find("confirming read") != std::string::npos);
+  SessionEvent failed;
+  REQUIRE(take_event_of(session, SessionEventKind::EDIT_FAILED, &failed));
+  CHECK(std::string(failed.reason).find("confirming read") != std::string::npos);
 
   FakeController fake = FakeController::upgraded_tm2();
   now = run_session(session, fake, now, 20000);
@@ -552,7 +575,7 @@ TEST_CASE("after five minutes down, the session starts again at identification")
     session.poll(now);
     now = run_session(session, silent, now, 5000);
   }
-  REQUIRE_FALSE(session.connected());
+  REQUIRE_FALSE(session.link().connected);
 
   session.poll(now + 60000);
   CHECK(session.stage() == SessionStage::RUNNING);
@@ -568,4 +591,32 @@ TEST_CASE("after five minutes down, the session starts again at identification")
   CHECK(session.stage() == SessionStage::RUNNING);
   CHECK(session.writes_permitted());
   CHECK(session.capabilities().combined);
+}
+
+TEST_CASE("events report each stage, the link going up and refusals, once each") {
+  EspTm2Model model;
+  FakeController fake = FakeController::upgraded_tm2();
+  fake.replies["3F 00"] = "00 3F 02";  // a NAK that is not "unsupported"
+  Session session(model, config_with({Field::ZONES_RUNNING}));
+  session.start(0);
+  run_session(session, fake, 0, 10000);
+
+  std::vector<SessionEventKind> kinds;
+  std::vector<SessionStage> stages;
+  SessionEvent event;
+  SessionEvent nak;
+  while (session.take_event(&event)) {
+    kinds.push_back(event.kind);
+    if (event.kind == SessionEventKind::STAGE) {
+      stages.push_back(event.stage);
+    }
+    if (event.kind == SessionEventKind::NAK) {
+      nak = event;
+    }
+  }
+  CHECK(stages == std::vector<SessionStage>{SessionStage::IDENTIFY, SessionStage::PROBE, SessionStage::RUNNING});
+  CHECK(std::count(kinds.begin(), kinds.end(), SessionEventKind::LINK_UP) == 1);
+  CHECK(nak.opcode == 0x3F);
+  CHECK(nak.code == 0x02);
+  CHECK_FALSE(session.take_event(&event));
 }

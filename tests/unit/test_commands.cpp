@@ -133,9 +133,6 @@ TEST_CASE("ack, nak and live status") {
   CHECK(nak.echo == 0x02);
   CHECK(nak.code == 0x03);
   CHECK(nak_is_unsupported(nak.code));
-  CHECK(nak_is_bad_length(nak.code));
-  CHECK_FALSE(nak_is_incompatible(nak.code));
-  CHECK_FALSE(nak_is_checksum(nak.code));
   CHECK_FALSE(nak_is_unsupported(0x02));
 
   StationMask active;
@@ -233,71 +230,16 @@ TEST_CASE("ack, nak and live status") {
   CHECK(budget.percent == 100);
 }
 
-TEST_CASE("schedule pages and the run-time map") {
+TEST_CASE("schedule pages keep their raw bytes; the page helpers do the zone arithmetic") {
+  // What the bytes mean is the model's page map (test_model.cpp). sip_commands keeps them raw.
   SchedulePage page;
-  auto bytes = from_hex("A0 00 00 00 00 04 00");
+  auto bytes = from_hex("A0 00 10 6A 06 01 00 64 01");
   REQUIRE(parse_schedule_page(bytes.data(), bytes.size(), &page));
-  GlobalSettings global;
-  REQUIRE(parse_global_page(page, &global));
-  CHECK(global.station_delay_seconds == 0);
-  CHECK(global.rain_delay_days == 4);
-  CHECK(global.rain_sensor == GLOBAL_SENSOR_OBEYED);
-  // Page 20 uses the opposite polarity from page 00 byte 3.
-  CHECK_FALSE(station_obeys_rain_sensor(GLOBAL_SENSOR_OBEYED));
-  CHECK(station_obeys_rain_sensor(0x01));
-
-  bytes = from_hex("A0 00 10 6A 06 01 00 64 01");
-  REQUIRE(parse_schedule_page(bytes.data(), bytes.size(), &page));
-  ProgramSettings program;
-  REQUIRE(parse_program_page(page, &program));
-  CHECK(program.program == 0);
-  CHECK(program.days == (DAY_MONDAY | DAY_WEDNESDAY | DAY_FRIDAY | DAY_SATURDAY));
-  CHECK(program.days == 0x6A);
-  CHECK(program.period == 6);
-  CHECK(program.synchro == 1);
-  CHECK(program.permanent_days_off == 0);
-  CHECK(program.unknown == 0x64);
-  CHECK(program.frequency == FREQ_CYCLIC);
-
-  uint8_t editable[6];
-  std::memcpy(editable, page.data, 6);
-  REQUIRE(patch_program_field(editable, 6, ProgramField::DAYS, 0x01));
-  CHECK(editable[0] == 0x01);
-  CHECK(editable[3] == 0x00);
-  CHECK(editable[4] == 0x64);
-  CHECK(editable[5] == FREQ_CYCLIC);
-  REQUIRE(patch_program_field(editable, 6, ProgramField::FREQUENCY, FREQ_ODD));
-  CHECK(editable[4] == 0x64);
-  CHECK(editable[5] == FREQ_ODD);
-  REQUIRE(patch_program_field(editable, 6, ProgramField::PERMANENT_OFF, DAY_SUNDAY));
-  CHECK(editable[3] == DAY_SUNDAY);
-  CHECK(editable[4] == 0x64);
-
-  bytes = from_hex("A0 00 60 00 F0 FF FF FF FF FF FF");
-  REQUIRE(parse_schedule_page(bytes.data(), bytes.size(), &page));
-  StartTimes starts;
-  REQUIRE(parse_start_times(page, &starts));
-  CHECK(starts.program == 0);
-  CHECK(starts.minutes[0] == 240);
-  CHECK(starts.minutes[1] == START_TIME_OFF);
-  CHECK(starts.minutes[2] == START_TIME_OFF);
-  CHECK(starts.minutes[3] == START_TIME_OFF);
-
-  bytes = from_hex("A0 00 80 00 19 00 01 00 00 00 14 00 02 00 00");
-  REQUIRE(parse_schedule_page(bytes.data(), bytes.size(), &page));
-  uint16_t minutes = 0;
-  REQUIRE(run_time_minutes(page, 1, 0, &minutes));
-  CHECK(minutes == 25);
-  REQUIRE(run_time_minutes(page, 1, 1, &minutes));
-  CHECK(minutes == 1);
-  REQUIRE(run_time_minutes(page, 1, 2, &minutes));
-  CHECK(minutes == 0);
-  REQUIRE(run_time_minutes(page, 2, 0, &minutes));
-  CHECK(minutes == 20);
-  REQUIRE(run_time_minutes(page, 2, 1, &minutes));
-  CHECK(minutes == 2);
-  REQUIRE(run_time_minutes(page, 2, 2, &minutes));
-  CHECK(minutes == 0);
+  CHECK(page.page == 0x10);
+  CHECK(page.size == 6);
+  CHECK(page.data[0] == 0x6A);
+  CHECK(page.data[4] == 0x64);
+  CHECK(page.data[5] == FREQ_CYCLIC);
 
   CHECK(run_time_page(1) == 0x80);
   CHECK(run_time_page(2) == 0x80);
@@ -312,9 +254,6 @@ TEST_CASE("schedule pages and the run-time map") {
   CHECK(start_time_page(1) == 0x61);
 
   ByteBuf write;
-  REQUIRE(request_write_page(0x10, editable, 6, &write));
-  CHECK(write.data[0] == 0x21);
-  CHECK(write.data[3] == editable[0]);
-  CHECK(write.data[6] == DAY_SUNDAY);  // permanent days, the field we edited
-  CHECK(write.data[7] == 0x64);        // byte 4, still the value that was read
+  REQUIRE(request_write_page(0x10, page.data, page.size, &write));
+  CHECK(to_hex(write.data, write.size) == "21 00 10 6A 06 01 00 64 01");
 }

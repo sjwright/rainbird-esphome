@@ -26,6 +26,8 @@ HDRS = \
 	../../components/rainbird/link_core.h \
 	../../components/rainbird/session.h \
 	../../components/rainbird/clock_sync.h \
+	../../components/rainbird/countdown.h \
+	../../components/rainbird/elapsed.h \
 	../../components/rainbird/entity_kind.h \
 	../../components/rainbird/entity_values.h \
 	doctest.h hex.h vectors.h fixture.h fake_controller.h

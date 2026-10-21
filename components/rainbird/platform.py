@@ -21,15 +21,8 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_NAME
 
-from . import (
-    CONF_PROGRAM,
-    CONF_RAINBIRD_ID,
-    CONF_ZONE,
-    RainbirdComponent,
-    build_entity,
-    entity_schema,
-    program_letter,
-)
+from . import RainbirdComponent, build_entity, entity_schema, program_letter
+from .const import CONF_DAY, CONF_PROGRAM, CONF_RAINBIRD_ID, CONF_SLOT, CONF_ZONE
 from .entity_kinds import (
     DAYS,
     KINDS,
@@ -40,9 +33,7 @@ from .entity_kinds import (
     platform_keys,
     resolve_kind,
 )
-
-CONF_DAY = "day"
-CONF_SLOT = "slot"
+from .models import program_index
 
 
 def _day_index(value):
@@ -119,7 +110,7 @@ async def platform_to_code(domain: str, config: dict) -> None:
         kind = _resolve(domain, key, config)
         zone = config[CONF_ZONE] if kind.scope is Scope.ZONE else NO_ZONE
         if kind.scope is Scope.PROGRAM or kind.fan_out is FanOut.PROGRAM:
-            program = "ABCD".index(config[CONF_PROGRAM])
+            program = program_index(config[CONF_PROGRAM])
         else:
             program = NO_PROGRAM
         if kind.fan_out is FanOut.DAY:

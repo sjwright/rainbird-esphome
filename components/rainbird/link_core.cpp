@@ -2,14 +2,9 @@
 
 #include <cstring>
 
+#include "elapsed.h"
+
 namespace esphome::rainbird {
-
-namespace {
-
-// Unsigned elapsed time is correct across the millis() wrap.
-bool elapsed(uint32_t now, uint32_t from, uint32_t delay) { return now - from >= delay; }
-
-}  // namespace
 
 uint32_t frame_air_ms(size_t bytes) {
   // One bit is 1/2400 s = 5/12 ms.
@@ -44,7 +39,7 @@ size_t LinkCore::queued(Priority priority) const {
   return count;
 }
 
-bool LinkCore::take_next(Pending *out) {
+bool LinkCore::take_next_(Pending *out) {
   if (this->count_ == 0) {
     return false;
   }
@@ -63,7 +58,7 @@ bool LinkCore::take_next(Pending *out) {
   return true;
 }
 
-bool LinkCore::push_front(const Pending &pending) {
+bool LinkCore::push_front_(const Pending &pending) {
   if (this->count_ >= QUEUE_CAP) {
     return false;
   }
@@ -75,7 +70,7 @@ bool LinkCore::push_front(const Pending &pending) {
   return true;
 }
 
-void LinkCore::complete(const Completion &completion) {
+void LinkCore::complete_(const Completion &completion) {
   if (this->done_count_ >= DONE_CAP) {
     // The session drains completions every loop, so this only drops under misuse. Keep the newest.
     for (size_t i = 0; i + 1 < DONE_CAP; i++) {
@@ -86,13 +81,13 @@ void LinkCore::complete(const Completion &completion) {
   this->done_[this->done_count_++] = completion;
 }
 
-void LinkCore::fail(const Pending &pending) {
+void LinkCore::fail_(const Pending &pending) {
   Completion failed;
   failed.tag = pending.tag;
   failed.outcome = Outcome::FAILED;
   failed.opcode = pending.request.data[0];
   failed.attempts = pending.attempts;
-  this->complete(failed);
+  this->complete_(failed);
 }
 
 bool LinkCore::pop_completion(Completion *out) {
@@ -116,13 +111,13 @@ void LinkCore::tick(uint32_t now_ms) {
   this->ready_from_ = now_ms;
   this->ready_delay_ = this->timing_.gap_ms;
   uint8_t retries = this->current_.delivery == Delivery::NORMAL ? this->timing_.retries : 0;
-  if (this->current_.attempts <= retries && this->push_front(this->current_)) {
+  if (this->current_.attempts <= retries && this->push_front_(this->current_)) {
     return;
   }
   if (this->consecutive_failures_ < 255) {
     this->consecutive_failures_++;
   }
-  this->fail(this->current_);
+  this->fail_(this->current_);
 }
 
 bool LinkCore::next_transmission(uint32_t now_ms, Transmission *out) {
@@ -130,7 +125,7 @@ bool LinkCore::next_transmission(uint32_t now_ms, Transmission *out) {
     return false;
   }
   Pending next;
-  if (!this->take_next(&next)) {
+  if (!this->take_next_(&next)) {
     return false;
   }
   *out = Transmission{};
@@ -138,7 +133,7 @@ bool LinkCore::next_transmission(uint32_t now_ms, Transmission *out) {
   if (first == 0) {
     // enqueue() bounds the size, so this should not happen. Fail the request rather than
     // drop it: whoever queued it is waiting for a completion.
-    this->fail(next);
+    this->fail_(next);
     return false;
   }
   out->size = first;
@@ -189,7 +184,7 @@ bool LinkCore::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
     std::memcpy(this->last_reply_, payload, size);
     this->last_reply_size_ = size;
     this->last_reply_at_ = now_ms;
-    this->complete(done);
+    this->complete_(done);
     return true;
   }
   // A second identical reply soon after is the answer to the duplicate copy (SPEC 8.5).

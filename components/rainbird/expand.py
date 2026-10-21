@@ -13,6 +13,7 @@ hub. Hand-written ``platform: rainbird`` blocks are what ``packages``,
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .const import CONF_DISABLED, CONF_PROGRAM, CONF_ZONE
 from .entity_kinds import (
     DAYS,
     KINDS,
@@ -26,8 +27,9 @@ from .entity_kinds import (
 from .errors import ConfigError
 from .models import Model
 
-_ZONE_FIELDS = {"zone", "id", "name", "disabled", "device_id"}
-_PROGRAM_FIELDS = {"program", "id", "name"}
+# ESPHome's own keys are plain strings here: this module has no ESPHome import.
+_ZONE_FIELDS = {CONF_ZONE, "id", "name", CONF_DISABLED, "device_id"}
+_PROGRAM_FIELDS = {CONF_PROGRAM, "id", "name"}
 
 
 @dataclass(frozen=True)
@@ -168,7 +170,7 @@ def _zones(
     model: Model, hub_id: str, zones: list | None, kinds: Sequence[EntityKind]
 ) -> tuple[ZoneDecl, ...]:
     if zones is None:
-        zones = [{"zone": number} for number in range(1, model.zones + 1)]
+        zones = [{CONF_ZONE: number} for number in range(1, model.zones + 1)]
     elif isinstance(zones, dict):
         zones = [zones]
     if not isinstance(zones, list):
@@ -180,7 +182,7 @@ def _zones(
         if not isinstance(raw, dict):
             raise ConfigError("Each zone must be a mapping")
         _reject_unknown(raw, Scope.ZONE, kinds, "zone")
-        number = raw.get("zone")
+        number = raw.get(CONF_ZONE)
         if isinstance(number, bool) or not isinstance(number, int):
             raise ConfigError("zone must be an integer")
         if not 1 <= number <= model.zones:
@@ -194,7 +196,7 @@ def _zones(
         name = raw.get("name") or f"Zone {number}"
         if not isinstance(name, str):
             raise ConfigError(f"Zone {number} name must be a string")
-        disabled = bool(raw.get("disabled", False))
+        disabled = bool(raw.get(CONF_DISABLED, False))
         decls.append(ZoneDecl(number, zone_id, name, disabled, raw.get("device_id"), raw))
     return tuple(decls)
 
@@ -203,7 +205,7 @@ def _programs(
     model: Model, hub_id: str, programs: list | None, kinds: Sequence[EntityKind]
 ) -> tuple[ProgramDecl, ...]:
     if programs is None:
-        programs = [{"program": letter} for letter in model.letters]
+        programs = [{CONF_PROGRAM: letter} for letter in model.letters]
     elif isinstance(programs, dict):
         programs = [programs]
     if not isinstance(programs, list):
@@ -215,7 +217,7 @@ def _programs(
         if not isinstance(raw, dict):
             raise ConfigError("Each program must be a mapping")
         _reject_unknown(raw, Scope.PROGRAM, kinds, "program")
-        letter = raw.get("program")
+        letter = raw.get(CONF_PROGRAM)
         if not isinstance(letter, str):
             raise ConfigError("program must be a letter")
         letter = letter.upper()
