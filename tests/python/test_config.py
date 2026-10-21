@@ -331,6 +331,11 @@ switch:
     zone: 3
     valve:
       name: Side again
+number:
+  - platform: rainbird
+    zone: 3
+    run_duration:
+      name: Side duration
 """
     _expect_fail(tmp_path, "defined more than once", extra=extra)
 
@@ -475,3 +480,16 @@ button:
     path.write_text(_yaml(extra=extra))
     result = _run(path, tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_valve_needs_its_run_duration(tmp_path: Path):
+    zones = "    - zone: 1\n      name: Front\n      run_duration_number: false"
+    _expect_fail(tmp_path, "zone 1 valve switch needs that zone's run_duration", zones=zones)
+    extra = """
+button:
+  - platform: rainbird
+    zone: 2
+    queue:
+      name: Queue side
+"""
+    _expect_fail(tmp_path, "zone 2 queue button needs that zone's run_duration", extra=extra)

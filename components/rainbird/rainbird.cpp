@@ -504,9 +504,11 @@ bool RainbirdComponent::submit(const EntityBinding &binding, float value) {
   switch (binding.kind) {
     case EntityKind::VALVE:
     case EntityKind::QUEUE_ZONE: {
+      // Whether a valve starts or queues its zone, and what turning it off does, is the session's
+      // valve_queue setting.
       command.zone = binding.zone;
       if (binding.kind == EntityKind::VALVE && value == 0) {
-        command.op = ControlOp::STOP_ZONE;
+        command.op = ControlOp::VALVE_OFF;
         break;
       }
       uint8_t minutes = 0;
@@ -514,8 +516,7 @@ bool RainbirdComponent::submit(const EntityBinding &binding, float value) {
         ESP_LOGW(TAG, "Zone %u has no run duration", static_cast<unsigned>(binding.zone));
         return false;
       }
-      bool queue = binding.kind == EntityKind::QUEUE_ZONE || this->valve_queue_;
-      command.op = queue ? ControlOp::QUEUE_ZONE : ControlOp::RUN_ZONE;
+      command.op = binding.kind == EntityKind::VALVE ? ControlOp::VALVE_ON : ControlOp::QUEUE_ZONE;
       command.value = minutes;
       break;
     }

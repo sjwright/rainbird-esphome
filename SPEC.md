@@ -285,9 +285,9 @@ commands to use. Read it once at boot. Text sensor: model / protocol.
 
 Example: `83 00 3F 00 00 00` = stations 1–6 fitted.
 
-**Relevance:** Tells you which zones are physically available. Use it to mark
-zone entities available or unavailable, and to skip unused zones when reading
-the schedule. Read it at boot.
+**Relevance:** Tells you which zones are physically available. Use it to warn
+about configured zones that are not fitted and refuse commands for them, and
+to skip unused zones when reading the schedule. Read it at boot.
 
 #### `04` CommandSupportRequest → `84` [test] [code]
 

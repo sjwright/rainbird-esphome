@@ -365,8 +365,6 @@ sensor:
       name: Active zone        # 0 = none
     queued_zones:
       name: Zones queued
-    schedule_changed:
-      name: Schedule last changed   # timestamp, from 4A 01; needs time_id
     response_time:
       name: Controller response time
       entity_category: diagnostic
@@ -397,6 +395,8 @@ text_sensor:
       name: Controller firmware
     serial_number:
       name: Controller serial
+    schedule_changed:
+      name: Schedule last changed   # ISO 8601 timestamp, from 4A 01; needs time_id
 
 number:
   - platform: rainbird
@@ -570,10 +570,20 @@ switch:
 number:
   - platform: rainbird
     zone: 4
+    run_duration:
+      name: Veggie patch duration
+  - platform: rainbird
+    zone: 4
     program: A
     run_time:
       name: Veggie patch lawns run time
 ```
+
+A valve switch or queue button needs its zone's `run_duration` number, a
+start-slot switch needs that slot's `start_time`, and `test_all_zones` needs
+`test_duration`: each control runs with the other entity's value. Final
+validation fails a config that leaves one out, rather than letting the
+control refuse every press.
 
 ### 4.3 Programs
 
@@ -1091,7 +1101,11 @@ across bursts.
 5. Clock check and sync if needed. Then the normal poll cycle starts.
 
 Zones that the `03` mask reports as missing get a warning when the link
-reaches running.
+reaches running, and commands for them are refused. ESPHome has no
+per-entity availability, so their entities stay as they are.
+
+After five minutes with the link down, startup runs again from step 1 with
+the old capabilities, model gate and controller state cleared.
 
 ### 6.4 Poll plan
 
@@ -1130,9 +1144,14 @@ the time.
 - **Switching on another zone in `start` mode** replaces the running zone, as
   the controller does. The other switch turns off after the next poll.
 
-**Gated writes.** A write refused by `submit()` logs a warning and republishes
-the controller's current value. Home Assistant shows the change bouncing
-back, which is visible and harmless.
+**Refused writes.** A write that is refused, at once or after a NAK or a
+failed schedule edit, logs a warning and publishes nothing new: the entity
+still holds the controller's value, which never changed. Home Assistant drops
+its pending change, so a toggle springs back. Numbers also republish their
+value, because `Number::publish_state` does not drop repeats; a switch's
+does, so republishing a switch would change nothing. A failed schedule edit
+also re-reads the schedule, in case a write whose acknowledgement was lost
+landed after all.
 
 **Schedule edits.** Every schedule entity is bound to a *page field*: page,
 byte offset, width and bit mask, plus a value encoding from the model. One
@@ -1495,8 +1514,9 @@ controller yet. Where the build changed the design above:
   send for up to 24.8 days after a long idle spell or the millis() wrap; the
   host tests caught that.
 - **Startup probes all seven optional commands** (`4C 4A 42 4B 3D 49 3A`).
-  If `04` itself is unsupported, every optional command is tried, and a NAK
-  with bit 0 switches that one off.
+  If `04` itself is refused with a NAK, every optional command is tried, and
+  a NAK with bit 0 switches that one off. Probes that only time out assume
+  nothing, so the fallback polls run.
 - **`update_interval: never` puts the hub in manual mode**: no
   identification and no polling, only `send_raw`. The bench loopback uses
   this.

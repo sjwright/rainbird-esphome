@@ -295,7 +295,7 @@ TEST_CASE("turning a zone off stops only when that zone is running") {
   Session &session = live.session;
   uint32_t &now = live.now;
   Control off;
-  off.op = ControlOp::STOP_ZONE;
+  off.op = ControlOp::VALVE_OFF;
   // The scripted poll leaves zone 1 running and the rest off.
   off.zone = 2;
   CHECK(session.control(off, now) == ControlResult::REFUSED_NOT_RUNNING);
@@ -320,7 +320,7 @@ TEST_CASE("queue mode advances to the next queued zone when that is allowed") {
     auto queued = from_hex("BB 01 21 05 D0 22 04 B0 00 00 00");
     session.on_frame(queued.data(), queued.size(), now);
     Control off;
-    off.op = ControlOp::STOP_ZONE;
+    off.op = ControlOp::VALVE_OFF;
     off.zone = 1;
     FakeController fake;
     REQUIRE(session.control(off, now) == ControlResult::QUEUED);
@@ -585,6 +585,9 @@ TEST_CASE("after five minutes down, the session starts again at identification")
   CHECK(session.stage() == SessionStage::IDENTIFY);
   CHECK_FALSE(session.writes_permitted());
   CHECK_FALSE(session.capabilities().combined);
+  // The old controller's state goes too, so nothing is decided on it.
+  bool on = false;
+  CHECK_FALSE(session.state().zone_running(1, &on));
 
   FakeController fake = FakeController::upgraded_tm2();
   run_session(session, fake, now + 300000, 20000);
@@ -619,4 +622,80 @@ TEST_CASE("events report each stage, the link going up and refusals, once each")
   CHECK(nak.opcode == 0x3F);
   CHECK(nak.code == 0x02);
   CHECK_FALSE(session.take_event(&event));
+}
+
+TEST_CASE("probes the queue refuses do not leave the session waiting for them") {
+  EspTm2Model model;
+  SessionConfig config = config_with({Field::ZONES_RUNNING});
+  config.experimental = true;
+  Session session(model, config);
+  session.start(0);
+  Transmission tx;
+  REQUIRE(session.next_transmission(0, &tx));  // 02 in flight
+  auto query = from_hex("02");
+  while (session.send_raw(query.data(), 1, 0) == ControlResult::QUEUED) {
+  }
+  auto model_reply = from_hex("82 00 0A 09 0C");
+  session.on_frame(model_reply.data(), model_reply.size(), 100);
+  CHECK(session.stage() == SessionStage::RUNNING);
+  // No probe was answered or refused, so nothing optional is assumed.
+  CHECK_FALSE(session.capabilities().combined);
+}
+
+TEST_CASE("probes that only time out assume nothing; the fallback polls run") {
+  EspTm2Model model;
+  FakeController fake = FakeController::upgraded_tm2();
+  for (const char *probe : {"04 4C", "04 4A", "04 42", "04 4B", "04 3D", "04 49", "04 3A"}) {
+    fake.replies.erase(probe);
+  }
+  Session session(model, config_with({Field::CLOCK}));
+  session.start(0);
+  uint32_t now = run_session(session, fake, 0, 30000);
+  REQUIRE(session.stage() == SessionStage::RUNNING);
+  CHECK_FALSE(session.capabilities().combined);
+  CHECK_FALSE(session.capabilities().advance);
+  fake.requests.clear();
+  session.poll(now);
+  run_session(session, fake, now, 5000);
+  CHECK(seen(fake, "10"));
+  CHECK_FALSE(seen(fake, "4C"));
+}
+
+TEST_CASE("refresh reads the slow group and the schedule pages again") {
+  SessionConfig config = config_with({Field::FREQUENCY, Field::SEASONAL_ADJUST});
+  config.pages.add(0x10);
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  FakeController fake = FakeController::upgraded_tm2();
+  session.poll(now);  // the second cycle: no slow group, no pages
+  now = run_session(session, fake, now, 5000);
+  CHECK_FALSE(seen(fake, "30 00"));
+
+  fake.requests.clear();
+  REQUIRE(session.refresh(now) == ControlResult::QUEUED);
+  run_session(session, fake, now, 5000);
+  CHECK(seen(fake, "30 00"));
+  CHECK(seen(fake, "20 00 10"));
+}
+
+TEST_CASE("valves start or queue their zone by valve_queue, and missing zones are refused") {
+  for (bool queue : {false, true}) {
+    SessionConfig config = config_with({Field::ZONES_RUNNING});
+    config.valve_queue = queue;
+    Running live(config);
+    Session &session = live.session;
+    Control on;
+    on.op = ControlOp::VALVE_ON;
+    on.zone = 2;
+    on.value = 6;
+    FakeController fake;
+    REQUIRE(session.control(on, live.now) == ControlResult::QUEUED);
+    run_session(session, fake, live.now, 5000);
+    CHECK(fake.requests == std::vector<std::string>{queue ? "4B 00 02 06" : "39 00 02 06"});
+
+    // The script's 03 00 reply says zones 1 to 6 are fitted.
+    on.zone = 7;
+    CHECK(session.control(on, live.now) == ControlResult::REFUSED_NO_ZONE);
+  }
 }

@@ -386,10 +386,19 @@ def _check_dependencies(hub: dict) -> None:
             "The test_all_zones button needs a test_duration number on the same rainbird hub: "
             "the button runs each zone for that many minutes."
         )
-    for kind_id, _, program, index in sorted(bindings):
-        if kind_id != KindId.START_ENABLED:
-            continue
-        if (KindId.START_TIME, NO_ZONE, program, index) not in bindings:
+    for kind_id, zone, program, index in sorted(bindings):
+        if kind_id in (KindId.VALVE, KindId.QUEUE_ZONE):
+            if (KindId.RUN_DURATION, zone, NO_PROGRAM, 0) not in bindings:
+                control = "valve switch" if kind_id == KindId.VALVE else "queue button"
+                raise cv.Invalid(
+                    f"The zone {zone} {control} needs that zone's run_duration number on the same "
+                    "rainbird hub: it runs the zone for that many minutes. To show only whether the "
+                    "zone runs, use its running binary sensor."
+                )
+        if (
+            kind_id == KindId.START_ENABLED
+            and (KindId.START_TIME, NO_ZONE, program, index) not in bindings
+        ):
             letter = model.letters[program] if program < len(model.letters) else "?"
             raise cv.Invalid(
                 f"The program {letter} start {index + 1} enabled switch needs that slot's start_time "

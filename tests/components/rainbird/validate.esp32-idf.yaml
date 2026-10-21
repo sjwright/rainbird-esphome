@@ -110,6 +110,10 @@ switch:
 
 number:
   - platform: rainbird
+    zone: 4
+    run_duration:
+      name: Side path duration
+  - platform: rainbird
     program: B
     seasonal_adjust:
       name: Beds adjust

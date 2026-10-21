@@ -40,6 +40,8 @@ const char *control_result_text(ControlResult result) {
       return "the controller does not support it";
     case ControlResult::REFUSED_RANGE:
       return "out of range";
+    case ControlResult::REFUSED_NO_ZONE:
+      return "the controller says it does not have that zone";
     case ControlResult::REFUSED_NOT_RUNNING:
       return "that zone is not running";
     case ControlResult::REFUSED_QUEUED_ONLY:
@@ -124,10 +126,14 @@ void Session::identify_() {
 }
 
 void Session::restart_() {
-  // What was learned at startup belongs to the controller that answered then.
+  // What was learned at startup belongs to the controller that answered then, and so does
+  // its state: a command after this is decided on what the new controller reports. Entities
+  // keep showing the old values until new ones arrive, because nothing can be unpublished.
   if (this->edit_.active) {
     this->fail_edit_("the controller stopped answering");
   }
+  this->state_ = ControllerState{};
+  this->time_pending_ = false;
   this->caps_ = Capabilities{};
   this->writes_permitted_ = false;
   this->schedule_read_once_ = false;
@@ -141,6 +147,8 @@ ControlResult Session::refresh(uint32_t now_ms) {
   if (this->stage_ != SessionStage::IDLE && this->stage_ != SessionStage::RUNNING) {
     return ControlResult::REFUSED_NOT_READY;
   }
+  this->poll_count_ = 0;  // the next cycle includes the slow group
+  this->schedule_stale_ = true;
   this->poll(now_ms);
   return ControlResult::QUEUED;
 }
@@ -389,15 +397,23 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
       this->enqueue_(request_stations(0), Priority::FOLLOW_UP, TagKind::INFO);
       this->probes_pending_ = 0;
       this->probe_answered_ = false;
+      this->probe_refused_ = false;
       for (uint8_t command : PROBED) {
-        this->enqueue_(request_support(command), Priority::FOLLOW_UP, TagKind::PROBE, command);
-        this->probes_pending_++;
+        // Only a queued probe completes. One the queue refused counts as unanswered.
+        if (this->enqueue_(request_support(command), Priority::FOLLOW_UP, TagKind::PROBE, command)) {
+          this->probes_pending_++;
+        }
+      }
+      if (this->probes_pending_ == 0) {
+        this->finish_probes_(now_ms);
       }
       return;
     case TagKind::PROBE:
       if (done.outcome == Outcome::REPLY && done.reply.kind == ReplyKind::SUPPORT) {
         this->model_.note_support(done.reply.support, &this->caps_);
         this->probe_answered_ = true;
+      } else if (done.outcome == Outcome::NAK) {
+        this->probe_refused_ = true;
       }
       if (this->probes_pending_ > 0 && --this->probes_pending_ == 0) {
         this->finish_probes_(now_ms);
@@ -429,8 +445,10 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
 }
 
 void Session::finish_probes_(uint32_t now_ms) {
-  if (!this->probe_answered_) {
-    // No 04 answer at all: try every optional command. A NAK clears the ones that fail.
+  if (!this->probe_answered_ && this->probe_refused_) {
+    // 04 itself is refused: a controller without it. Try every optional command, and a NAK
+    // clears the ones that fail. Probes that only timed out say nothing, so nothing is assumed:
+    // the fallback polls (10, 12, 36, 3E, 48) work on every model.
     for (uint8_t command : PROBED) {
       CommandSupport support;
       support.command = command;
@@ -503,6 +521,11 @@ void Session::follow_up_(uint32_t now_ms) {
   this->enqueue_list_(list, Priority::FOLLOW_UP, TagKind::POLL);
 }
 
+bool Session::zone_missing_(uint8_t zone) const {
+  bool available = true;
+  return this->state_.zone_available(zone, &available) && !available;
+}
+
 bool Session::next_queued_zone_(uint8_t skip, uint8_t *zone) const {
   if (zone == nullptr || !this->state_.queue_known()) {
     return false;
@@ -532,21 +555,24 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
   ByteBuf request;
   switch (command.op) {
     case ControlOp::RUN_ZONE:
+    case ControlOp::QUEUE_ZONE:
+    case ControlOp::VALVE_ON: {
+      bool queue =
+          command.op == ControlOp::QUEUE_ZONE || (command.op == ControlOp::VALVE_ON && this->config_.valve_queue);
       if (command.zone < 1 || command.zone > zones || command.value < 1 || command.value > 255) {
         return ControlResult::REFUSED_RANGE;
       }
-      request = request_run_station(command.zone, static_cast<uint8_t>(command.value));
-      break;
-    case ControlOp::QUEUE_ZONE:
-      if (!this->caps_.queue_run) {
+      if (this->zone_missing_(command.zone)) {
+        return ControlResult::REFUSED_NO_ZONE;
+      }
+      if (queue && !this->caps_.queue_run) {
         return ControlResult::REFUSED_UNSUPPORTED;
       }
-      if (command.zone < 1 || command.zone > zones || command.value < 1 || command.value > 255) {
-        return ControlResult::REFUSED_RANGE;
-      }
-      request = request_queue_station(0, command.zone, static_cast<uint8_t>(command.value));
+      uint8_t minutes = static_cast<uint8_t>(command.value);
+      request = queue ? request_queue_station(0, command.zone, minutes) : request_run_station(command.zone, minutes);
       break;
-    case ControlOp::STOP_ZONE: {
+    }
+    case ControlOp::VALVE_OFF: {
       bool running = false;
       if (!this->state_.zone_running(command.zone, &running) || !running) {
         for (uint8_t i = 0; i < this->state_.queue_count(); i++) {

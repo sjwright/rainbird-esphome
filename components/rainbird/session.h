@@ -80,9 +80,10 @@ enum class TagKind : uint8_t {
 
 // A control command. Minutes, percent and days share `value`. Clock fields are separate.
 enum class ControlOp : uint8_t {
-  RUN_ZONE,
-  QUEUE_ZONE,
-  STOP_ZONE,  // a valve switch turned off
+  RUN_ZONE,    // 39: start now
+  QUEUE_ZONE,  // 4B: run after whatever is running
+  VALVE_ON,    // a valve switch: QUEUE_ZONE with valve_queue, otherwise RUN_ZONE
+  VALVE_OFF,   // a valve switch: stop, or advance past it with valve_queue and experimental
   RUN_PROGRAM,
   STOP,
   ADVANCE,
@@ -113,6 +114,7 @@ enum class ControlResult : uint8_t {
   REFUSED_EXPERIMENTAL,  // 42, 3A, 49 and send_raw
   REFUSED_UNSUPPORTED,   // the 04 probe said no
   REFUSED_RANGE,
+  REFUSED_NO_ZONE,      // 03 00 says the controller does not have that zone
   REFUSED_NOT_RUNNING,  // valve off, and this zone is not the one running
   REFUSED_QUEUED_ONLY,  // queued, and there is no "remove one zone" command
   REFUSED_BUSY,         // a schedule edit is already in flight, or the queue is full
@@ -153,7 +155,8 @@ class Session {
   void start(uint32_t now_ms);
   // PollingComponent::update(). Enqueues a poll cycle unless one is pending.
   void poll(uint32_t now_ms);
-  // The refresh button: a poll cycle now, or identification again if that failed.
+  // The refresh button: everything read again, status, slow group and schedule pages, with
+  // the next poll cycle. That is now, unless one is still running. Identification again if that failed.
   ControlResult refresh(uint32_t now_ms);
   // listen_only: no frame for silence_ms marks the controller not connected. The hub calls
   // this on its own timer, because with `update_interval: never` poll() never runs.
@@ -221,6 +224,7 @@ class Session {
   bool enqueue_command_(const ByteBuf &request, uint32_t now_ms);
   void follow_up_(uint32_t now_ms);
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
+  bool zone_missing_(uint8_t zone) const;
   void fail_edit_(const char *reason);
   void handle_page_(const Completion &done);
 
@@ -235,7 +239,8 @@ class Session {
 
   bool writes_permitted_{false};
   size_t probes_pending_{0};
-  bool probe_answered_{false};
+  bool probe_answered_{false};  // some 04 got an 84 reply
+  bool probe_refused_{false};   // some 04 got a NAK
   size_t schedule_pending_{0};
   uint32_t poll_count_{0};
   uint32_t last_schedule_read_{0};
