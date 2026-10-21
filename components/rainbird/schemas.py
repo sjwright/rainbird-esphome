@@ -12,7 +12,10 @@ from esphome.components import (
 )
 import esphome.config_validation as cv
 from esphome.const import (
+    CONF_ENTITY_CATEGORY,
+    CONF_ICON,
     CONF_INITIAL_VALUE,
+    CONF_MODE,
     CONF_RESTORE_VALUE,
     UNIT_MINUTE,
     UNIT_PERCENT,
@@ -37,9 +40,16 @@ def _opt(value):
 def build_entity_schema(kind: EntityKind, cls):
     if kind.domain == "switch":
         # A valve is not a GPIO output, so inverted would swap the command.
-        return switch.switch_schema(cls, block_inverted=True)
+        return switch.switch_schema(
+            cls,
+            block_inverted=True,
+            icon=_opt(kind.icon),
+            entity_category=_opt(kind.entity_category),
+        )
     if kind.domain == "button":
-        return button.button_schema(cls)
+        return button.button_schema(
+            cls, icon=_opt(kind.icon), entity_category=_opt(kind.entity_category)
+        )
     if kind.domain == "sensor":
         return sensor.sensor_schema(
             cls,
@@ -77,7 +87,20 @@ def build_entity_schema(kind: EntityKind, cls):
                     raise cv.Invalid(f"initial_value must be between {minimum} and {maximum}")
             return config
 
-        schema = number.number_schema(cls, unit_of_measurement=unit)
+        schema = number.number_schema(
+            cls,
+            unit_of_measurement=unit,
+            icon=_opt(kind.icon),
+            entity_category=_opt(kind.entity_category),
+        )
+        if kind.mode is not None:
+            schema = schema.extend(
+                {
+                    cv.Optional(CONF_MODE, default=kind.mode.upper()): cv.enum(
+                        number.NUMBER_MODES, upper=True
+                    )
+                }
+            )
         if kind.write is not Write.LOCAL:
             # A controller-backed number shows only what the controller reports.
             # initial_value or restore_value would show a value nobody read.
@@ -97,6 +120,16 @@ def build_entity_schema(kind: EntityKind, cls):
         )
     if kind.domain == "datetime":
         if kind.kind_id == KindId.START_TIME:
-            return datetime.time_schema(cls)
-        return datetime.datetime_schema(cls)
+            schema = datetime.time_schema(cls)
+        else:
+            schema = datetime.datetime_schema(cls)
+        # The datetime helpers take no icon or category, so set the defaults the way they would.
+        defaults = {}
+        if kind.icon is not None:
+            defaults[cv.Optional(CONF_ICON, default=kind.icon)] = cv.icon
+        if kind.entity_category is not None:
+            defaults[cv.Optional(CONF_ENTITY_CATEGORY, default=kind.entity_category)] = (
+                cv.entity_category
+            )
+        return schema.extend(defaults)
     raise ValueError(f"No schema for domain {kind.domain}")

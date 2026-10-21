@@ -493,3 +493,36 @@ button:
       name: Queue side
 """
     _expect_fail(tmp_path, "zone 2 queue button needs that zone's run_duration", extra=extra)
+
+
+def test_settings_are_config_and_maintenance_is_diagnostic(tmp_path: Path):
+    # The kind table's categories, icons and number mode reach every domain's schema.
+    time = "time:\n  - platform: sntp\n    id: ha_time\n"
+    extra = """
+number:
+  - platform: rainbird
+    station_delay:
+      name: Delay between zones
+button:
+  - platform: rainbird
+    refresh:
+      name: Refresh from controller
+datetime:
+  - platform: rainbird
+    controller_clock:
+      name: Controller clock
+"""
+    path = tmp_path / "categories.yaml"
+    path.write_text(_yaml(rainbird_extra="  time_id: ha_time\n", extra=time + extra))
+    result = _run(path, tmp_path)
+    blob = result.stdout + result.stderr
+    assert result.returncode == 0, blob
+
+    def block(name: str) -> str:
+        start = blob.index(f"name: {name}")
+        return blob[start : start + 400]
+
+    assert "entity_category: config" in block("Delay between zones")
+    assert "mode: SLIDER" in block("Delay between zones")
+    assert "entity_category: diagnostic" in block("Refresh from controller")
+    assert "entity_category: config" in block("Controller clock")

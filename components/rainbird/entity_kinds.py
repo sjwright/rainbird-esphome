@@ -143,6 +143,8 @@ class EntityKind:
     entity_category: str | None = None
     accuracy: int | None = None
     icon: str | None = None
+    # Number display mode: "slider" or "box". None is ESPHome's default, auto.
+    mode: str | None = None
 
 
 def hub_key(kind: EntityKind) -> str:
@@ -388,6 +390,7 @@ KINDS = (
         "Test all zones",
         write=Write.COMMAND,
         gate=Gate.EXPERIMENTAL,
+        entity_category="diagnostic",
         icon="mdi:test-tube",
     ),
     EntityKind(
@@ -397,6 +400,7 @@ KINDS = (
         Scope.CONTROLLER,
         "Sync controller clock",
         write=Write.COMMAND,
+        entity_category="config",
         icon="mdi:clock-check",
     ),
     EntityKind(
@@ -416,8 +420,9 @@ KINDS = (
         Scope.CONTROLLER,
         "Rain delay",
         write=Write.COMMAND,
-        limits=(0, 14, 1),
+        limits=(0, 14, 1),  # the TM2 manual: "Suspend watering for up to 14 days"
         unit="d",
+        entity_category="config",
         icon="mdi:weather-rainy",
     ),
     EntityKind(
@@ -428,9 +433,12 @@ KINDS = (
         "Delay between zones",
         write=Write.SCHEDULE_PAGE,
         gate=Gate.ALLOW_WRITES,
-        limits=(0, 65535, 1),
+        # The TM2 manual: "from 1 second to 9 hours". 0 is no delay. The page field is u16 seconds.
+        limits=(0, 9 * 3600, 1),
         unit="s",
+        entity_category="config",
         icon="mdi:timer-sand",
+        mode="slider",
     ),
     EntityKind(
         KindId.TEST_DURATION,
@@ -496,6 +504,7 @@ KINDS = (
         "Ignore rain sensor",
         write=Write.SCHEDULE_PAGE,
         gate=Gate.ALLOW_WRITES,
+        entity_category="config",
         icon="mdi:weather-rainy",
     ),
     EntityKind(
@@ -563,6 +572,7 @@ KINDS = (
         Scope.CONTROLLER,
         "Controller clock",
         write=Write.COMMAND,
+        entity_category="config",
         icon="mdi:clock-outline",
     ),
 )
