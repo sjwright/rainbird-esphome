@@ -7,6 +7,7 @@
 #include "controller_state.h"
 #include "link_core.h"
 #include "model.h"
+#include "schedule_editor.h"
 #include "sip_commands.h"
 
 namespace esphome::rainbird {
@@ -54,6 +55,19 @@ struct LinkStatus {
   bool response_known{false};
   uint32_t response_ms{0};  // the last reply, from the end of the first request copy
   uint32_t errors{0};       // requests that timed out, retries included
+  // Counted for the log, not published. Duplicates answer SPEC question 5: does the
+  // controller answer both copies of a 2-byte request?
+  uint32_t replies{0};
+  uint32_t duplicates{0};
+  uint32_t unexpected{0};
+};
+
+// Which LinkStatus values changed since clear_changed(). Each entity republishes only for its own:
+// a reply that leaves the error count alone does not republish it.
+struct LinkChanges {
+  bool connected{false};
+  bool response{false};
+  bool errors{false};
 };
 
 enum class SessionStage : uint8_t {
@@ -122,14 +136,6 @@ enum class ControlResult : uint8_t {
 
 const char *control_result_text(ControlResult result);
 
-// The bytes of one schedule edit, for the log line that goes out before the write.
-struct PageEditLog {
-  uint8_t page{0};
-  uint8_t size{0};
-  uint8_t before[MAX_PAGE_BYTES]{};
-  uint8_t after[MAX_PAGE_BYTES]{};
-};
-
 // Something for the hub to report. take_event() hands each over once, in order.
 enum class SessionEventKind : uint8_t {
   STAGE,        // stage() changed; `stage` is the new one
@@ -177,7 +183,7 @@ class Session {
   // The next event, oldest first. False when there are none.
   bool take_event(SessionEvent *out);
   // The bytes of the latest schedule write, for a PAGE_WRITE event.
-  const PageEditLog &page_write() const { return this->page_write_; }
+  const PageEditLog &page_write() const { return this->editor_.write_log(); }
 
   // Fast while watering or just after a command, otherwise update_interval.
   uint32_t desired_interval(uint32_t now_ms) const;
@@ -189,6 +195,10 @@ class Session {
   const Identity &identity() const { return this->identity_; }
   const LinkStatus &link() const { return this->link_status_; }
   const Capabilities &capabilities() const { return this->caps_; }
+  // True when 04 was refused, so every optional command is assumed until a NAK says otherwise.
+  bool capabilities_assumed() const { return this->caps_assumed_; }
+  // The schedule pages read, for the log.
+  const PageSet &pages() const { return this->config_.pages; }
   // D12: control and write commands are allowed only for an accepted model id.
   bool writes_permitted() const { return this->writes_permitted_; }
 
@@ -199,7 +209,9 @@ class Session {
 
   // Change flags for identity() and link(). ControllerState keeps its own per field.
   bool identity_changed() const { return this->identity_changed_; }
-  bool link_changed() const { return this->link_changed_; }
+  const LinkChanges &link_changes() const { return this->link_changes_; }
+  // True when anything may need publishing: a reply was applied, or identity() or link() changed.
+  bool anything_changed() const;
   // After publishing: clears these and every ControllerState cell.
   void clear_changed();
 
@@ -222,6 +234,7 @@ class Session {
   bool watering_() const;
   bool ready_for_command_() const;
   bool link_down_() const;
+  ControlResult unsupported_() const;
   bool enqueue_command_(const ByteBuf &request, uint32_t now_ms);
   void follow_up_(uint32_t now_ms);
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
@@ -242,6 +255,9 @@ class Session {
   size_t probes_pending_{0};
   bool probe_answered_{false};  // some 04 got an 84 reply
   bool probe_refused_{false};   // some 04 got a NAK
+  bool caps_assumed_{false};
+  bool probes_done_{false};
+  bool state_touched_{false};  // a reply was applied since clear_changed()
   size_t schedule_pending_{0};
   uint32_t poll_count_{0};
   uint32_t last_schedule_read_{0};
@@ -256,7 +272,7 @@ class Session {
   uint32_t last_frame_at_{0};
   bool frame_seen_{false};
   bool identity_changed_{false};
-  bool link_changed_{false};
+  LinkChanges link_changes_{};
   uint32_t clock_serial_{0};
   uint32_t clock_read_at_{0};
   bool time_pending_{false};  // a 10 reply waiting for its 12
@@ -266,21 +282,7 @@ class Session {
   SessionEvent events_[EVENT_CAP]{};
   size_t event_count_{0};
 
-  enum class EditStep : uint8_t { READING, WRITING, CONFIRMING };
-
-  struct ScheduleEdit {
-    bool active{false};
-    EditStep step{EditStep::READING};
-    Field field{Field::RUN_TIME};
-    uint8_t zone{0};
-    uint8_t program{0};
-    uint8_t index{0};
-    int32_t value{0};
-    uint8_t page{0};
-  };
-
-  ScheduleEdit edit_{};
-  PageEditLog page_write_{};
+  ScheduleEditor editor_;
 };
 
 }  // namespace esphome::rainbird

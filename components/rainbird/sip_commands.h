@@ -288,26 +288,32 @@ struct RawReply {
 };
 
 struct Reply {
+  Reply() : raw{} {}
+
   ReplyKind kind{ReplyKind::NONE};
-  Ack ack{};
-  Nak nak{};
-  ModelVersion model{};
-  StationMask stations{};
-  CommandSupport support{};
-  SerialNumber serial{};
-  FirmwareVersion firmware{};
-  ClockTime time{};
-  PackedDate date{};
-  CombinedState combined{};
-  QueueNow queue_now{};
-  QueueList queue_list{};
-  IrrigationState irrigation{};
-  RainSensorState rain_sensor{};
-  EventTimestamp event{};
-  RainDelay rain_delay{};
-  WaterBudget budget{};
-  SchedulePage schedule{};
-  RawReply raw{};
+  // Only the member `kind` names holds a value. Every reply kind is plain data, so one at a
+  // time keeps a reply near 70 bytes rather than the size of all of them.
+  union {
+    Ack ack;
+    Nak nak;
+    ModelVersion model;
+    StationMask stations;
+    CommandSupport support;
+    SerialNumber serial;
+    FirmwareVersion firmware;
+    ClockTime time;
+    PackedDate date;
+    CombinedState combined;
+    QueueNow queue_now;
+    QueueList queue_list;
+    IrrigationState irrigation;
+    RainSensorState rain_sensor;
+    EventTimestamp event;
+    RainDelay rain_delay;
+    WaterBudget budget;
+    SchedulePage schedule;
+    RawReply raw;
+  };
 };
 
 // False when a known opcode is the wrong length. An unknown opcode is RAW.

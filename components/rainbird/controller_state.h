@@ -153,43 +153,51 @@ class ControllerState {
     int32_t value{0};
     bool known{false};
     bool changed{false};
-
-    void set(int32_t next);
-    void forget();
-    bool get(int32_t *out) const;
   };
 
-  static int zone_index_(uint8_t zone);
-  static int program_index_(uint8_t program);
-  Cell *cell_at_(Cell *cells, int index, int count);
-  const Cell *cell_at_(const Cell *cells, int index, int count) const;
+  // Every value kept. A slot has one cell, or one per zone, program and day or start slot.
+  enum class Slot : uint8_t {
+    RUNNING,
+    AVAILABLE,
+    TIME,  // seconds since midnight
+    DATE,  // yyyymmdd
+    RAIN_DELAY,
+    RAIN_SENSOR,
+    IRRIGATION,
+    ACTIVE_ZONE,
+    PROGRAM_BYTE,
+    REMAINING,
+    QUEUED_COUNT,
+    SEASONAL,
+    SCHEDULE_CHANGED,
+    RUN_MINUTES,
+    WATERING_DAY,
+    FREQUENCY,
+    CYCLE_DAYS,
+    DAYS_UNTIL,
+    START_MINUTES,
+    START_ENABLED,
+    STATION_DELAY,
+    GLOBAL_BYPASS,
+    ZONE_BYPASS,
+    COUNT,
+  };
 
-  Cell running_[STATE_ZONES]{};
-  Cell available_[STATE_ZONES]{};
-  Cell hour_{};
-  Cell minute_{};
-  Cell second_{};
-  Cell date_packed_{};
-  Cell rain_delay_{};
-  Cell rain_sensor_{};
-  Cell irrigation_{};
-  Cell active_zone_{};
-  Cell program_byte_{};
-  Cell remaining_{};
+  // The cell for one value, or null when the zone, program or index is out of range.
+  Cell *cell_(Slot slot, uint8_t zone = 0, uint8_t program = 0, uint8_t index = 0);
+  const Cell *cell_(Slot slot, uint8_t zone = 0, uint8_t program = 0, uint8_t index = 0) const;
+  void set_(Slot slot, uint8_t zone, uint8_t program, uint8_t index, int32_t value);
+  bool get_(Slot slot, uint8_t zone, uint8_t program, uint8_t index, int32_t *value) const;
+  // get_() converted to the getter's type. A bool is true for any non-zero value.
+  template<typename T> bool read_(Slot slot, uint8_t zone, uint8_t program, uint8_t index, T *out) const;
+  // Zone 0 on a per-zone slot means any zone.
+  bool slot_changed_(Slot slot, uint8_t zone, uint8_t program, uint8_t index) const;
+
+  // One cell per value. controller_state.cpp checks this against the slot shapes.
+  static constexpr size_t CELLS = 3 * STATE_ZONES + STATE_ZONES * STATE_PROGRAMS + 4 * STATE_PROGRAMS +
+                                  7 * STATE_PROGRAMS + 2 * STATE_PROGRAMS * STATE_STARTS + 12;
+  Cell cells_[CELLS]{};
   bool remaining_refreshed_{false};
-  Cell queued_count_{};
-  Cell seasonal_[STATE_PROGRAMS]{};
-  Cell schedule_changed_{};
-  Cell run_minutes_[STATE_ZONES][STATE_PROGRAMS]{};
-  Cell watering_day_[STATE_PROGRAMS][7]{};
-  Cell frequency_[STATE_PROGRAMS]{};
-  Cell cycle_days_[STATE_PROGRAMS]{};
-  Cell days_until_[STATE_PROGRAMS]{};
-  Cell start_minutes_[STATE_PROGRAMS][STATE_STARTS]{};
-  Cell start_enabled_[STATE_PROGRAMS][STATE_STARTS]{};
-  Cell station_delay_{};
-  Cell global_bypass_{};
-  Cell zone_bypass_[STATE_ZONES]{};
   QueueItem queue_[STATE_QUEUE]{};
   uint8_t queue_count_{0};
   bool queue_known_{false};

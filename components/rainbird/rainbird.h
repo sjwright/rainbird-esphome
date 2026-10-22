@@ -180,6 +180,7 @@ class RainbirdComponent final : public PollingComponent {
   void after_activity_();
   void handle_events_();
   void log_controller_();
+  void log_link_stats_();
   void publish_changed_();
   void publish_remaining_(const ControllerState &state);
   void publish_remaining_sensors_(uint32_t seconds);

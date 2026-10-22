@@ -165,6 +165,12 @@ bool LinkCore::next_transmission(uint32_t now_ms, Transmission *out) {
 }
 
 bool LinkCore::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
+  Reply reply;
+  bool parsed = parse_reply(payload, size, &reply);
+  return this->on_frame(payload, size, parsed ? &reply : nullptr, now_ms);
+}
+
+bool LinkCore::on_frame(const uint8_t *payload, size_t size, const Reply *parsed, uint32_t now_ms) {
   if (payload == nullptr || size == 0 || size > MAX_PAYLOAD) {
     return false;
   }
@@ -175,12 +181,14 @@ bool LinkCore::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
     done.attempts = this->current_.attempts;
     uint32_t since_sent = now_ms - this->sent_at_;
     done.response_ms = since_sent >= this->first_copy_ms_ ? since_sent - this->first_copy_ms_ : 0;
-    if (!parse_reply(payload, size, &done.reply)) {
+    if (parsed == nullptr) {
       // Right opcode, wrong length. Leave the request waiting; the timeout retries it.
       this->unexpected_++;
       return false;
     }
+    done.reply = *parsed;
     done.outcome = done.reply.kind == ReplyKind::NAK ? Outcome::NAK : Outcome::REPLY;
+    this->replies_++;
     this->busy_ = false;
     this->consecutive_failures_ = 0;
     // Do not start the next request while our duplicate copy may still be on the wire.

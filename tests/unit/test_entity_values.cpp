@@ -27,9 +27,9 @@ struct Shown {
   Identity identity;
   LinkStatus link;
   bool identity_changed{false};
-  bool link_changed{false};
+  LinkChanges link_changes{};
 
-  Readout view() const { return Readout{state, identity, link, identity_changed, link_changed}; }
+  Readout view() const { return Readout{state, identity, link, identity_changed, link_changes}; }
 };
 
 static TextContext yaml_text() {
@@ -210,7 +210,12 @@ TEST_CASE("link and identity entities follow their own change flags") {
   REQUIRE(number_value(bind(EntityKind::LINK_ERRORS), shown.view(), &number));
   CHECK(number == 2);
   CHECK_FALSE(kind_changed(bind(EntityKind::CONNECTED), shown.view()));
-  shown.link_changed = true;
+  // A new response time republishes only the response time, not the unchanged error count.
+  shown.link_changes.response = true;
+  CHECK(kind_changed(bind(EntityKind::RESPONSE_TIME), shown.view()));
+  CHECK_FALSE(kind_changed(bind(EntityKind::LINK_ERRORS), shown.view()));
+  CHECK_FALSE(kind_changed(bind(EntityKind::CONNECTED), shown.view()));
+  shown.link_changes.connected = true;
   CHECK(kind_changed(bind(EntityKind::CONNECTED), shown.view()));
   CHECK_FALSE(kind_changed(bind(EntityKind::MODEL), shown.view()));
 

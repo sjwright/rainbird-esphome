@@ -100,14 +100,23 @@ void note_binding(const Model &model, const EntityBinding &binding, SessionConfi
 
 Readout readout(const Session &session) {
   return Readout{session.state(), session.identity(), session.link(), session.identity_changed(),
-                 session.link_changed()};
+                 session.link_changes()};
 }
 
 bool kind_changed(const EntityBinding &binding, const Readout &readout) {
   const KindInfo &info = kind_info(binding.kind);
   switch (info.source) {
     case Source::LINK:
-      return readout.link_changed;
+      switch (binding.kind) {
+        case EntityKind::CONNECTED:
+          return readout.link_changes.connected;
+        case EntityKind::RESPONSE_TIME:
+          return readout.link_changes.response;
+        case EntityKind::LINK_ERRORS:
+          return readout.link_changes.errors;
+        default:
+          return false;
+      }
     case Source::IDENTITY:
       return readout.identity_changed;
     case Source::STATE:

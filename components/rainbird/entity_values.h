@@ -56,7 +56,7 @@ struct Readout {
   const Identity &identity;
   const LinkStatus &link;
   bool identity_changed{false};
-  bool link_changed{false};
+  LinkChanges link_changes{};
 };
 
 Readout readout(const Session &session);

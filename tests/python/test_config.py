@@ -526,3 +526,28 @@ datetime:
     assert "mode: SLIDER" in block("Delay between zones")
     assert "entity_category: diagnostic" in block("Refresh from controller")
     assert "entity_category: config" in block("Controller clock")
+
+
+def test_refresh_interval_has_a_floor(tmp_path: Path):
+    _expect_fail(
+        tmp_path, "refresh_interval", rainbird_extra="  schedule:\n    refresh_interval: 10s\n"
+    )
+
+
+def test_full_example_validates(tmp_path: Path):
+    # examples/full.yaml pulls the component and the actions package from GitHub. Point both at
+    # this checkout, so the example is checked against the code it ships with.
+    text = (REPO / "examples/full.yaml").read_text()
+    remote_package = "github://sjwright/rainbird-esphome/packages/ha-actions.yaml@main"
+    remote_source = "- source: github://sjwright/rainbird-esphome@main"
+    assert remote_package in text and remote_source in text
+    text = text.replace(remote_package, f"!include {REPO / 'packages/ha-actions.yaml'}")
+    text = text.replace(remote_source, f"- source: {{type: local, path: {COMPONENTS}}}")
+    text = text.replace("    refresh: 1d\n", "")
+    (tmp_path / "full.yaml").write_text(text)
+    (tmp_path / "secrets.yaml").write_text(
+        'api_encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="\n'
+        "ota_password: example\nwifi_ssid: example\nwifi_password: example-password\n"
+    )
+    result = _run(tmp_path / "full.yaml", tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -6,6 +6,7 @@ from rainbird.entity_kinds import KINDS, KindId, Scope, platform_keys, resolve_k
 COMPONENT = Path(__file__).resolve().parents[2] / "components" / "rainbird"
 HEADER = COMPONENT / "entity_kind.h"
 TABLE = COMPONENT / "entity_values.cpp"
+MODEL = COMPONENT / "model_esp_tm2.cpp"
 
 
 def test_cpp_enum_matches_kind_ids():
@@ -46,3 +47,15 @@ def test_running_means_zone_or_program_by_selector():
     assert resolve_kind("binary_sensor", "running", zone=False, program=False) is None
     watering = resolve_kind("binary_sensor", "watering", zone=False, program=False)
     assert watering is not None and watering.scope is Scope.CONTROLLER
+
+
+def test_number_limits_match_the_model():
+    # The session refuses a command outside the model's ranges; the entity offers the same range.
+    text = MODEL.read_text()
+    consts = {name: int(value) for name, value in re.findall(r"constexpr \w+ (\w+) = (\d+);", text)}
+    limits = {kind.kind_id: kind.limits for kind in KINDS}
+    seasonal = limits[KindId.SEASONAL_ADJUST]
+    assert (seasonal[0], seasonal[1]) == (consts["SEASONAL_MIN_PERCENT"], consts["SEASONAL_MAX_PERCENT"])
+    assert limits[KindId.RAIN_DELAY][1] == consts["RAIN_DELAY_MAX_DAYS"]
+    assert limits[KindId.RUN_DURATION][1] == consts["RUN_MAX_MINUTES"]
+    assert limits[KindId.TEST_DURATION][1] == consts["RUN_MAX_MINUTES"]

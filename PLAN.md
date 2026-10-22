@@ -485,7 +485,7 @@ api:
 | `valve_switch_mode` | `start` / `queue` | `start` | Whether turning a zone switch on sends `39` or `4B`. Also changes what "off" does (6.5). |
 | `time_id` | ID of `time` | – | Needed by `clock_sync` and by the `schedule_changed` sensor |
 | `clock_sync.max_drift` | time | `30s` | Sync when the controller drifts further than this, at least 5 s. Checked on every clock reading, from boot on; a UTC-offset change moves local time an hour, so it shows as drift. Needs `time_id`. |
-| `schedule.refresh_interval` | time | `1h` | Full re-read of the schedule pages that configured entities use. The `4A 01` timestamp triggers re-reads in between. |
+| `schedule.refresh_interval` | time | `1h` | Full re-read of the schedule pages that configured entities use, at least 1 min. The `4A 01` timestamp triggers re-reads in between, except for the change our own write makes. |
 | `schedule.allow_writes` | bool | `false` | Lets schedule entities write `21 …` pages |
 | `experimental` | bool | `false` | Allows `49`, `3A`, `42` and `rainbird.send_raw` |
 | `zone_defaults`, `zones` | see 4.2 | all 12 zones | `zones: []` creates none |
@@ -1109,6 +1109,11 @@ across bursts.
    in code.
 4. Read the schedule pages that configured entities use.
 5. Clock check and sync if needed. Then the normal poll cycle starts.
+
+On reaching running, the log shows the model and firmware, what each `04`
+probe answered, and the schedule pages read. Every 10 minutes it shows the
+link counters: replies, duplicate replies (SPEC question 5), unexpected
+frames and timeouts.
 
 Zones that the `03` mask reports as missing get a warning when the link
 reaches running, and commands for them are refused. ESPHome has no

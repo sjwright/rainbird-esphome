@@ -784,3 +784,98 @@ TEST_CASE("a clock set is queued whole or not at all") {
   clock.day = 30;
   CHECK(session.control(clock, now) == ControlResult::REFUSED_RANGE);
 }
+
+TEST_CASE("replies change only the link values they change") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  session.clear_changed();
+  FakeController fake = FakeController::upgraded_tm2();
+  session.poll(live.now);
+  run_session(session, fake, live.now, 5000);
+  // Every request was answered: no new error to publish, and the link was already up.
+  CHECK_FALSE(session.link_changes().errors);
+  CHECK_FALSE(session.link_changes().connected);
+  CHECK(session.link().replies > 0);
+}
+
+TEST_CASE("our own schedule write does not set off a full schedule re-read") {
+  SessionConfig config = config_with({Field::FREQUENCY});
+  config.allow_writes = true;
+  config.pages.add(0x10);
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM, now) == ControlResult::QUEUED);
+  Transmission tx = next_after_gap(session, &now);
+  now += tx.first_copy_ms + 30;
+  auto page = from_hex("A0 00 10 6A 06 01 00 64 01");
+  session.on_frame(page.data(), page.size(), now);
+  // The write, then the confirming read, which now returns the written page.
+  FakeController fake = FakeController::upgraded_tm2();
+  fake.replies["21 00 10 6A 06 01 00 64 00"] = "01 21";
+  fake.replies["20 00 10"] = "A0 00 10 6A 06 01 00 64 00";
+  now = run_session(session, fake, now, 5000);
+  REQUIRE_FALSE(take_event_of(session, SessionEventKind::EDIT_FAILED));
+
+  // The write moved the timestamp. That change is ours, so the page is not read again for it.
+  fake.replies["4A 01"] = "CA 01 2B 48 40 00";
+  fake.requests.clear();
+  for (int i = 0; i < 5; i++) {
+    session.poll(now);
+    now = run_session(session, fake, now, 3000);
+  }
+  CHECK(seen(fake, "4A 01"));
+  CHECK_FALSE(seen(fake, "20 00 10"));
+
+  // A later change is someone else's, at the panel or another master: read it.
+  fake.replies["4A 01"] = "CA 01 2B 48 50 00";
+  fake.requests.clear();
+  for (int i = 0; i < 5; i++) {
+    session.poll(now);
+    now = run_session(session, fake, now, 3000);
+  }
+  CHECK(seen(fake, "20 00 10"));
+}
+
+TEST_CASE("before the probes finish, a command that needs one is not ready, not unsupported") {
+  EspTm2Model model;
+  Session session(model, config_with({Field::ZONES_RUNNING}));
+  FakeController fake = FakeController::upgraded_tm2();
+  session.start(0);
+  Transmission tx;
+  REQUIRE(session.next_transmission(0, &tx));  // 02
+  auto identified = from_hex("82 00 0A 09 0C");
+  session.on_frame(identified.data(), identified.size(), 60);
+  REQUIRE(session.stage() == SessionStage::PROBE);
+  Control queue;
+  queue.op = ControlOp::QUEUE_ZONE;
+  queue.zone = 1;
+  queue.value = 5;
+  CHECK(session.control(queue, 60) == ControlResult::REFUSED_NOT_READY);
+}
+
+TEST_CASE("seasonal adjust takes the TM2's 5 to 200 percent") {
+  Running live(config_with({Field::SEASONAL_ADJUST}));
+  Control seasonal;
+  seasonal.op = ControlOp::SET_SEASONAL;
+  seasonal.program = 0;
+  seasonal.value = 4;
+  CHECK(live.session.control(seasonal, live.now) == ControlResult::REFUSED_RANGE);
+  seasonal.value = 201;
+  CHECK(live.session.control(seasonal, live.now) == ControlResult::REFUSED_RANGE);
+  seasonal.value = 5;
+  CHECK(live.session.control(seasonal, live.now) == ControlResult::QUEUED);
+}
+
+TEST_CASE("anything_changed says when publishing has work to do") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  session.clear_changed();
+  CHECK_FALSE(session.anything_changed());
+  FakeController fake = FakeController::upgraded_tm2();
+  session.poll(live.now);
+  run_session(session, fake, live.now, 5000);
+  CHECK(session.anything_changed());
+  session.clear_changed();
+  CHECK_FALSE(session.anything_changed());
+}

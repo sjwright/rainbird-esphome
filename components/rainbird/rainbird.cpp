@@ -17,6 +17,7 @@
 #include "sip_commands.h"
 
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 
 namespace esphome::rainbird {
@@ -28,6 +29,9 @@ namespace {
 constexpr uint32_t COUNTDOWN_INTERVAL_ID = 1;
 constexpr uint32_t SILENCE_INTERVAL_ID = 2;
 constexpr uint32_t SILENCE_CHECK_MS = 5000;
+constexpr uint32_t STATS_INTERVAL_ID = 3;
+// Link counters in the log. Often enough to read during a soak, rarely enough to stay quiet.
+constexpr uint32_t STATS_LOG_MS = 10 * 60 * 1000;
 // A clock set the controller did not take is tried again after this long, not on every reading.
 constexpr uint32_t CLOCK_SYNC_RETRY_MS = 60000;
 // 39, 4B and 3A take whole minutes in one byte.
@@ -148,6 +152,9 @@ void RainbirdComponent::setup() {
   this->session_ = std::make_unique<Session>(this->model_, config);
   this->session_->start(millis());
   this->release_receiver_pads_();
+  if (!this->listen_only_) {
+    this->set_interval(STATS_INTERVAL_ID, STATS_LOG_MS, [this]() { this->log_link_stats_(); });
+  }
   if (this->listen_only_) {
     // With `update_interval: never`, update() never runs, so silence has its own timer.
     this->set_interval(SILENCE_INTERVAL_ID, SILENCE_CHECK_MS, [this]() {
@@ -289,6 +296,21 @@ void RainbirdComponent::log_controller_() {
   if (!this->session_->writes_permitted()) {
     ESP_LOGW(TAG, "Model id is not one %s accepts; commands stay off. See accept_model_ids.", this->model_name_);
   }
+  // The 04 answers decide the poll plan and which commands are offered (PLAN 6.3).
+  const Capabilities &caps = this->session_->capabilities();
+  ESP_LOGI(TAG, "Controller supports: 4C %s, 4A %s, 42 %s, 4B %s, 3D %s, 49 %s, 3A %s%s", YESNO(caps.combined),
+           YESNO(caps.event_timestamp), YESNO(caps.advance), YESNO(caps.queue_run), YESNO(caps.station_error),
+           YESNO(caps.controller_state), YESNO(caps.test_stations),
+           this->session_->capabilities_assumed() ? " (04 refused: assumed until a NAK says otherwise)" : "");
+  // "00 10 60 80" fits the most a TM2 reads: 14 pages.
+  char pages[3 * 16 + 1] = "";
+  size_t used = 0;
+  for (uint16_t page = 0; page <= 0xFF && used + 3 < sizeof(pages); page++) {
+    if (this->session_->pages().has(static_cast<uint8_t>(page)))
+      used += std::snprintf(pages + used, sizeof(pages) - used, "%s%02X", used == 0 ? "" : " ",
+                            static_cast<unsigned>(page));
+  }
+  ESP_LOGI(TAG, "Schedule pages read: %s", used == 0 ? "none" : pages);
   // 03 00 at startup says which zones the controller has.
   for (const RainbirdZone *zone : this->zones_) {
     bool available = true;
@@ -297,6 +319,14 @@ void RainbirdComponent::log_controller_() {
                this->zone_name_(zone->get_zone()).c_str());
     }
   }
+}
+
+void RainbirdComponent::log_link_stats_() {
+  // Duplicates answer SPEC question 5: does the controller answer both copies of a 2-byte request?
+  const LinkStatus &link = this->session_->link();
+  ESP_LOGI(TAG, "Link since boot: %u replies, %u duplicate replies, %u unexpected, %u timeouts",
+           static_cast<unsigned>(link.replies), static_cast<unsigned>(link.duplicates),
+           static_cast<unsigned>(link.unexpected), static_cast<unsigned>(link.errors));
 }
 
 void RainbirdComponent::transmit_(const Transmission &tx) {
@@ -657,6 +687,9 @@ bool RainbirdComponent::local_timestamp_(uint32_t seconds_since_2000, std::strin
 }
 
 void RainbirdComponent::publish_changed_() {
+  // Most passes follow a frame or a loop with nothing new; skip walking every entity then.
+  if (!this->session_->anything_changed())
+    return;
   const Readout shown = readout(*this->session_);
 #ifdef USE_SWITCH
   for (auto *entity : this->switches_) {

@@ -8,7 +8,15 @@ namespace {
 
 constexpr uint16_t MODEL_IDS[] = {0x0005, 0x000A, 0x010A, 0x0014, 0x0015};
 constexpr const char *FREQUENCY_NAMES[] = {"Custom days", "Cyclic", "Odd days", "Even days"};
-constexpr ModelLimits LIMITS{"ESP-TM2", STATE_ZONES, STATE_PROGRAMS, STATE_STARTS};
+// Value ranges from the ESP-TM2 manual. tests/python/test_entity_kinds.py checks the
+// YAML side's number limits against these, so keep one constant per line in this shape.
+constexpr uint16_t SEASONAL_MIN_PERCENT = 5;  // "from 5% up to 200%"
+constexpr uint16_t SEASONAL_MAX_PERCENT = 200;
+constexpr uint16_t RAIN_DELAY_MAX_DAYS = 14;  // "Suspend watering for up to 14 days"
+constexpr uint8_t RUN_MAX_MINUTES = 255;
+constexpr ModelLimits LIMITS{"ESP-TM2",           STATE_ZONES,          STATE_PROGRAMS,
+                             STATE_STARTS,        SEASONAL_MIN_PERCENT, SEASONAL_MAX_PERCENT,
+                             RAIN_DELAY_MAX_DAYS, RUN_MAX_MINUTES};
 
 // Entity day index is Monday=0 … Sunday=6. The wire mask's bit 0 is Sunday.
 constexpr uint8_t DAY_MASKS[] = {DAY_MONDAY, DAY_TUESDAY,  DAY_WEDNESDAY, DAY_THURSDAY,

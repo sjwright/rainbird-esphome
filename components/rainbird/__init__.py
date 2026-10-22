@@ -187,9 +187,15 @@ CLOCK_SCHEMA = cv.Schema(
         ),
     }
 )
+# Each refresh reads every schedule page in use, up to 14, ahead of status polls.
+# More often than this would crowd the status polls out.
+MIN_REFRESH_INTERVAL = cv.TimePeriod(minutes=1)
+
 SCHEDULE_SCHEMA = cv.Schema(
     {
-        cv.Optional(CONF_REFRESH_INTERVAL, default="1h"): cv.positive_time_period_milliseconds,
+        cv.Optional(CONF_REFRESH_INTERVAL, default="1h"): cv.All(
+            cv.positive_time_period_milliseconds, cv.Range(min=MIN_REFRESH_INTERVAL)
+        ),
         cv.Optional(CONF_ALLOW_WRITES, default=False): cv.boolean,
     }
 )

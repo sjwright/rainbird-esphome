@@ -70,6 +70,8 @@ class LinkCore {
   bool next_transmission(uint32_t now_ms, Transmission *out);
   // Every valid frame from the controller's receiver. True if it answered the request in flight.
   bool on_frame(const uint8_t *payload, size_t size, uint32_t now_ms);
+  // The same, with the reply already parsed, so it is parsed once. Null: it did not parse.
+  bool on_frame(const uint8_t *payload, size_t size, const Reply *parsed, uint32_t now_ms);
   bool pop_completion(Completion *out);
 
   bool in_flight() const { return this->busy_; }
@@ -83,8 +85,9 @@ class LinkCore {
   bool idle() const { return !this->busy_ && this->count_ == 0 && this->done_count_ == 0; }
 
   uint32_t link_errors() const { return this->link_errors_; }
-  uint32_t duplicates() const { return this->duplicates_; }
-  uint32_t unexpected() const { return this->unexpected_; }
+  uint32_t replies() const { return this->replies_; }        // answers matched to a request
+  uint32_t duplicates() const { return this->duplicates_; }  // a second answer to the same request
+  uint32_t unexpected() const { return this->unexpected_; }  // answers to nothing in flight
   uint8_t consecutive_failures() const { return this->consecutive_failures_; }
 
  private:
@@ -122,6 +125,7 @@ class LinkCore {
   uint32_t last_reply_at_{0};
 
   uint32_t link_errors_{0};
+  uint32_t replies_{0};
   uint32_t duplicates_{0};
   uint32_t unexpected_{0};
   uint8_t consecutive_failures_{0};

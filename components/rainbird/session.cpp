@@ -1,7 +1,6 @@
 #include "session.h"
 
 #include <algorithm>
-#include <cstring>
 
 #include "elapsed.h"
 
@@ -55,12 +54,18 @@ const char *control_result_text(ControlResult result) {
 }
 
 Session::Session(const Model &model, const SessionConfig &config)
-    : model_(model), config_(config), link_(config.timing) {}
+    : model_(model), config_(config), link_(config.timing), editor_(model) {}
+
+bool Session::anything_changed() const {
+  const LinkChanges &link = this->link_changes_;
+  return this->state_touched_ || this->identity_changed_ || link.connected || link.response || link.errors;
+}
 
 void Session::clear_changed() {
+  this->state_touched_ = false;
   this->state_.clear_changed();
   this->identity_changed_ = false;
-  this->link_changed_ = false;
+  this->link_changes_ = LinkChanges{};
 }
 
 bool Session::take_event(SessionEvent *out) {
@@ -131,14 +136,16 @@ void Session::restart_() {
   // What was learned at startup belongs to the controller that answered then, and so does
   // its state: a command after this is decided on what the new controller reports. Entities
   // keep showing the old values until new ones arrive, because nothing can be unpublished.
-  if (this->edit_.active) {
+  if (this->editor_.active()) {
     this->fail_edit_("the controller stopped answering");
   }
   this->state_ = ControllerState{};
   this->identity_ = Identity{};
   this->time_pending_ = false;
   this->link_.drop_queued(Priority::POLL);
+  this->link_.drop_queued(Priority::FOLLOW_UP);
   this->caps_ = Capabilities{};
+  this->probes_done_ = false;
   this->writes_permitted_ = false;
   this->schedule_read_once_ = false;
   this->schedule_stale_ = false;
@@ -240,8 +247,11 @@ void Session::tick(uint32_t now_ms) {
   }
   if (this->link_.link_errors() != this->link_status_.errors) {
     this->link_status_.errors = this->link_.link_errors();
-    this->link_changed_ = true;
+    this->link_changes_.errors = true;
   }
+  this->link_status_.replies = this->link_.replies();
+  this->link_status_.duplicates = this->link_.duplicates();
+  this->link_status_.unexpected = this->link_.unexpected();
 }
 
 bool Session::next_transmission(uint32_t now_ms, Transmission *out) {
@@ -265,10 +275,12 @@ void Session::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
   // Active, only the answer to the request in flight is: a late or duplicate reply is older
   // than what that request brings, and must not replace it.
   bool passive = this->stage_ == SessionStage::PASSIVE;
-  bool answer = passive || this->link_.on_frame(payload, size, now_ms);
   Reply reply;
-  if (answer && parse_reply(payload, size, &reply)) {
+  bool parsed = parse_reply(payload, size, &reply);
+  bool answer = passive || this->link_.on_frame(payload, size, parsed ? &reply : nullptr, now_ms);
+  if (answer && parsed) {
     this->model_.apply_reply(reply, &this->state_);
+    this->state_touched_ = true;
     switch (reply.kind) {
       case ReplyKind::MODEL:
         this->identity_.model = reply.model;
@@ -350,13 +362,13 @@ void Session::note_unsupported_(uint8_t opcode) {
 
 void Session::set_connected_(bool connected, uint32_t now_ms) {
   if (!this->link_status_.connected_known || this->link_status_.connected != connected) {
-    this->link_changed_ = true;
+    this->link_changes_.connected = true;
     if (!connected) {
       this->down_since_ = now_ms;
       // Commands do not outlive a disconnect: one queued now could run minutes later, or on
       // a different controller. The edit loses its next step with them.
       this->link_.drop_queued(Priority::USER);
-      if (this->edit_.active) {
+      if (this->editor_.active()) {
         this->fail_edit_("the controller stopped answering");
       }
     }
@@ -375,9 +387,11 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
     }
   } else {
     this->set_connected_(true, now_ms);
+    if (!this->link_status_.response_known || this->link_status_.response_ms != done.response_ms) {
+      this->link_changes_.response = true;
+    }
     this->link_status_.response_known = true;
     this->link_status_.response_ms = done.response_ms;
-    this->link_changed_ = true;
   }
   if (done.outcome == Outcome::NAK) {
     SessionEvent event;
@@ -457,7 +471,9 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
 }
 
 void Session::finish_probes_(uint32_t now_ms) {
-  if (!this->probe_answered_ && this->probe_refused_) {
+  this->probes_done_ = true;
+  this->caps_assumed_ = !this->probe_answered_ && this->probe_refused_;
+  if (this->caps_assumed_) {
     // 04 itself is refused: a controller without it. Try every optional command, and a NAK
     // clears the ones that fail. Probes that only timed out say nothing, so nothing is assumed:
     // the fallback polls (10, 12, 36, 3E, 48) work on every model.
@@ -496,6 +512,11 @@ bool Session::watering_() const {
   }
   uint16_t remaining = 0;
   return this->state_.remaining_seconds(&remaining) && remaining != 0;
+}
+
+ControlResult Session::unsupported_() const {
+  // Before the probes finish, "not supported" would be a guess.
+  return this->probes_done_ ? ControlResult::REFUSED_UNSUPPORTED : ControlResult::REFUSED_NOT_READY;
 }
 
 bool Session::link_down_() const { return this->link_status_.connected_known && !this->link_status_.connected; }
@@ -567,8 +588,9 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
   if (!this->ready_for_command_()) {
     return ControlResult::REFUSED_NOT_READY;
   }
-  const uint8_t zones = this->model_.limits().zones;
-  const uint8_t programs = this->model_.limits().programs;
+  const ModelLimits &limits = this->model_.limits();
+  const uint8_t zones = limits.zones;
+  const uint8_t programs = limits.programs;
   ByteBuf request;
   switch (command.op) {
     case ControlOp::RUN_ZONE:
@@ -576,14 +598,14 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
     case ControlOp::VALVE_ON: {
       bool queue =
           command.op == ControlOp::QUEUE_ZONE || (command.op == ControlOp::VALVE_ON && this->config_.valve_queue);
-      if (command.zone < 1 || command.zone > zones || command.value < 1 || command.value > 255) {
+      if (command.zone < 1 || command.zone > zones || command.value < 1 || command.value > limits.run_max_minutes) {
         return ControlResult::REFUSED_RANGE;
       }
       if (this->zone_missing_(command.zone)) {
         return ControlResult::REFUSED_NO_ZONE;
       }
       if (queue && !this->caps_.queue_run) {
-        return ControlResult::REFUSED_UNSUPPORTED;
+        return this->unsupported_();
       }
       uint8_t minutes = static_cast<uint8_t>(command.value);
       request = queue ? request_queue_station(0, command.zone, minutes) : request_run_station(command.zone, minutes);
@@ -623,7 +645,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
       if (!this->caps_.advance) {
-        return ControlResult::REFUSED_UNSUPPORTED;
+        return this->unsupported_();
       }
       uint8_t next = 0;
       if (!this->next_queued_zone_(0, &next)) {
@@ -633,13 +655,14 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       break;
     }
     case ControlOp::SET_SEASONAL:
-      if (command.program >= programs || command.value > 200) {
+      if (command.program >= programs || command.value < limits.seasonal_min_percent ||
+          command.value > limits.seasonal_max_percent) {
         return ControlResult::REFUSED_RANGE;
       }
       request = request_set_water_budget(command.program, command.value);
       break;
     case ControlOp::SET_RAIN_DELAY:
-      if (command.value > 14) {
+      if (command.value > limits.rain_delay_max_days) {
         return ControlResult::REFUSED_RANGE;
       }
       request = request_set_rain_delay(command.value);
@@ -649,7 +672,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
       if (!this->caps_.controller_state) {
-        return ControlResult::REFUSED_UNSUPPORTED;
+        return this->unsupported_();
       }
       request = request_set_controller_state(command.value == 0 ? 0 : 1);
       break;
@@ -658,9 +681,9 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
       if (!this->caps_.test_stations) {
-        return ControlResult::REFUSED_UNSUPPORTED;
+        return this->unsupported_();
       }
-      if (command.value < 1 || command.value > 255) {
+      if (command.value < 1 || command.value > limits.run_max_minutes) {
         return ControlResult::REFUSED_RANGE;
       }
       request = request_test_stations(static_cast<uint8_t>(command.value));
@@ -689,7 +712,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
 }
 
 void Session::fail_edit_(const char *reason) {
-  this->edit_.active = false;
+  this->editor_.cancel();
   SessionEvent event;
   event.kind = SessionEventKind::EDIT_FAILED;
   event.reason = reason;
@@ -710,90 +733,51 @@ ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program,
   if (this->link_down_()) {
     return ControlResult::REFUSED_LINK_DOWN;
   }
-  if (this->edit_.active) {
+  if (this->editor_.active()) {
     return ControlResult::REFUSED_BUSY;
   }
-  std::optional<PageField> located = this->model_.locate(field, zone, program, index);
-  if (!located.has_value()) {
+  ByteBuf read;
+  if (!this->editor_.start(field, zone, program, index, value, &read)) {
     return ControlResult::REFUSED_RANGE;
   }
-  this->edit_ = ScheduleEdit{};
-  this->edit_.active = true;
-  this->edit_.step = EditStep::READING;
-  this->edit_.field = field;
-  this->edit_.zone = zone;
-  this->edit_.program = program;
-  this->edit_.index = index;
-  this->edit_.value = value;
-  this->edit_.page = located->page;
-  if (!this->enqueue_(request_read_page(located->page), Priority::USER, TagKind::PAGE, located->page)) {
-    this->edit_.active = false;
+  if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
+    this->editor_.cancel();
     return ControlResult::REFUSED_BUSY;
   }
   return ControlResult::QUEUED;
 }
 
 void Session::handle_page_(const Completion &done) {
-  if (!this->edit_.active) {
+  if (!this->editor_.active()) {
     return;
   }
-  if (done.outcome != Outcome::REPLY) {
-    this->fail_edit_("the page read or write was not acknowledged");
-    return;
-  }
-  if (this->edit_.step == EditStep::WRITING) {
-    // The link matched this reply to the write, so an ACK here echoes 21.
-    if (done.reply.kind != ReplyKind::ACK) {
-      this->fail_edit_("the page write was not acknowledged");
+  ByteBuf next;
+  switch (this->editor_.on_reply(done, &next)) {
+    case ScheduleEditor::Step::WRITE: {
+      if (!this->enqueue_(next, Priority::USER, TagKind::PAGE, this->editor_.page(), Delivery::ONCE)) {
+        this->fail_edit_("the page write could not be queued");
+        return;
+      }
+      // Logged before it goes: the hub drains events ahead of the next transmission.
+      SessionEvent event;
+      event.kind = SessionEventKind::PAGE_WRITE;
+      this->push_event_(event);
       return;
     }
-    // Read the page back before trusting it.
-    if (!this->enqueue_(request_read_page(this->edit_.page), Priority::USER, TagKind::PAGE, this->edit_.page)) {
-      this->fail_edit_("the page was written, but the confirming read could not be queued");
+    case ScheduleEditor::Step::CONFIRM:
+      // The write moves the schedule timestamp (4A 01). That change is ours, and the confirming
+      // read covers it, so the next timestamp is taken as it is rather than re-reading every page.
+      this->event_known_ = false;
+      if (!this->enqueue_(next, Priority::USER, TagKind::PAGE, this->editor_.page())) {
+        this->fail_edit_("the page was written, but the confirming read could not be queued");
+      }
       return;
-    }
-    this->edit_.step = EditStep::CONFIRMING;
-    return;
-  }
-  // Reading and confirming work from this reply's page, never a copy kept from an earlier read.
-  // Any other answer, an ACK for one, is not the page.
-  const SchedulePage &page = done.reply.schedule;
-  if (done.reply.kind != ReplyKind::SCHEDULE || page.page != this->edit_.page) {
-    this->fail_edit_("the page read did not return that page");
-    return;
-  }
-  const uint8_t *raw = page.data;
-  const uint8_t size = page.size;
-  if (this->edit_.step == EditStep::CONFIRMING) {
-    bool same = size == this->page_write_.size && std::memcmp(raw, this->page_write_.after, size) == 0;
-    if (!same) {
-      this->fail_edit_("the confirming read does not match the page that was written");
+    case ScheduleEditor::Step::DONE:
       return;
-    }
-    this->edit_.active = false;
-    return;
+    case ScheduleEditor::Step::FAILED:
+      this->fail_edit_(this->editor_.reason());
+      return;
   }
-  uint8_t patched[MAX_PAGE_BYTES];
-  size_t out_size = size;
-  if (!this->model_.patch(this->edit_.page, raw, size, this->edit_.field, this->edit_.zone, this->edit_.program,
-                          this->edit_.index, this->edit_.value, patched, &out_size)) {
-    this->fail_edit_("that field could not be changed on the page");
-    return;
-  }
-  ByteBuf write;
-  if (!request_write_page(this->edit_.page, patched, out_size, &write) ||
-      !this->enqueue_(write, Priority::USER, TagKind::PAGE, this->edit_.page, Delivery::ONCE)) {
-    this->fail_edit_("the page write could not be queued");
-    return;
-  }
-  this->page_write_.page = this->edit_.page;
-  this->page_write_.size = static_cast<uint8_t>(out_size);
-  std::memcpy(this->page_write_.before, raw, out_size);
-  std::memcpy(this->page_write_.after, patched, out_size);
-  SessionEvent event;
-  event.kind = SessionEventKind::PAGE_WRITE;
-  this->push_event_(event);
-  this->edit_.step = EditStep::WRITING;
 }
 
 uint32_t Session::desired_interval(uint32_t now_ms) const {
