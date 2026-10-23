@@ -16,12 +16,14 @@ from esphome.const import (
     CONF_ICON,
     CONF_INITIAL_VALUE,
     CONF_MODE,
+    CONF_RESTORE_MODE,
     CONF_RESTORE_VALUE,
     UNIT_MINUTE,
     UNIT_PERCENT,
     UNIT_SECOND,
 )
 
+from .classes import entity_class
 from .entity_kinds import EntityKind, KindId, Write
 
 _NUMBER_UNITS = {
@@ -37,15 +39,27 @@ def _opt(value):
     return cv.UNDEFINED if value is None else value
 
 
+def _no_restore_mode(config):
+    """These switches show the controller's state and never restore one, so restore_mode would do nothing."""
+    if isinstance(config, dict) and CONF_RESTORE_MODE in config:
+        raise cv.Invalid(
+            "restore_mode does nothing on a rainbird switch: it shows what the controller "
+            "reports, and nothing is set at boot. Remove restore_mode."
+        )
+    return config
+
+
 def build_entity_schema(kind: EntityKind, cls):
     if kind.domain == "switch":
         # A valve is not a GPIO output, so inverted would swap the command.
-        return switch.switch_schema(
+        schema = switch.switch_schema(
             cls,
             block_inverted=True,
             icon=_opt(kind.icon),
             entity_category=_opt(kind.entity_category),
         )
+        # Checked before the schema, which fills in a default restore_mode.
+        return cv.All(_no_restore_mode, schema)
     if kind.domain == "button":
         return button.button_schema(
             cls, icon=_opt(kind.icon), entity_category=_opt(kind.entity_category)
@@ -133,3 +147,7 @@ def build_entity_schema(kind: EntityKind, cls):
             )
         return schema.extend(defaults)
     raise ValueError(f"No schema for domain {kind.domain}")
+
+
+def entity_schema(kind: EntityKind):
+    return build_entity_schema(kind, entity_class(kind))

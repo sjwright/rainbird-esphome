@@ -88,7 +88,7 @@ enum class TagKind : uint8_t {
   SCHEDULE = 4,
   POLL = 5,
   RAW = 6,
-  CONTROL = 7,  // a command that may already have been acted on; sent once
+  CONTROL = 7,  // a command that may already have been acted on; sent once. The detail is its program.
   PAGE = 8,     // one schedule edit: read, write, read back
 };
 
@@ -235,7 +235,7 @@ class Session {
   bool ready_for_command_() const;
   bool link_down_() const;
   ControlResult unsupported_() const;
-  bool enqueue_command_(const ByteBuf &request, uint32_t now_ms);
+  bool enqueue_command_(const ByteBuf &request, uint32_t now_ms, uint8_t program = 0);
   void follow_up_(uint32_t now_ms);
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
   bool zone_missing_(uint8_t zone) const;

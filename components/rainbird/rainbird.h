@@ -59,6 +59,7 @@ class RainbirdProgram {
 class RainbirdComponent;
 class RainbirdSwitch;
 class RainbirdNumber;
+class RainbirdSetting;
 class RainbirdButton;
 class RainbirdSelect;
 class RainbirdTime;
@@ -129,7 +130,9 @@ class RainbirdComponent final : public PollingComponent {
   void add_switch(RainbirdSwitch *entity) { this->switches_.push_back(entity); }
 #endif
 #ifdef USE_NUMBER
-  void add_number(RainbirdNumber *entity);
+  void add_number(RainbirdNumber *entity) { this->numbers_.push_back(entity); }
+  // Indexed here, so a command never searches for its duration.
+  void add_setting(RainbirdSetting *setting);
 #endif
 #ifdef USE_BUTTON
   void add_button(RainbirdButton *entity) { this->buttons_.push_back(entity); }
@@ -211,9 +214,9 @@ class RainbirdComponent final : public PollingComponent {
 #endif
 #ifdef USE_NUMBER
   std::vector<RainbirdNumber *> numbers_{};
-  // Local settings that commands read, by zone. Indexed when they register, so a command never searches.
-  RainbirdNumber *run_durations_[STATE_ZONES]{};
-  RainbirdNumber *test_duration_{nullptr};
+  // Local settings that commands read, by zone.
+  RainbirdSetting *run_durations_[STATE_ZONES]{};
+  RainbirdSetting *test_duration_{nullptr};
 #endif
 #ifdef USE_BUTTON
   std::vector<RainbirdButton *> buttons_{};

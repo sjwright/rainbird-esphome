@@ -5,12 +5,6 @@
 #ifdef USE_SWITCH
 namespace esphome::rainbird {
 
-void RainbirdSwitch::setup() {
-  // Multiple inheritance can make HasLoopOverride true, which would call loop() every cycle.
-  this->disable_loop();
-  // No publish here. The state comes from the controller, and until it reports, it is unknown.
-}
-
 void RainbirdSwitch::write_state(bool state) {
   // Publish nothing here, accepted or refused. on_turn_on/on_turn_off run from published states,
   // so publishing the request and then taking it back would fire both. The controller's
@@ -24,13 +18,17 @@ void RainbirdSwitch::write_state(bool state) {
 #ifdef USE_NUMBER
 namespace esphome::rainbird {
 
-void RainbirdNumber::setup() {
-  this->disable_loop();
-  if (this->is_command()) {
-    // Controller-backed: unknown until the controller reports. Publishing the minimum
-    // here would show, for example, a 10% seasonal adjust nobody set.
-    return;
+void RainbirdNumber::control(float value) {
+  if (!this->get_parent()->submit(this->binding_, value) && !std::isnan(this->state)) {
+    // Number::publish_state does not drop repeats, so the previous value undoes the change.
+    // With no controller value yet there is nothing to restore, so the state stays unknown.
+    this->publish_state(this->state);
   }
+}
+
+void RainbirdSetting::setup() {
+  // Multiple inheritance can make HasLoopOverride true, which would call loop() every cycle.
+  this->disable_loop();
   float value = this->traits.get_min_value();
   if (this->restore_value_) {
     this->pref_ = this->make_entity_preference<float>();
@@ -46,26 +44,17 @@ void RainbirdNumber::setup() {
   this->publish_state(value);
 }
 
-void RainbirdNumber::set_initial_value(float initial_value) {
+void RainbirdSetting::set_initial_value(float initial_value) {
   this->initial_value_ = initial_value;
   this->has_initial_value_ = true;
 }
 
-void RainbirdNumber::set_restore_value(bool restore_value) { this->restore_value_ = restore_value; }
+void RainbirdSetting::set_restore_value(bool restore_value) { this->restore_value_ = restore_value; }
 
-void RainbirdNumber::control(float value) {
-  if (!this->is_command()) {
-    // The controller does not store run durations, so this stays off submit() (PLAN 5.1).
-    this->publish_state(value);
-    if (this->restore_value_) {
-      this->pref_.save(&value);
-    }
-    return;
-  }
-  if (!this->get_parent()->submit(this->binding_, value) && !std::isnan(this->state)) {
-    // Number::publish_state does not drop repeats, so the previous value undoes the change.
-    // With no controller value yet there is nothing to restore, so the state stays unknown.
-    this->publish_state(this->state);
+void RainbirdSetting::control(float value) {
+  this->publish_state(value);
+  if (this->restore_value_) {
+    this->pref_.save(&value);
   }
 }
 

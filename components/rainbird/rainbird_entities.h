@@ -42,29 +42,26 @@ class BoundEntity {
 };
 
 #ifdef USE_SWITCH
-class RainbirdSwitch final : public switch_::Switch,
-                             public Component,
-                             public Parented<RainbirdComponent>,
-                             public BoundEntity {
- public:
-  void setup() override;
-
+class RainbirdSwitch final : public switch_::Switch, public Parented<RainbirdComponent>, public BoundEntity {
  protected:
   void write_state(bool state) override;
 };
 #endif
 
 #ifdef USE_NUMBER
-class RainbirdNumber final : public number::Number,
-                             public Component,
-                             public Parented<RainbirdComponent>,
-                             public BoundEntity {
+// A number the controller holds. It shows what the controller reports and is unknown until then.
+class RainbirdNumber final : public number::Number, public Parented<RainbirdComponent>, public BoundEntity {
+ protected:
+  void control(float value) override;
+};
+
+// A setting kept on this device, which commands read: run and test durations. The controller
+// never holds these, so there is no parent and nothing to submit.
+class RainbirdSetting final : public number::Number, public Component, public BoundEntity {
  public:
   void setup() override;
   void set_initial_value(float initial_value);
   void set_restore_value(bool restore_value);
-  // False for local settings (run and test durations), which the controller never holds.
-  bool is_command() const { return kind_info(this->binding_.kind).write != WritePath::LOCAL; }
 
  protected:
   void control(float value) override;

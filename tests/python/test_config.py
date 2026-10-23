@@ -357,6 +357,20 @@ def test_controller_numbers_have_no_initial_or_restored_value(tmp_path: Path):
     _expect_fail(tmp_path, "restore_value", programs=programs)
 
 
+def test_switches_reject_restore_mode(tmp_path: Path):
+    zones = "    - zone: 1\n      name: Front\n      valve_switch:\n        restore_mode: ALWAYS_ON"
+    _expect_fail(tmp_path, "restore_mode does nothing", zones=zones)
+    extra = """
+switch:
+  - platform: rainbird
+    zone: 1
+    sensor_bypass:
+      name: Front bypass
+      restore_mode: RESTORE_DEFAULT_OFF
+"""
+    _expect_fail(tmp_path, "restore_mode does nothing", extra=extra)
+
+
 def test_accept_model_ids_are_16_bit(tmp_path: Path):
     _expect_fail(tmp_path, "accept_model_ids", rainbird_extra="  accept_model_ids: [0x10000]\n")
 

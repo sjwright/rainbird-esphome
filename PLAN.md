@@ -670,7 +670,11 @@ events that no entity represents.
 rainbird-esphome/
 ├── README.md, LICENSE, SPEC.md, PLAN.md, WIRE.md
 ├── components/rainbird/
-│   ├── __init__.py              # hub schema, zone/program expansion, codegen
+│   ├── __init__.py              # component metadata; wires the modules below together
+│   ├── classes.py               # the C++ classes codegen names, and each kind's class
+│   ├── hub_schema.py            # hub schema; validates the entities zones/programs generate
+│   ├── codegen.py               # hub and entity code generation
+│   ├── actions.py               # zone_start, zone_queue, send_raw
 │   ├── const.py                 # config keys shared by the Python modules
 │   ├── entity_kinds.py          # THE table of entity kinds (5.3), used by hub and platforms
 │   ├── expand.py                # zones/programs → entity declarations (no ESPHome import)
@@ -682,9 +686,10 @@ rainbird-esphome/
 │   ├── rainbird_entities.h/.cpp # one class per writeable domain (5.4)
 │   ├── entity_kind.h            # pure: the EntityKind ids, in step with entity_kinds.py
 │   ├── entity_values.h/.cpp     # pure: the C++ kind table, poll plan per binding, values to show
-│   ├── session.h/.cpp           # pure: startup, probes, polls, commands, schedule edits, events
+│   ├── session.h/.cpp           # pure: startup, probes, polls, commands, events
+│   ├── schedule_editor.h/.cpp   # pure: one schedule edit: read, patch, write, confirm
 │   ├── link_core.h/.cpp         # pure: transport queue, timeouts, retries, reply matching
-│   ├── controller_state.h/.cpp  # pure: field IDs, values, changed flags
+│   ├── controller_state.h/.cpp  # pure: field IDs, one cell per value, changed flags
 │   ├── clock_sync.h/.cpp        # pure: when the controller clock needs setting
 │   ├── countdown.h              # pure: the remaining-time countdown
 │   ├── elapsed.h                # pure: wrap-safe elapsed-time check
@@ -908,8 +913,10 @@ binding (`kind`, `zone`, `program`, `index`) and forwards writes to
 
 - `RainbirdSwitch`: valve, sensor bypass, watering day, start-time enabled,
   global rain-sensor bypass, irrigation enabled
-- `RainbirdNumber`: run duration (local), run time, seasonal adjust, cycle
-  days, days until next run, rain delay, station delay, test duration (local)
+- `RainbirdNumber`: run time, seasonal adjust, cycle days, days until next
+  run, rain delay, station delay
+- `RainbirdSetting`: run duration and test duration. These are local numbers the
+  controller never holds, so they have no parent and submit nothing.
 - `RainbirdButton`: queue, program start, stop, advance, test all zones, sync
   clock, refresh
 - `RainbirdSelect`: frequency
@@ -918,7 +925,7 @@ binding (`kind`, `zone`, `program`, `index`) and forwards writes to
 Read-only entities use the base classes directly: `sensor::Sensor`,
 `binary_sensor::BinarySensor`, `text_sensor::TextSensor`.
 
-Local settings (run duration, test duration) restore their value the same way
+Local settings (`RainbirdSetting`) restore their value the same way
 core's `template` number does with `restore_value`. When ESPHome replaces the
 preference-hash helpers (removal is scheduled for 2027.1.0), we follow
 whatever core `template` number moves to.

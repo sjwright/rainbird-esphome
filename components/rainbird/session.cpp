@@ -25,6 +25,11 @@ constexpr uint32_t tag(TagKind kind, uint8_t detail) { return (static_cast<uint3
 
 TagKind tag_kind(uint32_t value) { return static_cast<TagKind>((value >> 8) & 0xFF); }
 
+uint8_t tag_detail(uint32_t value) { return static_cast<uint8_t>(value & 0xFF); }
+
+// 31 sets a program's seasonal adjust. The short poll does not read it back (30 is in the slow group).
+constexpr uint8_t OPCODE_SET_WATER_BUDGET = 0x31;
+
 }  // namespace
 
 const char *control_result_text(ControlResult result) {
@@ -172,6 +177,10 @@ void Session::check_silence(uint32_t now_ms) {
 }
 
 void Session::poll(uint32_t now_ms) {
+  // Cleared once it runs out, so a hold from weeks ago cannot come back when millis() wraps.
+  if (this->hold_ && elapsed(now_ms, this->hold_from_, this->config_.fast_hold_ms)) {
+    this->hold_ = false;
+  }
   switch (this->stage_) {
     case SessionStage::PASSIVE:
     case SessionStage::MANUAL:
@@ -462,6 +471,10 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
       // The short poll runs only after an ack. A NAK is the answer; sending the command again is not.
       if (done.outcome == Outcome::REPLY) {
         this->follow_up_(now_ms);
+        // The new seasonal adjust would otherwise show only after the next slow poll. The tag holds the program.
+        if (done.opcode == OPCODE_SET_WATER_BUDGET) {
+          this->enqueue_(request_water_budget(tag_detail(done.tag)), Priority::FOLLOW_UP, TagKind::POLL);
+        }
       }
       return;
     case TagKind::PAGE:
@@ -499,6 +512,10 @@ void Session::begin_running_(uint32_t now_ms) {
   this->poll(now_ms);
 }
 
+// Whether to poll fast. Broader than the `watering` sensor (bool_value in entity_values.cpp):
+// time left also counts, so a reply that shows no zone running yet, while the
+// controller still counts down, keeps polling fast. A fast poll too many costs one
+// cycle; a slow one too early misses the next zone starting.
 bool Session::watering_() const {
   for (uint8_t zone = 1; zone <= STATE_ZONES; zone++) {
     bool on = false;
@@ -529,13 +546,13 @@ bool Session::ready_for_command_() const {
          this->stage_ == SessionStage::RUNNING;
 }
 
-bool Session::enqueue_command_(const ByteBuf &request, uint32_t now_ms) {
+bool Session::enqueue_command_(const ByteBuf &request, uint32_t now_ms, uint8_t program) {
   if (request.size == 0) {
     return false;
   }
   // One copy, never retried: the controller may act on every copy it hears, and a lost reply
   // does not mean it did nothing.
-  if (!this->enqueue_(request, Priority::USER, TagKind::CONTROL, request.data[0], Delivery::ONCE)) {
+  if (!this->enqueue_(request, Priority::USER, TagKind::CONTROL, program, Delivery::ONCE)) {
     return false;
   }
   this->hold_ = true;
@@ -592,6 +609,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
   const uint8_t zones = limits.zones;
   const uint8_t programs = limits.programs;
   ByteBuf request;
+  uint8_t program = 0;  // the program a command is for, kept in its tag
   switch (command.op) {
     case ControlOp::RUN_ZONE:
     case ControlOp::QUEUE_ZONE:
@@ -660,6 +678,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
         return ControlResult::REFUSED_RANGE;
       }
       request = request_set_water_budget(command.program, command.value);
+      program = command.program;
       break;
     case ControlOp::SET_RAIN_DELAY:
       if (command.value > limits.rain_delay_max_days) {
@@ -705,7 +724,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       break;
     }
   }
-  if (!this->enqueue_command_(request, now_ms)) {
+  if (!this->enqueue_command_(request, now_ms, program)) {
     return ControlResult::REFUSED_BUSY;
   }
   return ControlResult::QUEUED;

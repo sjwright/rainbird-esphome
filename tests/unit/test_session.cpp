@@ -867,6 +867,40 @@ TEST_CASE("seasonal adjust takes the TM2's 5 to 200 percent") {
   CHECK(live.session.control(seasonal, live.now) == ControlResult::QUEUED);
 }
 
+TEST_CASE("a seasonal adjust is read back after the ack, not a slow poll later") {
+  Running live(config_with({Field::SEASONAL_ADJUST}));
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  FakeController fake;
+  fake.replies["31 01 00 64"] = "01 31";
+  fake.replies["30 01"] = "B0 01 00 64";
+  Control seasonal;
+  seasonal.op = ControlOp::SET_SEASONAL;
+  seasonal.program = 1;
+  seasonal.value = 100;
+  REQUIRE(session.control(seasonal, now) == ControlResult::QUEUED);
+  now = run_session(session, fake, now, 5000);
+  REQUIRE(fake.requests.size() >= 2);
+  CHECK(fake.requests[0] == "31 01 00 64");
+  CHECK(seen(fake, "30 01"));
+  uint16_t percent = 0;
+  REQUIRE(session.state().seasonal(1, &percent));
+  CHECK(percent == 100);
+}
+
+TEST_CASE("a refused seasonal adjust is not read back") {
+  Running live(config_with({Field::SEASONAL_ADJUST}));
+  FakeController fake;
+  fake.replies["31 00 00 64"] = "00 31 02";
+  Control seasonal;
+  seasonal.op = ControlOp::SET_SEASONAL;
+  seasonal.program = 0;
+  seasonal.value = 100;
+  REQUIRE(live.session.control(seasonal, live.now) == ControlResult::QUEUED);
+  run_session(live.session, fake, live.now, 5000);
+  CHECK_FALSE(seen(fake, "30 00"));
+}
+
 TEST_CASE("anything_changed says when publishing has work to do") {
   Running live(config_with({Field::ZONES_RUNNING}));
   Session &session = live.session;

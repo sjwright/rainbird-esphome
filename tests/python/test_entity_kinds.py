@@ -55,7 +55,10 @@ def test_number_limits_match_the_model():
     consts = {name: int(value) for name, value in re.findall(r"constexpr \w+ (\w+) = (\d+);", text)}
     limits = {kind.kind_id: kind.limits for kind in KINDS}
     seasonal = limits[KindId.SEASONAL_ADJUST]
-    assert (seasonal[0], seasonal[1]) == (consts["SEASONAL_MIN_PERCENT"], consts["SEASONAL_MAX_PERCENT"])
+    assert (seasonal[0], seasonal[1]) == (
+        consts["SEASONAL_MIN_PERCENT"],
+        consts["SEASONAL_MAX_PERCENT"],
+    )
     assert limits[KindId.RAIN_DELAY][1] == consts["RAIN_DELAY_MAX_DAYS"]
     assert limits[KindId.RUN_DURATION][1] == consts["RUN_MAX_MINUTES"]
     assert limits[KindId.TEST_DURATION][1] == consts["RUN_MAX_MINUTES"]

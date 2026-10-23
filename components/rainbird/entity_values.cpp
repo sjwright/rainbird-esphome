@@ -138,6 +138,9 @@ bool bool_value(const EntityBinding &binding, const Readout &readout, bool *out)
     case EntityKind::ZONE_RUNNING:
       return state.zone_running(binding.zone, out);
     case EntityKind::WATERING: {
+      // What the controller says is running: a zone bit, or an active zone. Narrower than
+      // Session::watering_(), which also counts time left so fast polling never stops early;
+      // a sensor shows only what the controller reports as running.
       bool any_known = false;
       for (uint8_t z = 1; z <= STATE_ZONES; z++) {
         bool on = false;

@@ -166,13 +166,12 @@ void RainbirdComponent::setup() {
 }
 
 #ifdef USE_NUMBER
-void RainbirdComponent::add_number(RainbirdNumber *entity) {
-  this->numbers_.push_back(entity);
-  const EntityBinding &binding = entity->binding();
+void RainbirdComponent::add_setting(RainbirdSetting *setting) {
+  const EntityBinding &binding = setting->binding();
   if (binding.kind == EntityKind::RUN_DURATION && binding.zone >= 1 && binding.zone <= STATE_ZONES)
-    this->run_durations_[binding.zone - 1] = entity;
+    this->run_durations_[binding.zone - 1] = setting;
   if (binding.kind == EntityKind::TEST_DURATION)
-    this->test_duration_ = entity;
+    this->test_duration_ = setting;
 }
 #endif
 
@@ -377,12 +376,15 @@ void RainbirdComponent::deliver_frame_(const Frame &frame, const char *which, bo
     return;
   }
   ESP_LOGV(TAG, "%s %s", which, format_hex_pretty_to(pretty, frame.payload, frame.length));
-  std::vector<uint8_t> payload(frame.payload, frame.payload + frame.length);
-  for (FrameTrigger *trigger : this->frame_triggers_) {
-    trigger->trigger(payload);
+  // The triggers take a vector, so the copy is made only when an automation will use it.
+  if (!this->frame_triggers_.empty()) {
+    std::vector<uint8_t> payload(frame.payload, frame.payload + frame.length);
+    for (FrameTrigger *trigger : this->frame_triggers_) {
+      trigger->trigger(payload);
+    }
   }
   Nak nak;
-  if (parse_nak(frame.payload, frame.length, &nak)) {
+  if (!this->nak_triggers_.empty() && parse_nak(frame.payload, frame.length, &nak)) {
     for (NakTrigger *trigger : this->nak_triggers_) {
       trigger->trigger(nak.echo, nak.code);
     }
@@ -622,8 +624,12 @@ void RainbirdComponent::check_clock_() {
     return;
   this->clock_checked_serial_ = serial;
   uint32_t now = millis();
-  if (this->clock_set_queued_ && !elapsed(now, this->clock_set_at_, CLOCK_SYNC_RETRY_MS))
-    return;
+  if (this->clock_set_queued_) {
+    if (!elapsed(now, this->clock_set_at_, CLOCK_SYNC_RETRY_MS))
+      return;
+    // Cleared once it runs out, so a set from weeks ago cannot hold off a sync when millis() wraps.
+    this->clock_set_queued_ = false;
+  }
   ESPTime local = this->time_->now();
   if (!local.is_valid())
     return;
@@ -701,8 +707,7 @@ void RainbirdComponent::publish_changed_() {
 #ifdef USE_NUMBER
   for (auto *entity : this->numbers_) {
     float value = 0;
-    if (entity->is_command() && kind_changed(entity->binding(), shown) &&
-        number_value(entity->binding(), shown, &value))
+    if (kind_changed(entity->binding(), shown) && number_value(entity->binding(), shown, &value))
       entity->publish_state(value);
   }
 #endif

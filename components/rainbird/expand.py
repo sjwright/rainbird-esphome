@@ -10,7 +10,7 @@ hub. Hand-written ``platform: rainbird`` blocks are what ``packages``,
 ``!extend`` and ``!remove`` edit.
 """
 
-from collections.abc import Sequence
+from collections.abc import Sequence, Set
 from dataclasses import dataclass
 
 from .const import CONF_DISABLED, CONF_PROGRAM, CONF_ZONE
@@ -28,8 +28,8 @@ from .errors import ConfigError
 from .models import Model
 
 # ESPHome's own keys are plain strings here: this module has no ESPHome import.
-_ZONE_FIELDS = {CONF_ZONE, "id", "name", CONF_DISABLED, "device_id"}
-_PROGRAM_FIELDS = {CONF_PROGRAM, "id", "name"}
+_ZONE_FIELDS = frozenset({CONF_ZONE, "id", "name", CONF_DISABLED, "device_id"})
+_PROGRAM_FIELDS = frozenset({CONF_PROGRAM, "id", "name"})
 
 
 @dataclass(frozen=True)
@@ -181,7 +181,7 @@ def _zones(
     for raw in zones:
         if not isinstance(raw, dict):
             raise ConfigError("Each zone must be a mapping")
-        _reject_unknown(raw, Scope.ZONE, kinds, "zone")
+        _reject_unknown(raw, Scope.ZONE, kinds, "zone", _ZONE_FIELDS)
         number = raw.get(CONF_ZONE)
         if isinstance(number, bool) or not isinstance(number, int):
             raise ConfigError("zone must be an integer")
@@ -216,7 +216,7 @@ def _programs(
     for raw in programs:
         if not isinstance(raw, dict):
             raise ConfigError("Each program must be a mapping")
-        _reject_unknown(raw, Scope.PROGRAM, kinds, "program")
+        _reject_unknown(raw, Scope.PROGRAM, kinds, "program", _PROGRAM_FIELDS)
         letter = raw.get(CONF_PROGRAM)
         if not isinstance(letter, str):
             raise ConfigError("program must be a letter")
@@ -381,13 +381,15 @@ def _declare(
 
 
 def _reject_unknown(
-    raw: dict | None, scope: Scope, kinds: Sequence[EntityKind], label: str
+    raw: dict | None,
+    scope: Scope,
+    kinds: Sequence[EntityKind],
+    label: str,
+    fields: Set[str] = frozenset(),
 ) -> None:
+    """Every key in raw is an entity key for the scope, or one of fields."""
     if not raw:
         return
-    fields = _ZONE_FIELDS if scope is Scope.ZONE else _PROGRAM_FIELDS
-    if label in ("zone_defaults", "program_defaults"):
-        fields = set()
     known = {hub_key(kind) for kind in kinds if kind.scope is scope}
     unknown = sorted(set(raw) - fields - known)
     if unknown:
