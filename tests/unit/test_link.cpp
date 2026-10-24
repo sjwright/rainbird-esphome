@@ -165,30 +165,55 @@ TEST_CASE("a second identical reply is counted as a duplicate, not a new answer"
   CHECK(link.unexpected() == 0);
 }
 
-TEST_CASE("the next request waits for our own duplicate copy to finish") {
+TEST_CASE("after a request sent twice, the next waits for an answer to the second copy") {
   LinkCore link;
   link.enqueue(buf("3F 00"), Priority::POLL, 1);
   link.enqueue(buf("4C"), Priority::POLL, 2);
   Transmission tx;
   REQUIRE(link.next_transmission(0, &tx));
   REQUIRE(tx.total_ms == 54);
-  // An answer that lands while the second copy is still going out (at 37 of 54 ms).
-  reply(link, "BF 00 01 00 00 00", tx.first_copy_ms + 10);
+  // A 6-byte reply is a 13-byte frame, 44 ms on the wire. A second answer ends that long after
+  // the first, which is longer than one 27 ms copy.
+  reply(link, "BF 00 01 00 00 00", 101);
   Transmission next;
-  CHECK_FALSE(link.next_transmission(54 + 19, &next));
-  CHECK(link.next_transmission(54 + 20, &next));
+  CHECK_FALSE(link.next_transmission(101 + 44 + 19, &next));
+  CHECK(link.next_transmission(101 + 44 + 20, &next));
 }
 
-TEST_CASE("an answer after both copies only waits the gap") {
+TEST_CASE("after a request sent once, the next only waits the gap") {
   LinkCore link;
-  link.enqueue(buf("3F 00"), Priority::POLL, 1);
-  link.enqueue(buf("4C"), Priority::POLL, 2);
+  link.enqueue(buf("4C"), Priority::POLL, 1);
+  link.enqueue(buf("3F 00"), Priority::POLL, 2);
   Transmission tx;
   REQUIRE(link.next_transmission(0, &tx));
-  reply(link, "BF 00 01 00 00 00", 57);  // ~30 ms after the first copy, as captured
+  reply(link, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00", 100);
   Transmission next;
-  CHECK_FALSE(link.next_transmission(57 + 19, &next));
-  CHECK(link.next_transmission(57 + 20, &next));
+  CHECK_FALSE(link.next_transmission(100 + 19, &next));
+  CHECK(link.next_transmission(100 + 20, &next));
+}
+
+TEST_CASE("a late answer to the second copy does not answer the next identical request") {
+  LinkCore link;
+  link.enqueue(buf("3F 00"), Priority::POLL, 1);
+  link.enqueue(buf("3F 00"), Priority::POLL, 2);
+  Transmission tx;
+  REQUIRE(link.next_transmission(0, &tx));
+  reply(link, "BF 00 01 00 00 00", 101);  // A's answer to its first copy
+  Completion done;
+  REQUIRE(link.pop_completion(&done));
+  CHECK(done.tag == 1);
+  // A's answer to its second copy, straight after: B has not gone out, so it is a duplicate.
+  Transmission next;
+  CHECK_FALSE(link.next_transmission(101, &next));
+  reply(link, "BF 00 00 00 00 00", 145);
+  CHECK(link.duplicates() + link.unexpected() == 1);
+  CHECK_FALSE(link.pop_completion(&done));
+  // B goes out and is still waiting until its own answer arrives.
+  REQUIRE(link.next_transmission(165, &next));
+  CHECK(link.in_flight());
+  reply(link, "BF 00 00 00 00 00", 266);
+  REQUIRE(link.pop_completion(&done));
+  CHECK(done.tag == 2);
 }
 
 TEST_CASE("a reply with the right opcode and the wrong length leaves the request waiting") {

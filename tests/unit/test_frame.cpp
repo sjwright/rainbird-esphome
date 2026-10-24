@@ -9,19 +9,13 @@
 using namespace esphome::rainbird;
 
 static std::vector<Frame> frames_from_bytes(const uint8_t *data, size_t size) {
-  FrameParser parser;
+  std::vector<uint8_t> bits;
   for (size_t i = 0; i < size; i++) {
     for (int bit = 7; bit >= 0; bit--) {
-      parser.push_bit(((data[i] >> bit) & 0x01) != 0);
+      bits.push_back((data[i] >> bit) & 0x01);
     }
   }
-  parser.finish();
-  std::vector<Frame> frames;
-  Frame frame;
-  while (parser.pop(&frame)) {
-    frames.push_back(frame);
-  }
-  return frames;
+  return find_frames(bits);
 }
 
 static void check_payload(const Frame &frame, const std::vector<uint8_t> &payload) {
@@ -154,7 +148,6 @@ TEST_CASE("remote_receiver-shaped bursts still decode") {
       const char *which = polarity == Polarity::INVERTED ? "inverted" : "normal";
       INFO(which);
       auto burst = decode_burst(timings.data(), timings.size(), polarity, Phase::ALIGNED);
-      CHECK_FALSE(burst.ended_early);
       REQUIRE(burst.frames.size() == 1);
       check_payload(burst.frames[0], payload);
     }
@@ -163,7 +156,6 @@ TEST_CASE("remote_receiver-shaped bursts still decode") {
   auto reply = manchester_encode(frame, n, Polarity::INVERTED, Phase::EXTRA_HALF);
   auto timings = receiver_tail(reply, true);
   auto burst = decode_burst(timings.data(), timings.size(), Polarity::INVERTED, Phase::EXTRA_HALF);
-  CHECK_FALSE(burst.ended_early);
   REQUIRE(burst.frames.size() == 1);
   check_payload(burst.frames[0], payload);
 }
@@ -207,8 +199,7 @@ TEST_CASE("looped-back bytes decode and lock that receiver's polarity") {
   CHECK_FALSE(other.lock().locked());
 }
 
-TEST_CASE("a frame after thousands of junk bits still decodes, without rescanning them") {
-  // The parser keeps a scan position, so junk is skipped once and then trimmed.
+TEST_CASE("a frame after thousands of junk bits still decodes") {
   // Junk is alternating bits, which never contain F5 F5 1C.
   std::vector<uint8_t> stream(700, 0x55);
   auto payload = from_hex("40");

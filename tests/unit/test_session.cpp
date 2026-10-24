@@ -36,6 +36,16 @@ static bool take_event_of(Session &session, SessionEventKind kind, SessionEvent 
   return false;
 }
 
+// The next transmission, once the gap after whatever came before has passed.
+static Transmission next_after_gap(Session &session, uint32_t *now) {
+  Transmission tx;
+  for (int i = 0; i < 200 && !session.next_transmission(*now, &tx); i++) {
+    *now += 5;
+    session.tick(*now);
+  }
+  return tx;
+}
+
 TEST_CASE("startup identifies, probes, reads the schedule in use, then polls") {
   EspTm2Model model;
   SessionConfig config = config_with({Field::ZONES_RUNNING, Field::CLOCK, Field::RUN_TIME});
@@ -46,15 +56,14 @@ TEST_CASE("startup identifies, probes, reads the schedule in use, then polls") {
   session.start(0);
   run_session(session, fake, 0, 10000);
 
-  std::vector<std::string> expect = {"02",    "0B",    "05",    "03 00", "04 4C",    "04 4A", "04 42",
-                                     "04 4B", "04 3D", "04 49", "04 3A", "20 00 80", "3F 00", "4C"};
+  std::vector<std::string> expect = {"02",    "0B",    "05",    "03 00",    "04 4C", "04 4A", "04 42",
+                                     "04 4B", "04 49", "04 3A", "20 00 80", "3F 00", "4C"};
   REQUIRE(fake.requests.size() >= expect.size());
   CHECK(std::vector<std::string>(fake.requests.begin(), fake.requests.begin() + expect.size()) == expect);
   CHECK(session.stage() == SessionStage::RUNNING);
   CHECK(session.writes_permitted());
   CHECK(session.capabilities().combined);
   CHECK(session.capabilities().advance);
-  CHECK_FALSE(session.capabilities().station_error);
   CHECK_FALSE(session.capabilities().controller_state);
   CHECK(session.capabilities().test_stations);
 
@@ -62,16 +71,10 @@ TEST_CASE("startup identifies, probes, reads the schedule in use, then polls") {
   CHECK(session.identity().model.model_id == 0x000A);
   CHECK(session.identity().firmware.minor == 47);
   CHECK(session.identity().serial_known);
-  CHECK(session.identity_changed());
 
-  bool on = false;
-  REQUIRE(session.state().zone_running(1, &on));
-  CHECK(on);
-  REQUIRE(session.state().zone_available(6, &on));
-  CHECK(on);
-  uint16_t minutes = 0;
-  REQUIRE(session.state().run_minutes(1, 0, &minutes));
-  CHECK(minutes == 25);
+  CHECK(session.state().running[0] == true);
+  CHECK(session.state().available[5] == true);
+  CHECK(session.state().run_minutes[0][0] == 25);
   CHECK(session.link().connected_known);
   CHECK(session.link().connected);
   CHECK(session.link().response_known);
@@ -135,7 +138,7 @@ TEST_CASE("three failed requests in a row mark the link down; any answer brings 
 TEST_CASE("without 04 every optional command is tried; a NAK then switches it off") {
   EspTm2Model model;
   FakeController fake = FakeController::upgraded_tm2();
-  for (const char *probe : {"04 4C", "04 4A", "04 42", "04 4B", "04 3D", "04 49", "04 3A"}) {
+  for (const char *probe : {"04 4C", "04 4A", "04 42", "04 4B", "04 49", "04 3A"}) {
     fake.replies[probe] = std::string("00 04 01");
   }
   fake.replies["4C"] = "00 4C 01";  // 0005 has no 4C
@@ -168,9 +171,7 @@ TEST_CASE("listen_only never transmits and decodes what it hears") {
 
   auto bf = from_hex("BF 00 02 00 00 00");
   session.on_frame(bf.data(), bf.size(), 100);
-  bool on = false;
-  REQUIRE(session.state().zone_running(2, &on));
-  CHECK(on);
+  CHECK(session.state().running[1] == true);
   CHECK(session.link().connected);
 
   // update() may never run in listen_only, so silence has its own check.
@@ -239,6 +240,19 @@ TEST_CASE("polling is fast while a zone runs and after a command, otherwise upda
   CHECK(session.desired_interval(now + 30000) == 15000);
   // A hold from a month ago does not look active again after the clock moves on.
   CHECK(session.desired_interval(now + 2592000000u) == 15000);
+
+  // A zone was running when the link went down. That last reading cannot hold the fast poll.
+  fake.replies["3F 00"] = "BF 00 01 00 00 00";
+  session.poll(now);
+  now = run_session(session, fake, now, 2000);
+  REQUIRE(session.desired_interval(now) == 3000);
+  fake.replies.clear();
+  for (int i = 0; i < 3 && session.link().connected; i++) {
+    session.poll(now);
+    now = run_session(session, fake, now, 5000);
+  }
+  REQUIRE_FALSE(session.link().connected);
+  CHECK(session.desired_interval(now) == 15000);
 }
 
 TEST_CASE("a poll cycle is not doubled while one is still pending") {
@@ -327,6 +341,126 @@ TEST_CASE("queue mode advances to the next queued zone when that is allowed") {
   }
 }
 
+TEST_CASE("queue mode refuses a valve off until the queue has been read") {
+  SessionConfig config = config_with({Field::ZONES_RUNNING});  // no queue list polled
+  config.valve_queue = true;
+  config.experimental = true;
+  Running live(config);
+  REQUIRE(live.session.capabilities().advance);
+  REQUIRE_FALSE(live.session.state().queue.has_value());
+  Control off;
+  off.op = ControlOp::VALVE_OFF;
+  off.zone = 1;
+  CHECK(live.session.control(off, live.now) == ControlResult::REFUSED_NOT_READY);
+}
+
+TEST_CASE("queue mode stops when the running zone is the only one queued") {
+  SessionConfig config = config_with({Field::ZONES_RUNNING, Field::QUEUE});
+  config.valve_queue = true;
+  config.experimental = true;
+  EspTm2Model model;
+  Session session(model, config);
+  FakeController fake = FakeController::upgraded_tm2();
+  fake.replies["3B 01"] = "BB 01 21 05 D0 00 00 00";
+  session.start(0);
+  uint32_t now = run_session(session, fake, 0, 10000);
+  REQUIRE(session.state().queue.has_value());
+  Control off;
+  off.op = ControlOp::VALVE_OFF;
+  off.zone = 1;
+  REQUIRE(session.control(off, now) == ControlResult::QUEUED);
+  FakeController silent;
+  run_session(session, silent, now, 5000);
+  CHECK(silent.requests == std::vector<std::string>{"40"});
+}
+
+TEST_CASE("queue mode refuses a valve off until the 42 probe has an answer") {
+  SessionConfig config = config_with({Field::ZONES_RUNNING, Field::QUEUE});
+  config.valve_queue = true;
+  config.experimental = true;
+  EspTm2Model model;
+  Session session(model, config);
+  FakeController fake = FakeController::upgraded_tm2();
+  fake.replies.erase("04 42");
+  session.start(0);
+  uint32_t now = run_session(session, fake, 0, 30000);
+  REQUIRE(session.state().queue.has_value());
+  REQUIRE_FALSE(session.capability_known(0x42));
+  Control off;
+  off.op = ControlOp::VALVE_OFF;
+  off.zone = 1;
+  CHECK(session.control(off, now) == ControlResult::REFUSED_NOT_READY);
+
+  // The controller says no: 40 is the documented command.
+  fake.replies["04 42"] = "84 42 00";
+  REQUIRE(session.refresh(now) == ControlResult::QUEUED);
+  now = run_session(session, fake, now, 5000);
+  REQUIRE(session.capability_known(0x42));
+  REQUIRE(session.control(off, now) == ControlResult::QUEUED);
+  FakeController silent;
+  run_session(session, silent, now, 5000);
+  CHECK(silent.requests == std::vector<std::string>{"40"});
+}
+
+TEST_CASE("without 04, a probe that timed out is not assumed with the refused ones") {
+  EspTm2Model model;
+  FakeController fake = FakeController::upgraded_tm2();
+  for (const char *probe : {"04 4C", "04 42", "04 4B", "04 49", "04 3A"}) {
+    fake.replies[probe] = std::string("00 04 01");
+  }
+  fake.replies.erase("04 4A");
+  Session session(model, config_with({Field::ZONES_RUNNING}));
+  session.start(0);
+  uint32_t now = run_session(session, fake, 0, 30000);
+  REQUIRE(session.stage() == SessionStage::RUNNING);
+  CHECK(session.capabilities_assumed());
+  CHECK(session.capabilities().queue_run);
+  CHECK(session.capability_known(0x4B));
+  CHECK_FALSE(session.capabilities().event_timestamp);
+  CHECK_FALSE(session.capability_known(0x4A));
+
+  // Its retry is refused like the others, so it is assumed too.
+  fake.replies["04 4A"] = "00 04 01";
+  REQUIRE(session.refresh(now) == ControlResult::QUEUED);
+  run_session(session, fake, now, 5000);
+  CHECK(session.capability_known(0x4A));
+  CHECK(session.capabilities().event_timestamp);
+}
+
+TEST_CASE("a probe that timed out is unknown, not unsupported, and is asked again") {
+  EspTm2Model model;
+  FakeController fake = FakeController::upgraded_tm2();
+  fake.replies.erase("04 4B");
+  Session session(model, config_with({Field::ZONES_RUNNING}));
+  session.start(0);
+  uint32_t now = run_session(session, fake, 0, 30000);
+  REQUIRE(session.stage() == SessionStage::RUNNING);
+  REQUIRE(session.writes_permitted());
+  CHECK_FALSE(session.capability_known(0x4B));
+  CHECK(session.capability_known(0x4C));
+  Control queue;
+  queue.op = ControlOp::QUEUE_ZONE;
+  queue.zone = 1;
+  queue.value = 5;
+  CHECK(session.control(queue, now) == ControlResult::REFUSED_NOT_READY);
+
+  // The next slow group asks once more (three tries on the link). Later cycles do not.
+  fake.requests.clear();
+  for (int i = 0; i < 9; i++) {
+    session.poll(now);
+    now = run_session(session, fake, now, 3000);
+  }
+  CHECK(std::count(fake.requests.begin(), fake.requests.end(), "04 4B") == 3);
+  CHECK_FALSE(session.capability_known(0x4B));
+
+  // Refresh asks again, and an answer settles it.
+  fake.replies["04 4B"] = "84 4B 01";
+  REQUIRE(session.refresh(now) == ControlResult::QUEUED);
+  now = run_session(session, fake, now, 5000);
+  CHECK(session.capability_known(0x4B));
+  CHECK(session.control(queue, now) == ControlResult::QUEUED);
+}
+
 TEST_CASE("experimental commands stay off until the config and the probe allow them") {
   // This script answers 04 49 with "not supported" and 04 3A with "supported".
   Control irrigation;
@@ -365,10 +499,8 @@ TEST_CASE("a schedule edit changes one field and checks the page that comes back
 
   FakeController fake;
   fake.replies["20 00 10"] = "A0 00 10 6A 06 01 00 64 01";
-  now += 25;  // the gap after the poll that left the session idle
-  session.tick(now);
-  Transmission tx;
-  REQUIRE(session.next_transmission(now, &tx));
+  Transmission tx = next_after_gap(session, &now);
+  REQUIRE(tx.size > 0);
   std::vector<uint8_t> request = first_payload(tx);
   CHECK(to_hex(request.data(), request.size()) == "20 00 10");
   now += tx.first_copy_ms + fake.turnaround_ms;
@@ -419,16 +551,6 @@ TEST_CASE("a new schedule timestamp re-reads the schedule on the next poll") {
     now = run_session(session, fake, now, 3000);
   }
   CHECK(seen(fake, "20 00 10"));
-}
-
-// The next transmission, once the gap after whatever came before has passed.
-static Transmission next_after_gap(Session &session, uint32_t *now) {
-  Transmission tx;
-  for (int i = 0; i < 200 && !session.next_transmission(*now, &tx); i++) {
-    *now += 5;
-    session.tick(*now);
-  }
-  return tx;
 }
 
 TEST_CASE("a 2-byte command goes as one copy; polls and send_raw keep the LNK2's two") {
@@ -580,8 +702,7 @@ TEST_CASE("after five minutes down, the session starts again at identification")
   CHECK_FALSE(session.writes_permitted());
   CHECK_FALSE(session.capabilities().combined);
   // The old controller's state and identity go too, so nothing is decided on them.
-  bool on = false;
-  CHECK_FALSE(session.state().zone_running(1, &on));
+  CHECK_FALSE(session.state().running[0].has_value());
   CHECK_FALSE(session.identity().model_known);
 
   FakeController fake = FakeController::upgraded_tm2();
@@ -640,7 +761,7 @@ TEST_CASE("probes the queue refuses do not leave the session waiting for them") 
 TEST_CASE("probes that only time out assume nothing; the fallback polls run") {
   EspTm2Model model;
   FakeController fake = FakeController::upgraded_tm2();
-  for (const char *probe : {"04 4C", "04 4A", "04 42", "04 4B", "04 3D", "04 49", "04 3A"}) {
+  for (const char *probe : {"04 4C", "04 4A", "04 42", "04 4B", "04 49", "04 3A"}) {
     fake.replies.erase(probe);
   }
   Session session(model, config_with({Field::CLOCK}));
@@ -721,9 +842,7 @@ TEST_CASE("a reply nobody asked for does not change state") {
   // Nothing is in flight. A late BF saying zone 3 runs is older than the next poll's answer.
   auto late = from_hex("BF 00 04 00 00 00");
   session.on_frame(late.data(), late.size(), live.now);
-  bool on = true;
-  REQUIRE(session.state().zone_running(3, &on));
-  CHECK_FALSE(on);
+  CHECK(session.state().running[2] == false);
 }
 
 TEST_CASE("a schedule edit fails, and writes nothing, when a read is answered without the page") {
@@ -759,42 +878,84 @@ TEST_CASE("a schedule edit fails, and writes nothing, when a read is answered wi
   CHECK(std::string(failed.reason).find("did not return that page") != std::string::npos);
 }
 
-TEST_CASE("a clock set is queued whole or not at all") {
-  SessionConfig config = config_with({Field::ZONES_RUNNING});
-  config.experimental = true;  // send_raw fills the queue
-  Running live(config);
+TEST_CASE("a command queued behind a clock set does not lose its date") {
+  Running live(config_with({Field::ZONES_RUNNING}));
   Session &session = live.session;
-  uint32_t now = live.now;
-  auto query = from_hex("02");
-  while (session.send_raw(query.data(), 1, now) == ControlResult::QUEUED) {
-  }
-  next_after_gap(session, &now);  // one in flight: one place free
   Control clock;
   clock.op = ControlOp::SET_CLOCK;
   clock.hour = 12;
   clock.day = 21;
   clock.month = 10;
   clock.year = 2026;
-  CHECK(session.control(clock, now) == ControlResult::REFUSED_BUSY);
+  REQUIRE(session.control(clock, live.now) == ControlResult::QUEUED);
+  Control delay;
+  delay.op = ControlOp::SET_RAIN_DELAY;
+  delay.value = 2;
+  REQUIRE(session.control(delay, live.now) == ControlResult::QUEUED);
+  // A second clock set waits: the time already queued sends its own date.
+  Control other = clock;
+  other.day = 22;
+  CHECK(session.control(other, live.now) == ControlResult::REFUSED_BUSY);
+
   FakeController fake = FakeController::upgraded_tm2();
-  run_session(session, fake, now, 30000);
+  fake.replies["11 0C 00 00"] = "01 11";
+  fake.replies["37 00 02"] = "01 37";
+  fake.replies["13 15 A7 EA"] = "01 13";
+  fake.requests.clear();
+  uint32_t now = run_session(session, fake, live.now, 5000);
+  CHECK(seen(fake, "37 00 02"));
+  CHECK(seen(fake, "13 15 A7 EA"));
+  CHECK_FALSE(seen(fake, "13 16 A7 EA"));
+  CHECK(session.control(other, now) == ControlResult::QUEUED);
+}
+
+TEST_CASE("a clock set sends the date only once the time is acknowledged") {
+  Control clock;
+  clock.op = ControlOp::SET_CLOCK;
+  clock.hour = 12;
+  clock.day = 21;
+  clock.month = 10;
+  clock.year = 2026;
+  for (const char *answer : {"", "00 11 02"}) {  // a timeout, then a NAK
+    Running live(config_with({Field::ZONES_RUNNING}));
+    Session &session = live.session;
+    REQUIRE(session.control(clock, live.now) == ControlResult::QUEUED);
+    FakeController fake = FakeController::upgraded_tm2();
+    if (answer[0] != '\0') {
+      fake.replies["11 0C 00 00"] = answer;
+    }
+    fake.requests.clear();
+    run_session(session, fake, live.now, 5000);
+    CHECK(seen(fake, "11 0C 00 00"));
+    CHECK_FALSE(seen(fake, "13 15 A7 EA"));
+  }
+
+  SessionConfig config = config_with({Field::ZONES_RUNNING});
+  config.experimental = true;  // send_raw fills the queue
+  Running live(config);
+  Session &session = live.session;
+  auto query = from_hex("02");
+  while (session.send_raw(query.data(), 1, live.now) == ControlResult::QUEUED) {
+  }
+  CHECK(session.control(clock, live.now) == ControlResult::REFUSED_BUSY);
+  FakeController fake = FakeController::upgraded_tm2();
+  run_session(session, fake, live.now, 30000);
   CHECK_FALSE(seen(fake, "11 0C 00 00"));
 
   clock.month = 2;
   clock.day = 30;
-  CHECK(session.control(clock, now) == ControlResult::REFUSED_RANGE);
+  CHECK(session.control(clock, live.now) == ControlResult::REFUSED_RANGE);
 }
 
-TEST_CASE("replies change only the link values they change") {
+TEST_CASE("answered requests leave the error count alone") {
   Running live(config_with({Field::ZONES_RUNNING}));
   Session &session = live.session;
-  session.clear_changed();
+  uint32_t errors = session.link().errors;
   FakeController fake = FakeController::upgraded_tm2();
   session.poll(live.now);
   run_session(session, fake, live.now, 5000);
-  // Every request was answered: no new error to publish, and the link was already up.
-  CHECK_FALSE(session.link_changes().errors);
-  CHECK_FALSE(session.link_changes().connected);
+  CHECK(session.link().errors == errors);
+  CHECK(session.link().connected);
   CHECK(session.link().replies > 0);
 }
 
@@ -883,9 +1044,7 @@ TEST_CASE("a seasonal adjust is read back after the ack, not a slow poll later")
   REQUIRE(fake.requests.size() >= 2);
   CHECK(fake.requests[0] == "31 01 00 64");
   CHECK(seen(fake, "30 01"));
-  uint16_t percent = 0;
-  REQUIRE(session.state().seasonal(1, &percent));
-  CHECK(percent == 100);
+  CHECK(session.state().seasonal[1] == 100);
 }
 
 TEST_CASE("a refused seasonal adjust is not read back") {
@@ -901,15 +1060,14 @@ TEST_CASE("a refused seasonal adjust is not read back") {
   CHECK_FALSE(seen(fake, "30 00"));
 }
 
-TEST_CASE("anything_changed says when publishing has work to do") {
+TEST_CASE("the revision moves on when there is something to publish, and only then") {
   Running live(config_with({Field::ZONES_RUNNING}));
   Session &session = live.session;
-  session.clear_changed();
-  CHECK_FALSE(session.anything_changed());
+  uint32_t revision = session.revision();
+  session.tick(live.now + 1);
+  CHECK(session.revision() == revision);
   FakeController fake = FakeController::upgraded_tm2();
   session.poll(live.now);
   run_session(session, fake, live.now, 5000);
-  CHECK(session.anything_changed());
-  session.clear_changed();
-  CHECK_FALSE(session.anything_changed());
+  CHECK(session.revision() != revision);
 }

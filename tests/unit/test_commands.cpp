@@ -32,7 +32,6 @@ TEST_CASE("request builders match the spec bytes") {
   expect_buf(request_irrigation_state(), "48");
   expect_buf(request_rain_sensor(), "3E");
   expect_buf(request_event_timestamp(1), "4A 01");
-  expect_buf(request_station_error(0), "3D 00");
   expect_buf(request_rain_delay(), "36");
   expect_buf(request_run_station(1, 6), "39 00 01 06");
   expect_buf(request_queue_station(0, 1, 1), "4B 00 01 01");
@@ -169,15 +168,12 @@ TEST_CASE("ack, nak and live status") {
   CHECK(combined.remaining_seconds == 0);
   CHECK(combined.active_zone == 0);
 
-  CHECK(queue_seconds(0x01, 0x67) == 359);
-  CHECK(queue_seconds(0x05, 0xD0) == 1488);
-
   QueueNow idle;
   bytes = from_hex("BB 00 00 00 00 00 00 00 00 FF 00 00");
   REQUIRE(parse_queue_now(bytes.data(), bytes.size(), &idle));
   CHECK(idle.queued == 0);
   CHECK(idle.zone == 0);
-  CHECK(idle.program.none);
+  CHECK(idle.program == QUEUE_PROGRAM_NONE);
   CHECK(idle.active == 0);
 
   QueueNow running;
@@ -186,18 +182,14 @@ TEST_CASE("ack, nak and live status") {
   CHECK(running.queued == 5);
   CHECK(running.remaining_seconds == 1488);
   CHECK(running.zone == 1);
-  CHECK_FALSE(running.program.none);
-  CHECK(running.program.index == 0);
+  CHECK(running.program == 0);
   CHECK(running.active == 0x01);
 
-  QueueProgram manual = queue_program(0xFF);
-  CHECK(manual.none);
-  QueueProgram program_a = queue_program(0);
-  CHECK_FALSE(program_a.none);
-  CHECK(program_a.index == 0);
   // Above 4 must stay as itself. Mapping it to 0 would look like program A.
-  CHECK(queue_program(5).index == 5);
-  CHECK_FALSE(queue_program(5).none);
+  QueueNow other;
+  bytes = from_hex("BB 00 01 00 00 3C 00 00 01 05 00 01");
+  REQUIRE(parse_queue_now(bytes.data(), bytes.size(), &other));
+  CHECK(other.program == 5);
 
   QueueList list;
   bytes = from_hex(

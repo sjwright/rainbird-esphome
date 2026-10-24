@@ -93,9 +93,7 @@ rainbird:
       entity_category: config
     running_binary_sensor: true
     queue_button: true
-    sensor_bypass_switch: true
     run_time_numbers: true      # one per program: "{zone} {program} run time"
-    fault_binary_sensor: true   # stays unknown until 3D is decoded (SPEC 8.4)
 
   zones:
     - zone: 1

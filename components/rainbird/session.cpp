@@ -10,7 +10,7 @@ namespace {
 
 // Optional commands probed with 04 at startup (PLAN 6.3). The probe answers are
 // the only capability source; the model id is used for the D12 gate alone.
-constexpr uint8_t PROBED[] = {0x4C, 0x4A, 0x42, 0x4B, 0x3D, 0x49, 0x3A};
+constexpr uint8_t PROBED[] = {0x4C, 0x4A, 0x42, 0x4B, 0x49, 0x3A};
 
 // Three requests in a row failing after their retries means the link is down.
 constexpr uint8_t FAILURES_FOR_DOWN = 3;
@@ -29,6 +29,7 @@ uint8_t tag_detail(uint32_t value) { return static_cast<uint8_t>(value & 0xFF); 
 
 // 31 sets a program's seasonal adjust. The short poll does not read it back (30 is in the slow group).
 constexpr uint8_t OPCODE_SET_WATER_BUDGET = 0x31;
+constexpr uint8_t OPCODE_SET_TIME = 0x11;
 
 }  // namespace
 
@@ -37,7 +38,7 @@ const char *control_result_text(ControlResult result) {
     case ControlResult::QUEUED:
       return "queued";
     case ControlResult::REFUSED_NOT_READY:
-      return "the controller is not identified, or this write is off";
+      return "not ready yet: not identified, a probe or the queue unread, or this write is off";
     case ControlResult::REFUSED_LINK_DOWN:
       return "the controller is not answering";
     case ControlResult::REFUSED_EXPERIMENTAL:
@@ -58,20 +59,8 @@ const char *control_result_text(ControlResult result) {
   return "refused";
 }
 
-Session::Session(const Model &model, const SessionConfig &config)
+Session::Session(const EspTm2Model &model, const SessionConfig &config)
     : model_(model), config_(config), link_(config.timing), editor_(model) {}
-
-bool Session::anything_changed() const {
-  const LinkChanges &link = this->link_changes_;
-  return this->state_touched_ || this->identity_changed_ || link.connected || link.response || link.errors;
-}
-
-void Session::clear_changed() {
-  this->state_touched_ = false;
-  this->state_.clear_changed();
-  this->identity_changed_ = false;
-  this->link_changes_ = LinkChanges{};
-}
 
 bool Session::take_event(SessionEvent *out) {
   if (out == nullptr || this->event_count_ == 0) {
@@ -150,7 +139,9 @@ void Session::restart_() {
   this->link_.drop_queued(Priority::POLL);
   this->link_.drop_queued(Priority::FOLLOW_UP);
   this->caps_ = Capabilities{};
-  this->probes_done_ = false;
+  this->probes_answered_ = 0;
+  this->probe_retry_ = false;
+  this->date_after_time_ = false;
   this->writes_permitted_ = false;
   this->schedule_read_once_ = false;
   this->schedule_stale_ = false;
@@ -165,6 +156,7 @@ ControlResult Session::refresh(uint32_t now_ms) {
   }
   this->poll_count_ = 0;  // the next cycle includes the slow group
   this->schedule_stale_ = true;
+  this->probe_retry_ = true;
   this->poll(now_ms);
   return ControlResult::QUEUED;
 }
@@ -212,6 +204,10 @@ void Session::poll(uint32_t now_ms) {
   if (this->poll_count_ % SLOW_POLL_EVERY == 0) {
     this->model_.slow_poll(this->caps_, this->config_.used, &list);
     this->enqueue_list_(list, Priority::POLL, TagKind::POLL);
+    if (this->probe_retry_) {
+      this->probe_retry_ = false;
+      this->retry_probes_();
+    }
   }
   this->poll_count_++;
   if (this->schedule_due_(now_ms)) {
@@ -256,7 +252,7 @@ void Session::tick(uint32_t now_ms) {
   }
   if (this->link_.link_errors() != this->link_status_.errors) {
     this->link_status_.errors = this->link_.link_errors();
-    this->link_changes_.errors = true;
+    this->revision_++;
   }
   this->link_status_.replies = this->link_.replies();
   this->link_status_.duplicates = this->link_.duplicates();
@@ -289,22 +285,19 @@ void Session::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
   bool answer = passive || this->link_.on_frame(payload, size, parsed ? &reply : nullptr, now_ms);
   if (answer && parsed) {
     this->model_.apply_reply(reply, &this->state_);
-    this->state_touched_ = true;
+    this->revision_++;
     switch (reply.kind) {
       case ReplyKind::MODEL:
         this->identity_.model = reply.model;
         this->identity_.model_known = true;
-        this->identity_changed_ = true;
         break;
       case ReplyKind::FIRMWARE:
         this->identity_.firmware = reply.firmware;
         this->identity_.firmware_known = true;
-        this->identity_changed_ = true;
         break;
       case ReplyKind::SERIAL_NUMBER:
         this->identity_.serial = reply.serial;
         this->identity_.serial_known = true;
-        this->identity_changed_ = true;
         break;
       case ReplyKind::COMBINED:
         this->note_clock_reading_(now_ms);
@@ -367,16 +360,36 @@ void Session::note_unsupported_(uint8_t opcode) {
   support.command = opcode;
   support.supported = false;
   this->model_.note_support(support, &this->caps_);
+  this->probes_answered_ |= probe_bit_(opcode);
+}
+
+uint8_t Session::probe_bit_(uint8_t opcode) {
+  for (size_t i = 0; i < sizeof(PROBED); i++) {
+    if (PROBED[i] == opcode) {
+      return static_cast<uint8_t>(1u << i);
+    }
+  }
+  return 0;
+}
+
+void Session::retry_probes_() {
+  // A probe that timed out says nothing about the command, so it is asked again, once.
+  for (uint8_t command : PROBED) {
+    if (!this->capability_known(command)) {
+      this->enqueue_(request_support(command), Priority::POLL, TagKind::PROBE, command);
+    }
+  }
 }
 
 void Session::set_connected_(bool connected, uint32_t now_ms) {
   if (!this->link_status_.connected_known || this->link_status_.connected != connected) {
-    this->link_changes_.connected = true;
+    this->revision_++;
     if (!connected) {
       this->down_since_ = now_ms;
       // Commands do not outlive a disconnect: one queued now could run minutes later, or on
       // a different controller. The edit loses its next step with them.
       this->link_.drop_queued(Priority::USER);
+      this->date_after_time_ = false;  // its time was dropped with the other commands
       if (this->editor_.active()) {
         this->fail_edit_("the controller stopped answering");
       }
@@ -397,7 +410,7 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
   } else {
     this->set_connected_(true, now_ms);
     if (!this->link_status_.response_known || this->link_status_.response_ms != done.response_ms) {
-      this->link_changes_.response = true;
+      this->revision_++;
     }
     this->link_status_.response_known = true;
     this->link_status_.response_ms = done.response_ms;
@@ -433,6 +446,7 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
       this->probes_pending_ = 0;
       this->probe_answered_ = false;
       this->probe_refused_ = false;
+      this->probes_refused_ = 0;
       for (uint8_t command : PROBED) {
         // Only a queued probe completes. One the queue refused counts as unanswered.
         if (this->enqueue_(request_support(command), Priority::FOLLOW_UP, TagKind::PROBE, command)) {
@@ -447,8 +461,13 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
       if (done.outcome == Outcome::REPLY && done.reply.kind == ReplyKind::SUPPORT) {
         this->model_.note_support(done.reply.support, &this->caps_);
         this->probe_answered_ = true;
+        this->probes_answered_ |= probe_bit_(tag_detail(done.tag));
       } else if (done.outcome == Outcome::NAK) {
         this->probe_refused_ = true;
+        this->probes_refused_ |= probe_bit_(tag_detail(done.tag));
+        if (this->probes_pending_ == 0) {
+          this->settle_refused_probes_();  // a retry, after startup has decided
+        }
       }
       if (this->probes_pending_ > 0 && --this->probes_pending_ == 0) {
         this->finish_probes_(now_ms);
@@ -468,6 +487,14 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
     case TagKind::RAW:
       return;
     case TagKind::CONTROL:
+      if (done.opcode == OPCODE_SET_TIME && this->date_after_time_) {
+        // A time the controller did not take, or may not have, is not followed by its date:
+        // a new date on the old time is a clock a day out near midnight.
+        this->date_after_time_ = false;
+        if (done.outcome == Outcome::REPLY) {
+          this->enqueue_command_(request_set_date(this->date_to_set_), now_ms);
+        }
+      }
       // The short poll runs only after an ack. A NAK is the answer; sending the command again is not.
       if (done.outcome == Outcome::REPLY) {
         this->follow_up_(now_ms);
@@ -483,20 +510,27 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
   }
 }
 
-void Session::finish_probes_(uint32_t now_ms) {
-  this->probes_done_ = true;
+void Session::settle_refused_probes_() {
+  // A NAK refuses 04 itself, not the command it asked about. With no 84 reply at all, this is a
+  // controller without 04: try the command, and its own NAK clears it. Alongside 84 replies, a
+  // NAK is taken as "no". Probes that only timed out say nothing: they stay unknown, the
+  // fallback polls (10, 12, 36, 3E, 48) work on every model, and retry_probes_() asks again.
   this->caps_assumed_ = !this->probe_answered_ && this->probe_refused_;
-  if (this->caps_assumed_) {
-    // 04 itself is refused: a controller without it. Try every optional command, and a NAK
-    // clears the ones that fail. Probes that only timed out say nothing, so nothing is assumed:
-    // the fallback polls (10, 12, 36, 3E, 48) work on every model.
-    for (uint8_t command : PROBED) {
-      CommandSupport support;
-      support.command = command;
-      support.supported = true;
-      this->model_.note_support(support, &this->caps_);
+  for (uint8_t command : PROBED) {
+    if ((this->probes_refused_ & probe_bit_(command)) == 0) {
+      continue;
     }
+    CommandSupport support;
+    support.command = command;
+    support.supported = this->caps_assumed_;
+    this->model_.note_support(support, &this->caps_);
+    this->probes_answered_ |= probe_bit_(command);
   }
+  this->probes_refused_ = 0;
+}
+
+void Session::finish_probes_(uint32_t now_ms) {
+  this->settle_refused_probes_();
   this->schedule_pending_ = 0;
   this->read_schedule_(now_ms, Priority::FOLLOW_UP, &this->schedule_pending_);
   if (this->schedule_pending_ > 0) {
@@ -510,6 +544,8 @@ void Session::begin_running_(uint32_t now_ms) {
   this->set_stage_(SessionStage::RUNNING);
   // First data now, rather than one update_interval later.
   this->poll(now_ms);
+  // Probes that timed out are asked again with the next slow group, not straight away.
+  this->probe_retry_ = true;
 }
 
 // Whether to poll fast. Broader than the `watering` sensor (bool_value in entity_values.cpp):
@@ -517,23 +553,17 @@ void Session::begin_running_(uint32_t now_ms) {
 // controller still counts down, keeps polling fast. A fast poll too many costs one
 // cycle; a slow one too early misses the next zone starting.
 bool Session::watering_() const {
-  for (uint8_t zone = 1; zone <= STATE_ZONES; zone++) {
-    bool on = false;
-    if (this->state_.zone_running(zone, &on) && on) {
+  for (const std::optional<bool> &running : this->state_.running) {
+    if (running.value_or(false)) {
       return true;
     }
   }
-  uint8_t active = 0;
-  if (this->state_.active_zone(&active) && active != 0) {
-    return true;
-  }
-  uint16_t remaining = 0;
-  return this->state_.remaining_seconds(&remaining) && remaining != 0;
+  return this->state_.active_zone.value_or(0) != 0 || this->state_.remaining_seconds.value_or(0) != 0;
 }
 
-ControlResult Session::unsupported_() const {
-  // Before the probes finish, "not supported" would be a guess.
-  return this->probes_done_ ? ControlResult::REFUSED_UNSUPPORTED : ControlResult::REFUSED_NOT_READY;
+ControlResult Session::unsupported_(uint8_t opcode) const {
+  // Until the probe has an answer, "not supported" would be a guess.
+  return this->capability_known(opcode) ? ControlResult::REFUSED_UNSUPPORTED : ControlResult::REFUSED_NOT_READY;
 }
 
 bool Session::link_down_() const { return this->link_status_.connected_known && !this->link_status_.connected; }
@@ -573,27 +603,27 @@ void Session::follow_up_(uint32_t now_ms) {
   this->enqueue_list_(list, Priority::FOLLOW_UP, TagKind::POLL);
 }
 
-bool Session::zone_missing_(uint8_t zone) const {
-  bool available = true;
-  return this->state_.zone_available(zone, &available) && !available;
+bool Session::zone_missing_(uint8_t zone) const { return !at(this->state_.available, zone - 1).value_or(true); }
+
+bool Session::queued_(uint8_t zone) const {
+  const std::optional<QueueList> &queue = this->state_.queue;
+  for (uint8_t i = 0; queue.has_value() && i < queue->count; i++) {
+    if (queue->slots[i].zone == zone) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool Session::next_queued_zone_(uint8_t skip, uint8_t *zone) const {
-  if (zone == nullptr || !this->state_.queue_known()) {
-    return false;
-  }
-  uint8_t active = 0;
-  this->state_.active_zone(&active);
-  for (uint8_t i = 0; i < this->state_.queue_count(); i++) {
-    QueueItem item;
-    if (!this->state_.queue_item(i, &item) || item.zone == 0) {
-      continue;
+  const std::optional<QueueList> &queue = this->state_.queue;
+  uint8_t active = this->state_.active_zone.value_or(0);
+  for (uint8_t i = 0; queue.has_value() && i < queue->count; i++) {
+    uint8_t queued = queue->slots[i].zone;
+    if (queued != skip && queued != active) {
+      *zone = queued;
+      return true;
     }
-    if (item.zone == skip || item.zone == active) {
-      continue;
-    }
-    *zone = item.zone;
-    return true;
   }
   return false;
 }
@@ -623,27 +653,29 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
         return ControlResult::REFUSED_NO_ZONE;
       }
       if (queue && !this->caps_.queue_run) {
-        return this->unsupported_();
+        return this->unsupported_(0x4B);
       }
       uint8_t minutes = static_cast<uint8_t>(command.value);
       request = queue ? request_queue_station(0, command.zone, minutes) : request_run_station(command.zone, minutes);
       break;
     }
     case ControlOp::VALVE_OFF: {
-      bool running = false;
-      if (!this->state_.zone_running(command.zone, &running) || !running) {
-        for (uint8_t i = 0; i < this->state_.queue_count(); i++) {
-          QueueItem item;
-          if (this->state_.queue_item(i, &item) && item.zone == command.zone) {
-            return ControlResult::REFUSED_QUEUED_ONLY;
-          }
-        }
-        return ControlResult::REFUSED_NOT_RUNNING;
+      if (!at(this->state_.running, command.zone - 1).value_or(false)) {
+        return this->queued_(command.zone) ? ControlResult::REFUSED_QUEUED_ONLY : ControlResult::REFUSED_NOT_RUNNING;
       }
       uint8_t next = 0;
-      if (this->config_.valve_queue && this->config_.experimental && this->caps_.advance &&
-          this->next_queued_zone_(command.zone, &next)) {
-        request = request_advance(next);
+      bool advance = this->config_.valve_queue && this->config_.experimental;
+      // Until the 42 probe is answered, 40 could cancel zones a supported 42 would keep.
+      if (advance && !this->capability_known(0x42)) {
+        return ControlResult::REFUSED_NOT_READY;
+      }
+      if (advance && this->caps_.advance) {
+        // Until the queue has been read, 40 could cancel zones queued behind this one.
+        if (!this->state_.queue.has_value()) {
+          return ControlResult::REFUSED_NOT_READY;
+        }
+        // Nothing else queued: stopping is turning this zone off.
+        request = this->next_queued_zone_(command.zone, &next) ? request_advance(next) : request_stop();
       } else {
         request = request_stop();
       }
@@ -663,7 +695,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
       if (!this->caps_.advance) {
-        return this->unsupported_();
+        return this->unsupported_(0x42);
       }
       uint8_t next = 0;
       if (!this->next_queued_zone_(0, &next)) {
@@ -691,7 +723,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
       if (!this->caps_.controller_state) {
-        return this->unsupported_();
+        return this->unsupported_(0x49);
       }
       request = request_set_controller_state(command.value == 0 ? 0 : 1);
       break;
@@ -700,7 +732,7 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
       if (!this->caps_.test_stations) {
-        return this->unsupported_();
+        return this->unsupported_(0x3A);
       }
       if (command.value < 1 || command.value > limits.run_max_minutes) {
         return ControlResult::REFUSED_RANGE;
@@ -715,13 +747,16 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       if (command.hour > 23 || command.minute > 59 || command.second > 59 || !date_valid(date)) {
         return ControlResult::REFUSED_RANGE;
       }
-      // Both or neither: a new time without its date is a clock a day out near midnight.
-      if (this->link_.space() < 2) {
+      // One clock set at a time: the time in flight sends its own date once it is acknowledged (handle_).
+      if (this->date_after_time_) {
         return ControlResult::REFUSED_BUSY;
       }
-      this->enqueue_command_(request_set_time(command.hour, command.minute, command.second), now_ms);
-      request = request_set_date(date);
-      break;
+      if (!this->enqueue_command_(request_set_time(command.hour, command.minute, command.second), now_ms)) {
+        return ControlResult::REFUSED_BUSY;
+      }
+      this->date_after_time_ = true;
+      this->date_to_set_ = date;
+      return ControlResult::QUEUED;
     }
   }
   if (!this->enqueue_command_(request, now_ms, program)) {
@@ -800,7 +835,8 @@ void Session::handle_page_(const Completion &done) {
 }
 
 uint32_t Session::desired_interval(uint32_t now_ms) const {
-  if (this->stage_ != SessionStage::RUNNING) {
+  // With the link down, the watering values are the last ones read and may never change again.
+  if (this->stage_ != SessionStage::RUNNING || this->link_down_()) {
     return this->config_.update_interval_ms;
   }
   if (this->watering_() || (this->hold_ && !elapsed(now_ms, this->hold_from_, this->config_.fast_hold_ms))) {

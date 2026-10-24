@@ -28,20 +28,9 @@ struct ByteBuf {
 
 uint16_t be16(uint8_t hi, uint8_t lo);
 
-// Big-endian seconds. The combined-state docs say minutes; captures of 0x0167 after a
-// 6-minute start are 359 seconds. This returns the raw big-endian value as seconds.
-uint16_t queue_seconds(uint8_t hi, uint8_t lo);
-
 // Page 0 program byte. 0xFF is manual or idle, not program 0.
 // pyrainbird maps every value above 4 to 0, which erases that case.
 static constexpr uint8_t QUEUE_PROGRAM_NONE = 0xFF;
-
-struct QueueProgram {
-  bool none{false};
-  uint8_t index{0};
-};
-
-QueueProgram queue_program(uint8_t byte);
 
 // NAK code bit 0, from the pyrainbird docs: the command is not supported. SPEC question 15
 // is still open: the TM2 may not use the other bits the same way, so nothing reads them.
@@ -71,12 +60,10 @@ static constexpr uint8_t FREQ_EVEN = 3;
 
 static constexpr uint16_t START_TIME_OFF = 0xFFFF;
 
-// Page 00 byte 3: 0 obeys the sensor, 1 bypasses it.
-// Page 20, one byte per zone, is the opposite: 1 obeys, 0 bypasses. No page 20 capture exists yet.
+// Page 00 byte 3: 0 obeys the sensor, 1 bypasses it. Page 20 holds the same per zone, but only
+// pyrainbird's docs describe it, with the opposite sense. Nothing writes it until a capture shows it.
 static constexpr uint8_t GLOBAL_SENSOR_OBEYED = 0x00;
 static constexpr uint8_t GLOBAL_SENSOR_BYPASSED = 0x01;
-static constexpr uint8_t ZONE_SENSOR_OBEYED = 0x01;
-static constexpr uint8_t ZONE_SENSOR_BYPASSED = 0x00;
 
 // Absolute zone, page 0 covering zones 1–32. Bit 0 of each byte is the lowest zone.
 bool station_bit(const uint8_t mask[4], uint8_t page, uint8_t zone);
@@ -112,7 +99,6 @@ ByteBuf request_queue(uint8_t page);
 ByteBuf request_irrigation_state();
 ByteBuf request_rain_sensor();
 ByteBuf request_event_timestamp(uint8_t event);
-ByteBuf request_station_error(uint8_t page);
 ByteBuf request_rain_delay();
 ByteBuf request_run_station(uint16_t zone, uint8_t minutes);
 ByteBuf request_queue_station(uint8_t page, uint8_t zone, uint8_t minutes);
@@ -180,6 +166,7 @@ struct CombinedState {
   uint8_t sensor{0};
   uint8_t irrigation_state{0};
   uint16_t seasonal_adjust{0};
+  // Seconds, though the docs say minutes: 0x0167 after a 6-minute start is 359.
   uint16_t remaining_seconds{0};
   uint8_t active_zone{0};
 };
@@ -188,8 +175,8 @@ struct QueueNow {
   uint8_t queued{0};
   uint16_t remaining_seconds{0};
   uint8_t zone{0};
-  QueueProgram program{};
-  uint8_t active{0};  // 0x01 running, 0x00 idle
+  uint8_t program{QUEUE_PROGRAM_NONE};  // 0 is A; QUEUE_PROGRAM_NONE is manual or idle
+  uint8_t active{0};                    // 0x01 running, 0x00 idle
 };
 
 struct QueueSlot {
@@ -252,7 +239,7 @@ bool parse_rain_sensor(const uint8_t *payload, size_t size, RainSensorState *out
 bool parse_event_timestamp(const uint8_t *payload, size_t size, EventTimestamp *out);
 bool parse_rain_delay(const uint8_t *payload, size_t size, RainDelay *out);
 bool parse_water_budget(const uint8_t *payload, size_t size, WaterBudget *out);
-// The raw page. Which bytes mean what is the model's page map (Model::locate).
+// The raw page. Which bytes mean what is the model's page map (EspTm2Model::locate).
 bool parse_schedule_page(const uint8_t *payload, size_t size, SchedulePage *out);
 
 // One parsed reply. Only the member named by kind is set. The model maps this onto

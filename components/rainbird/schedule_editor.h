@@ -5,7 +5,7 @@
 
 #include "controller_state.h"
 #include "link_core.h"
-#include "model.h"
+#include "model_esp_tm2.h"
 #include "sip_commands.h"
 
 namespace esphome::rainbird {
@@ -23,7 +23,7 @@ struct PageEditLog {
 // earlier. Pure: the session queues each request this asks for and reports the outcome.
 class ScheduleEditor {
  public:
-  explicit ScheduleEditor(const Model &model) : model_(model) {}
+  explicit ScheduleEditor(const EspTm2Model &model) : model_(model) {}
 
   // What on_reply() asks for next.
   enum class Step : uint8_t {
@@ -51,7 +51,7 @@ class ScheduleEditor {
 
   Step fail_(const char *reason);
 
-  const Model &model_;
+  const EspTm2Model &model_;
   bool active_{false};
   Phase phase_{Phase::READING};
   Field field_{Field::RUN_TIME};

@@ -27,6 +27,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -170,10 +171,12 @@ class RainbirdComponent final : public PollingComponent {
  protected:
   friend class RainbirdReceiver;
 
-  // A read-only entity is ESPHome's own class, so its binding is kept here.
-  template<typename T> struct Bound {
+  // A read-only entity is ESPHome's own class, so its binding is kept here, with the value
+  // last published to it.
+  template<typename T, typename V> struct Bound {
     T *entity;
     EntityBinding binding;
+    std::optional<V> shown{};
   };
 
   template<typename F> void for_each_binding_(F &&visit) const;
@@ -184,8 +187,8 @@ class RainbirdComponent final : public PollingComponent {
   void handle_events_();
   void log_controller_();
   void log_link_stats_();
-  void publish_changed_();
-  void publish_remaining_(const ControllerState &state);
+  void publish_();
+  void publish_remaining_();
   void publish_remaining_sensors_(uint32_t seconds);
   void tick_countdown_();
   void check_clock_();
@@ -233,14 +236,14 @@ class RainbirdComponent final : public PollingComponent {
   std::vector<RainbirdDateTime *> datetimes_{};
 #endif
 #ifdef USE_SENSOR
-  std::vector<Bound<sensor::Sensor>> sensors_{};
+  std::vector<Bound<sensor::Sensor, float>> sensors_{};
   std::vector<sensor::Sensor *> remaining_sensors_{};
 #endif
 #ifdef USE_BINARY_SENSOR
-  std::vector<Bound<binary_sensor::BinarySensor>> binary_sensors_{};
+  std::vector<Bound<binary_sensor::BinarySensor, bool>> binary_sensors_{};
 #endif
 #ifdef USE_TEXT_SENSOR
-  std::vector<Bound<text_sensor::TextSensor>> text_sensors_{};
+  std::vector<Bound<text_sensor::TextSensor, std::string>> text_sensors_{};
 #endif
   bool listen_only_{false};
   bool allow_writes_{false};
@@ -261,6 +264,8 @@ class RainbirdComponent final : public PollingComponent {
   std::unique_ptr<Session> session_{};
   TextContext text_{};
   Countdown countdown_{};
+  uint32_t published_revision_{0};  // Session::revision() when the entities were last published
+  uint32_t remaining_readings_{0};  // ControllerState::remaining_readings the countdown last took
   uint32_t base_interval_{0};
 };
 

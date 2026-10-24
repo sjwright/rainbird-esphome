@@ -35,7 +35,7 @@ from .entity_kinds import (
     resolve_kind,
 )
 from .hub_schema import program_letter
-from .models import program_index
+from .models import ESP_TM2, program_index
 from .schemas import entity_schema
 
 
@@ -93,10 +93,10 @@ def _check_scopes(domain: str):
 def platform_schema(domain: str):
     fields = {
         cv.GenerateID(CONF_RAINBIRD_ID): cv.use_id(RainbirdComponent),
-        cv.Optional(CONF_ZONE): cv.int_range(min=1, max=22),
+        cv.Optional(CONF_ZONE): cv.int_range(min=1, max=ESP_TM2.zones),
         cv.Optional(CONF_PROGRAM): program_letter,
         cv.Optional(CONF_DAY): _day_index,
-        cv.Optional(CONF_SLOT): cv.int_range(min=1, max=6),
+        cv.Optional(CONF_SLOT): cv.int_range(min=1, max=ESP_TM2.starts),
     }
     for key in platform_keys(domain):
         # Kinds sharing a key (zone and program `running`) share an entity schema.

@@ -26,10 +26,8 @@ struct Shown {
   ControllerState state;
   Identity identity;
   LinkStatus link;
-  bool identity_changed{false};
-  LinkChanges link_changes{};
 
-  Readout view() const { return Readout{state, identity, link, identity_changed, link_changes}; }
+  Readout view() const { return Readout{state, identity, link}; }
 };
 
 static TextContext yaml_text() {
@@ -91,14 +89,12 @@ TEST_CASE("each binding asks the poll plan for its fields and schedule pages") {
   note_binding(model, bind(EntityKind::RUN_TIME, 12, 1), &pages);
   note_binding(model, bind(EntityKind::FREQUENCY, NO_ZONE, 1), &pages);
   note_binding(model, bind(EntityKind::START_TIME, NO_ZONE, 2, 3), &pages);
-  note_binding(model, bind(EntityKind::ZONE_BYPASS, 5), &pages);
   CHECK(pages.pages.has(0x80));
   CHECK_FALSE(pages.pages.has(0x81));
   CHECK(pages.pages.has(0x85));
   CHECK(pages.pages.has(0x11));
   CHECK_FALSE(pages.pages.has(0x10));
   CHECK(pages.pages.has(0x62));
-  CHECK(pages.pages.has(0x20));
   CHECK_FALSE(pages.pages.has(0x00));
 }
 
@@ -128,19 +124,12 @@ TEST_CASE("zone, watering, sensor and enabled states come from 3F and 4C") {
   CHECK_FALSE(on);
   REQUIRE(bool_value(bind(EntityKind::WATERING), shown.view(), &on));
   CHECK(on);
-  CHECK(kind_changed(bind(EntityKind::VALVE, 2), shown.view()));
-  CHECK(kind_changed(bind(EntityKind::WATERING), shown.view()));
 
-  shown.state.clear_changed();
   apply(shown.state, "CC 14 0B 23 08 17 E7 00 03 01 01 FF FF 00 00 00");
   REQUIRE(bool_value(bind(EntityKind::RAIN_SENSOR), shown.view(), &on));
   CHECK(on);
   REQUIRE(bool_value(bind(EntityKind::IRRIGATION_ENABLED), shown.view(), &on));
   CHECK(on);
-  CHECK_FALSE(kind_changed(bind(EntityKind::VALVE, 2), shown.view()));
-  CHECK(kind_changed(bind(EntityKind::RAIN_SENSOR), shown.view()));
-  // 4C also carries the active zone, which WATERING shows.
-  CHECK(kind_changed(bind(EntityKind::WATERING), shown.view()));
 }
 
 TEST_CASE("program, remaining time and queue come from 3B") {
@@ -153,7 +142,6 @@ TEST_CASE("program, remaining time and queue come from 3B") {
   CHECK(number == 1);
   REQUIRE(number_value(bind(EntityKind::QUEUED_ZONES), shown.view(), &number));
   CHECK(number == 5);
-  CHECK(kind_changed(bind(EntityKind::QUEUED_ZONES), shown.view()));
   bool on = false;
   REQUIRE(bool_value(bind(EntityKind::PROGRAM_RUNNING, NO_ZONE, 0), shown.view(), &on));
   CHECK(on);
@@ -190,11 +178,9 @@ TEST_CASE("seasonal adjust comes from each program's 30 reply") {
   REQUIRE(number_value(bind(EntityKind::SEASONAL_ADJUST, NO_ZONE, 1), shown.view(), &number));
   CHECK(number == 80);
   CHECK_FALSE(number_value(bind(EntityKind::SEASONAL_ADJUST, NO_ZONE, 0), shown.view(), &number));
-  CHECK(kind_changed(bind(EntityKind::SEASONAL_ADJUST, NO_ZONE, 1), shown.view()));
-  CHECK_FALSE(kind_changed(bind(EntityKind::SEASONAL_ADJUST, NO_ZONE, 0), shown.view()));
 }
 
-TEST_CASE("link and identity entities follow their own change flags") {
+TEST_CASE("link and identity entities show the session's values") {
   Shown shown;
   shown.link.connected_known = true;
   shown.link.connected = true;
@@ -209,23 +195,12 @@ TEST_CASE("link and identity entities follow their own change flags") {
   CHECK(number == 30);
   REQUIRE(number_value(bind(EntityKind::LINK_ERRORS), shown.view(), &number));
   CHECK(number == 2);
-  CHECK_FALSE(kind_changed(bind(EntityKind::CONNECTED), shown.view()));
-  // A new response time republishes only the response time, not the unchanged error count.
-  shown.link_changes.response = true;
-  CHECK(kind_changed(bind(EntityKind::RESPONSE_TIME), shown.view()));
-  CHECK_FALSE(kind_changed(bind(EntityKind::LINK_ERRORS), shown.view()));
-  CHECK_FALSE(kind_changed(bind(EntityKind::CONNECTED), shown.view()));
-  shown.link_changes.connected = true;
-  CHECK(kind_changed(bind(EntityKind::CONNECTED), shown.view()));
-  CHECK_FALSE(kind_changed(bind(EntityKind::MODEL), shown.view()));
 
   shown.identity.model_known = true;
   shown.identity.model.model_id = 0x000A;
   shown.identity.model.protocol_major = 9;
   shown.identity.model.protocol_minor = 12;
-  shown.identity_changed = true;
   std::string text;
-  CHECK(kind_changed(bind(EntityKind::MODEL), shown.view()));
   REQUIRE(text_value(bind(EntityKind::MODEL), shown.view(), yaml_text(), &text));
   CHECK(text == "ESP-TM2 (000A), protocol 9.12");
 }
@@ -267,7 +242,6 @@ TEST_CASE("schedule entities read the page fields they are bound to") {
   CHECK(number == 6);
   REQUIRE(number_value(bind(EntityKind::DAYS_UNTIL_NEXT, NO_ZONE, 0), shown.view(), &number));
   CHECK(number == 1);
-  CHECK(kind_changed(bind(EntityKind::WATERING_DAY, NO_ZONE, 0, 0), shown.view()));
 
   apply(shown.state, "A0 00 00 00 00 04 00");
   REQUIRE(number_value(bind(EntityKind::STATION_DELAY), shown.view(), &number));
@@ -283,9 +257,6 @@ TEST_CASE("schedule entities read the page fields they are bound to") {
   CHECK(minute == 0);
   // An off slot has no time to show.
   CHECK_FALSE(start_time(bind(EntityKind::START_TIME, NO_ZONE, 0, 1), shown.view(), &hour, &minute));
-
-  bool fault = true;
-  CHECK_FALSE(bool_value(bind(EntityKind::ZONE_FAULT, 1), shown.view(), &fault));
 }
 
 TEST_CASE("the controller clock needs both its time and a real date") {

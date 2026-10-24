@@ -77,8 +77,6 @@ class LinkCore {
   bool in_flight() const { return this->busy_; }
   size_t queued() const { return this->count_; }
   size_t queued(Priority priority) const;
-  // Free places in the queue, so a caller can queue several requests or none.
-  size_t space() const { return QUEUE_CAP - this->count_; }
   // Drops every queued request of this priority. The one in flight still completes.
   void drop_queued(Priority priority);
   // Nothing queued, nothing in flight, nothing waiting to be collected.

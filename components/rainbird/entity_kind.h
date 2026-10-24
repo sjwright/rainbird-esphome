@@ -42,13 +42,11 @@ enum class EntityKind : uint8_t {
   RUN_TIME = 33,
   IRRIGATION_SET = 34,
   GLOBAL_BYPASS = 35,
-  ZONE_BYPASS = 36,
-  WATERING_DAY = 37,
-  START_ENABLED = 38,
-  ZONE_FAULT = 39,
-  FREQUENCY = 40,
-  START_TIME = 41,
-  CONTROLLER_CLOCK = 42,
+  WATERING_DAY = 36,
+  START_ENABLED = 37,
+  FREQUENCY = 38,
+  START_TIME = 39,
+  CONTROLLER_CLOCK = 40,
 };
 
 // Zone 0 and program 255 mean "this binding does not use that index".

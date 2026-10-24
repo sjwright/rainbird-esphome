@@ -46,17 +46,17 @@ from .const import (
 )
 from .errors import ConfigError
 from .expand import expand
-from .models import ANY_MODEL_LETTERS, resolve_model
+from .models import ESP_TM2, resolve_model
 from .schemas import entity_schema
 
 
 def program_letter(value):
-    """Any letter some model uses. The hub's model narrows it in final validation."""
     text = cv.string(value).upper()
     # Exact match: `in` on a string is a substring test, so "AB" or "" would pass.
-    if len(text) != 1 or text not in ANY_MODEL_LETTERS:
-        letters = f"{ANY_MODEL_LETTERS[0]}–{ANY_MODEL_LETTERS[-1]}"
-        raise cv.Invalid(f"Program {text} is not a program letter ({letters})")
+    if len(text) != 1 or text not in ESP_TM2.letters:
+        raise cv.Invalid(
+            f"Program {text} is not a program letter for {ESP_TM2.name} ({', '.join(ESP_TM2.letters)})"
+        )
     return text
 
 

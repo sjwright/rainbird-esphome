@@ -7,16 +7,14 @@ namespace esphome::rainbird {
 namespace {
 
 constexpr uint16_t MODEL_IDS[] = {0x0005, 0x000A, 0x010A, 0x0014, 0x0015};
-constexpr const char *FREQUENCY_NAMES[] = {"Custom days", "Cyclic", "Odd days", "Even days"};
 // Value ranges from the ESP-TM2 manual. tests/python/test_entity_kinds.py checks the
 // YAML side's number limits against these, so keep one constant per line in this shape.
 constexpr uint16_t SEASONAL_MIN_PERCENT = 5;  // "from 5% up to 200%"
 constexpr uint16_t SEASONAL_MAX_PERCENT = 200;
 constexpr uint16_t RAIN_DELAY_MAX_DAYS = 14;  // "Suspend watering for up to 14 days"
 constexpr uint8_t RUN_MAX_MINUTES = 255;
-constexpr ModelLimits LIMITS{"ESP-TM2",           STATE_ZONES,          STATE_PROGRAMS,
-                             STATE_STARTS,        SEASONAL_MIN_PERCENT, SEASONAL_MAX_PERCENT,
-                             RAIN_DELAY_MAX_DAYS, RUN_MAX_MINUTES};
+constexpr ModelLimits LIMITS{STATE_ZONES,          STATE_PROGRAMS,      SEASONAL_MIN_PERCENT,
+                             SEASONAL_MAX_PERCENT, RAIN_DELAY_MAX_DAYS, RUN_MAX_MINUTES};
 
 // Entity day index is Monday=0 … Sunday=6. The wire mask's bit 0 is Sunday.
 constexpr uint8_t DAY_MASKS[] = {DAY_MONDAY, DAY_TUESDAY,  DAY_WEDNESDAY, DAY_THURSDAY,
@@ -34,15 +32,10 @@ struct PageFieldSpan {
 };
 
 constexpr PageFieldSpan PAGE_FIELDS[] = {
-    {Field::STATION_DELAY, false, false, 1},
-    {Field::GLOBAL_SENSOR_BYPASS, false, false, 1},
-    {Field::ZONE_SENSOR_BYPASS, true, false, 1},
-    {Field::WATERING_DAY, false, true, 7},
-    {Field::CYCLE_DAYS, false, true, 1},
-    {Field::DAYS_UNTIL_NEXT, false, true, 1},
-    {Field::FREQUENCY, false, true, 1},
-    {Field::START_TIME, false, true, STATE_STARTS},
-    {Field::RUN_TIME, true, true, 1},
+    {Field::STATION_DELAY, false, false, 1},        {Field::GLOBAL_SENSOR_BYPASS, false, false, 1},
+    {Field::WATERING_DAY, false, true, 7},          {Field::CYCLE_DAYS, false, true, 1},
+    {Field::DAYS_UNTIL_NEXT, false, true, 1},       {Field::FREQUENCY, false, true, 1},
+    {Field::START_TIME, false, true, STATE_STARTS}, {Field::RUN_TIME, true, true, 1},
 };
 
 bool status_group(FieldSet used) {
@@ -62,53 +55,39 @@ bool schedule_interest(FieldSet used) {
   return false;
 }
 
-void apply_running_mask(ControllerState *state, uint8_t page, const uint8_t mask[4]) {
-  if (page != 0) {
+// Page 0 of a station mask: zones 1 to 32, of which the TM2 has 12.
+void apply_mask(std::optional<bool> (&zones)[STATE_ZONES], const StationMask &mask) {
+  if (mask.page != 0) {
     return;
   }
   for (uint8_t zone = 1; zone <= STATE_ZONES; zone++) {
-    state->set_zone_running(zone, station_bit(mask, 0, zone));
+    zones[zone - 1] = station_bit(mask.mask, 0, zone);
   }
 }
 
-void apply_available_mask(ControllerState *state, uint8_t page, const uint8_t mask[4]) {
-  if (page != 0) {
-    return;
-  }
-  for (uint8_t zone = 1; zone <= STATE_ZONES; zone++) {
-    state->set_zone_available(zone, station_bit(mask, 0, zone));
-  }
-}
-
-void apply_date(ControllerState *state, const PackedDate &date) {
-  if (date_valid(date)) {
-    state->set_date(date.day, date.month, date.year);
-  } else {
-    state->forget_date();
-  }
+// A date that is not a real date leaves the date unknown until a valid one arrives.
+std::optional<PackedDate> real_date(const PackedDate &date) {
+  return date_valid(date) ? std::optional<PackedDate>(date) : std::nullopt;
 }
 
 }  // namespace
 
-bool read_codec(const ValueCodec &codec, const PageField &field, const uint8_t *data, size_t size, int32_t *value) {
+bool read_codec(CodecKind kind, const PageField &field, const uint8_t *data, size_t size, int32_t *value) {
   if (data == nullptr || value == nullptr || field.width == 0 ||
       static_cast<size_t>(field.offset) + field.width > size) {
     return false;
   }
   const uint8_t *at = data + field.offset;
-  switch (codec.kind) {
+  switch (kind) {
     case CodecKind::U8:
     case CodecKind::GLOBAL_BYPASS:
-    case CodecKind::ZONE_BYPASS:
     case CodecKind::BIT:
-      if (field.width != 1 || (codec.kind == CodecKind::BIT && field.mask == 0)) {
+      if (field.width != 1 || (kind == CodecKind::BIT && field.mask == 0)) {
         return false;
       }
-      if (codec.kind == CodecKind::GLOBAL_BYPASS) {
+      if (kind == CodecKind::GLOBAL_BYPASS) {
         *value = at[0] == GLOBAL_SENSOR_BYPASSED ? 1 : 0;
-      } else if (codec.kind == CodecKind::ZONE_BYPASS) {
-        *value = at[0] == ZONE_SENSOR_BYPASSED ? 1 : 0;
-      } else if (codec.kind == CodecKind::BIT) {
+      } else if (kind == CodecKind::BIT) {
         *value = (at[0] & field.mask) != 0 ? 1 : 0;
       } else {
         *value = at[0];
@@ -121,9 +100,9 @@ bool read_codec(const ValueCodec &codec, const PageField &field, const uint8_t *
         return false;
       }
       uint16_t word = be16(at[0], at[1]);
-      if (codec.kind == CodecKind::START_SLOT) {
+      if (kind == CodecKind::START_SLOT) {
         *value = word == START_TIME_OFF ? -1 : word;
-      } else if (codec.kind == CodecKind::SLOT_ENABLED) {
+      } else if (kind == CodecKind::SLOT_ENABLED) {
         *value = word == START_TIME_OFF ? 0 : 1;
       } else {
         *value = word;
@@ -136,22 +115,19 @@ bool read_codec(const ValueCodec &codec, const PageField &field, const uint8_t *
   return false;
 }
 
-bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value, uint8_t *data, size_t size) {
+bool write_codec(CodecKind kind, const PageField &field, int32_t value, uint8_t *data, size_t size) {
   if (data == nullptr || static_cast<size_t>(field.offset) + field.width > size || field.width == 0) {
     return false;
   }
   uint8_t *at = data + field.offset;
-  switch (codec.kind) {
+  switch (kind) {
     case CodecKind::U8:
     case CodecKind::GLOBAL_BYPASS:
-    case CodecKind::ZONE_BYPASS:
       if (field.width != 1) {
         return false;
       }
-      if (codec.kind == CodecKind::GLOBAL_BYPASS) {
+      if (kind == CodecKind::GLOBAL_BYPASS) {
         *at = value != 0 ? GLOBAL_SENSOR_BYPASSED : GLOBAL_SENSOR_OBEYED;
-      } else if (codec.kind == CodecKind::ZONE_BYPASS) {
-        *at = value != 0 ? ZONE_SENSOR_BYPASSED : ZONE_SENSOR_OBEYED;
       } else if (value < 0 || value > 0xFF) {
         return false;  // refused, not truncated: 256 would be written as 0
       } else {
@@ -173,12 +149,12 @@ bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value,
       if (field.width != 2) {
         return false;
       }
-      if (codec.kind == CodecKind::START_SLOT && value < 0) {
+      if (kind == CodecKind::START_SLOT && value < 0) {
         at[0] = 0xFF;
         at[1] = 0xFF;
         return true;
       }
-      if (value < 0 || value > 0xFFFF || (codec.kind == CodecKind::START_SLOT && value >= 24 * 60)) {
+      if (value < 0 || value > 0xFFFF || (kind == CodecKind::START_SLOT && value >= 24 * 60)) {
         return false;
       }
       at[0] = static_cast<uint8_t>(static_cast<uint16_t>(value) >> 8);
@@ -229,9 +205,6 @@ void EspTm2Model::note_support(const CommandSupport &support, Capabilities *caps
       break;
     case 0x4B:
       caps->queue_run = support.supported;
-      break;
-    case 0x3D:
-      caps->station_error = support.supported;
       break;
     case 0x49:
       caps->controller_state = support.supported;
@@ -297,9 +270,6 @@ void EspTm2Model::slow_poll(const Capabilities &caps, FieldSet used, RequestList
   if (caps.event_timestamp && schedule_interest(used)) {
     out->add(request_event_timestamp(1));
   }
-  if (caps.station_error && used.has(Field::ZONE_FAULT)) {
-    out->add(request_station_error(0));
-  }
 }
 
 std::optional<PageField> EspTm2Model::locate(Field field, uint8_t zone, uint8_t program, uint8_t index) const {
@@ -352,55 +322,31 @@ std::optional<PageField> EspTm2Model::locate(Field field, uint8_t zone, uint8_t 
       located.offset = 3;
       located.width = 1;
       return located;
-    case Field::ZONE_SENSOR_BYPASS:
-      if (zone < 1 || zone > STATE_ZONES) {
-        return std::nullopt;
-      }
-      located.page = 0x20;
-      located.offset = static_cast<uint8_t>(zone - 1);
-      located.width = 1;
-      return located;
     default:
       return std::nullopt;
   }
 }
 
-ValueCodec EspTm2Model::codec(Field field) const {
-  ValueCodec codec;
+CodecKind EspTm2Model::codec(Field field) const {
   switch (field) {
     case Field::RUN_TIME:
     case Field::STATION_DELAY:
-      codec.kind = CodecKind::U16_BE;
-      break;
+      return CodecKind::U16_BE;
     case Field::START_TIME:
-      codec.kind = CodecKind::START_SLOT;
-      break;
+      return CodecKind::START_SLOT;
     case Field::START_ENABLED:
-      codec.kind = CodecKind::SLOT_ENABLED;
-      break;
+      return CodecKind::SLOT_ENABLED;
     case Field::WATERING_DAY:
-      codec.kind = CodecKind::BIT;
-      break;
+      return CodecKind::BIT;
     case Field::GLOBAL_SENSOR_BYPASS:
-      codec.kind = CodecKind::GLOBAL_BYPASS;
-      break;
-    case Field::ZONE_SENSOR_BYPASS:
-      codec.kind = CodecKind::ZONE_BYPASS;
-      break;
+      return CodecKind::GLOBAL_BYPASS;
     case Field::FREQUENCY:
     case Field::CYCLE_DAYS:
     case Field::DAYS_UNTIL_NEXT:
-      codec.kind = CodecKind::U8;
-      break;
+      return CodecKind::U8;
     default:
-      codec.kind = CodecKind::NONE;
-      break;
+      return CodecKind::NONE;
   }
-  return codec;
-}
-
-OptionList EspTm2Model::frequency_options() const {
-  return OptionList{FREQUENCY_NAMES, static_cast<uint8_t>(sizeof(FREQUENCY_NAMES) / sizeof(FREQUENCY_NAMES[0]))};
 }
 
 void EspTm2Model::apply_page_(const SchedulePage &page, ControllerState *state) const {
@@ -430,65 +376,58 @@ void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const 
   }
   switch (reply.kind) {
     case ReplyKind::ACTIVE:
-      apply_running_mask(state, reply.stations.page, reply.stations.mask);
+      apply_mask(state->running, reply.stations);
       break;
     case ReplyKind::STATIONS:
-      apply_available_mask(state, reply.stations.page, reply.stations.mask);
+      apply_mask(state->available, reply.stations);
       break;
     case ReplyKind::COMBINED: {
       const CombinedState &combined = reply.combined;
-      state->set_clock(combined.time.hour, combined.time.minute, combined.time.second);
-      apply_date(state, combined.date);
-      state->set_rain_delay(combined.rain_delay_days);
-      state->set_rain_sensor(combined.sensor);
-      state->set_irrigation(combined.irrigation_state);
-      // The TM2 budgets per program, and only 30/B0 replies fill those cells. The 4C
-      // field is a controller-wide value (FFFF on every capture), so it is not program A's.
-      state->set_remaining_seconds(combined.remaining_seconds);
-      state->set_active_zone(combined.active_zone);
+      state->time = combined.time;
+      state->date = real_date(combined.date);
+      state->rain_delay_days = combined.rain_delay_days;
+      state->rain_sensor = combined.sensor;
+      state->irrigation = combined.irrigation_state;
+      // The TM2 budgets per program, and only 30/B0 replies fill those. The 4C field is a
+      // controller-wide value (FFFF on every capture), so it is not program A's.
+      state->remaining_seconds = combined.remaining_seconds;
+      state->remaining_readings++;
+      state->active_zone = combined.active_zone;
       break;
     }
     case ReplyKind::QUEUE_NOW:
-      state->set_queued_count(reply.queue_now.queued);
-      state->set_remaining_seconds(reply.queue_now.remaining_seconds);
-      state->set_active_zone(reply.queue_now.zone);
-      state->set_program_byte(reply.queue_now.program.none ? QUEUE_PROGRAM_NONE : reply.queue_now.program.index);
+      state->queued_count = reply.queue_now.queued;
+      state->remaining_seconds = reply.queue_now.remaining_seconds;
+      state->remaining_readings++;
+      state->active_zone = reply.queue_now.zone;
+      state->program = reply.queue_now.program;
       break;
-    case ReplyKind::QUEUE_LIST: {
-      QueueItem items[STATE_QUEUE];
-      uint8_t count = reply.queue_list.count;
-      if (count > STATE_QUEUE) {
-        count = STATE_QUEUE;
-      }
-      for (uint8_t i = 0; i < count; i++) {
-        items[i].zone = reply.queue_list.slots[i].zone;
-        items[i].flags = reply.queue_list.slots[i].flags;
-        items[i].seconds = reply.queue_list.slots[i].seconds;
-      }
-      state->set_queue(items, count);
+    case ReplyKind::QUEUE_LIST:
+      state->queue = reply.queue_list;
       break;
-    }
     case ReplyKind::TIME:
-      state->set_clock(reply.time.hour, reply.time.minute, reply.time.second);
+      state->time = reply.time;
       break;
     case ReplyKind::DATE:
-      apply_date(state, reply.date);
+      state->date = real_date(reply.date);
       break;
     case ReplyKind::RAIN_DELAY:
-      state->set_rain_delay(reply.rain_delay.days);
+      state->rain_delay_days = reply.rain_delay.days;
       break;
     case ReplyKind::RAIN_SENSOR:
-      state->set_rain_sensor(reply.rain_sensor.state);
+      state->rain_sensor = reply.rain_sensor.state;
       break;
     case ReplyKind::IRRIGATION:
-      state->set_irrigation(reply.irrigation.state);
+      state->irrigation = reply.irrigation.state;
       break;
     case ReplyKind::BUDGET:
-      state->set_seasonal(reply.budget.program, reply.budget.percent);
+      if (reply.budget.program < STATE_PROGRAMS) {
+        state->seasonal[reply.budget.program] = reply.budget.percent;
+      }
       break;
     case ReplyKind::EVENT:
       if (reply.event.event == 1) {
-        state->set_schedule_changed(reply.event.seconds_since_2000);
+        state->schedule_changed = reply.event.seconds_since_2000;
       }
       break;
     case ReplyKind::SCHEDULE:

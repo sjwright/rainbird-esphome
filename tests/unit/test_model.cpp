@@ -38,103 +38,63 @@ TEST_CASE("ESP-TM2 accepts its model ids only") {
   EspTm2Model model;
   CHECK(model.limits().zones == 12);
   CHECK(model.limits().programs == 3);
-  CHECK(model.limits().starts == 4);
-  CHECK(std::string(model.limits().name) == "ESP-TM2");
   CHECK(model.accepts(0x0005));
   CHECK(model.accepts(0x000A));
   CHECK(model.accepts(0x010A));
   CHECK(model.accepts(0x0014));
   CHECK(model.accepts(0x0015));
   CHECK_FALSE(model.accepts(0x0006));
-
-  OptionList options = model.frequency_options();
-  REQUIRE(options.count == 4);
-  CHECK(std::string(options.names[0]) == "Custom days");
-  CHECK(std::string(options.names[1]) == "Cyclic");
-  CHECK(std::string(options.names[3]) == "Even days");
 }
 
 TEST_CASE("combined state keeps seconds and ignores FFFF seasonal adjust") {
   EspTm2Model model;
   ControllerState state;
   APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00", &state);
-  uint8_t hour = 0;
-  uint8_t minute = 0;
-  uint8_t second = 0;
-  REQUIRE(state.clock(&hour, &minute, &second));
-  CHECK(hour == 20);
-  CHECK(minute == 11);
-  CHECK(second == 35);
-  uint8_t day = 0;
-  uint8_t month = 0;
-  uint16_t year = 0;
-  REQUIRE(state.date(&day, &month, &year));
-  CHECK(day == 8);
-  CHECK(month == 1);
-  CHECK(year == 2023);
-  uint16_t rain = 0;
-  REQUIRE(state.rain_delay(&rain));
-  CHECK(rain == 3);
-  uint8_t sensor = 0xFF;
-  REQUIRE(state.rain_sensor(&sensor));
-  CHECK(sensor == 0);
-  uint8_t irrigation = 0;
-  REQUIRE(state.irrigation(&irrigation));
-  CHECK(irrigation == 1);
-  uint16_t percent = 0;
-  CHECK_FALSE(state.seasonal(0, &percent));
-  uint16_t remaining = 1;
-  REQUIRE(state.remaining_seconds(&remaining));
-  CHECK(remaining == 0);
-  CHECK(state.changed(Field::CLOCK));
-  CHECK(state.changed(Field::REMAINING_TIME));
-
-  state.clear_changed();
-  APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00", &state);
-  CHECK_FALSE(state.changed(Field::CLOCK));
-  CHECK_FALSE(state.changed(Field::REMAINING_TIME));
+  REQUIRE(state.time.has_value());
+  CHECK(state.time->hour == 20);
+  CHECK(state.time->minute == 11);
+  CHECK(state.time->second == 35);
+  REQUIRE(state.date.has_value());
+  CHECK(state.date->day == 8);
+  CHECK(state.date->month == 1);
+  CHECK(state.date->year == 2023);
+  CHECK(state.rain_delay_days == 3);
+  CHECK(state.rain_sensor == 0);
+  CHECK(state.irrigation == 1);
+  CHECK_FALSE(state.seasonal[0].has_value());
+  CHECK(state.remaining_seconds == 0);
 
   ControllerState seconds;
   APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 01 67 00", &seconds);
-  REQUIRE(seconds.remaining_seconds(&remaining));
-  CHECK(remaining == 359);
-  CHECK(remaining != 0x6701);
+  CHECK(seconds.remaining_seconds == 359);
 }
 
 TEST_CASE("a date that is not a real date is unknown, and the rest of the reply still applies") {
   EspTm2Model model;
   ControllerState state;
   APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 00 00 00", &state);
-  state.clear_changed();
   // Month 0.
   APPLY(model, "CC 14 0B 23 08 07 E7 00 05 00 01 FF FF 00 00 00", &state);
-  uint8_t day = 0;
-  uint8_t month = 0;
-  uint16_t year = 0;
-  CHECK_FALSE(state.date(&day, &month, &year));
-  CHECK(state.changed(Field::CLOCK));
-  uint16_t rain = 0;
-  REQUIRE(state.rain_delay(&rain));
-  CHECK(rain == 5);
+  CHECK_FALSE(state.date.has_value());
+  CHECK(state.rain_delay_days == 5);
 
   APPLY(model, "92 13 A7 EA", &state);
-  REQUIRE(state.date(&day, &month, &year));
+  CHECK(state.date.has_value());
   APPLY(model, "92 00 A7 EA", &state);
-  CHECK_FALSE(state.date(&day, &month, &year));
+  CHECK_FALSE(state.date.has_value());
 }
 
-TEST_CASE("every remaining-time reading counts as refreshed, changed or not") {
+TEST_CASE("every remaining-time reading is counted, changed or not") {
   EspTm2Model model;
   ControllerState state;
-  CHECK_FALSE(state.remaining_refreshed());
+  CHECK(state.remaining_readings == 0);
   APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 FF FF 01 67 00", &state);
-  CHECK(state.remaining_refreshed());
-  state.clear_changed();
-  CHECK_FALSE(state.remaining_refreshed());
+  CHECK(state.remaining_readings == 1);
   // A paused controller repeats the value.
   APPLY(model, "CC 14 0B 25 08 17 E7 00 03 00 01 FF FF 01 67 00", &state);
-  CHECK(state.remaining_refreshed());
-  CHECK_FALSE(state.changed(Field::REMAINING_TIME));
+  CHECK(state.remaining_readings == 2);
+  APPLY(model, "BB 00 01 00 01 67 00 00 01 FF 00 01", &state);
+  CHECK(state.remaining_readings == 3);
 }
 
 TEST_CASE("queue FF is idle or manual, and seconds are big-endian") {
@@ -142,104 +102,61 @@ TEST_CASE("queue FF is idle or manual, and seconds are big-endian") {
   ControllerState idle;
   APPLY(model, "BB 00 00 00 00 00 00 00 00 FF 00 00", &idle);
   CHECK(idle.activity() == Activity::IDLE);
-  uint8_t program = 0;
-  REQUIRE(idle.program_byte(&program));
-  CHECK(program == 0xFF);
-  uint8_t zone = 1;
-  REQUIRE(idle.active_zone(&zone));
-  CHECK(zone == 0);
+  CHECK(idle.program == 0xFF);
+  CHECK(idle.active_zone == 0);
 
   ControllerState running;
   APPLY(model, "BB 00 05 00 05 D0 00 00 01 00 00 01", &running);
   CHECK(running.activity() == Activity::PROGRAM);
-  REQUIRE(running.program_byte(&program));
-  CHECK(program == 0);
-  uint16_t remaining = 0;
-  REQUIRE(running.remaining_seconds(&remaining));
-  CHECK(remaining == 1488);
-  CHECK(remaining != 0xD005);
-  uint8_t queued = 0;
-  REQUIRE(running.queued_count(&queued));
-  CHECK(queued == 5);
+  CHECK(running.program == 0);
+  CHECK(running.remaining_seconds == 1488);
+  CHECK(running.queued_count == 5);
 
   ControllerState manual;
   APPLY(model, "BB 00 01 00 00 3C 00 00 01 FF 00 01", &manual);
   CHECK(manual.activity() == Activity::MANUAL);
-  REQUIRE(manual.remaining_seconds(&remaining));
-  CHECK(remaining == 60);
-  REQUIRE(manual.active_zone(&zone));
-  CHECK(zone == 1);
+  CHECK(manual.remaining_seconds == 60);
+  CHECK(manual.active_zone == 1);
 
   ControllerState list;
   APPLY(model, "BB 01 21 05 D0 22 04 B0 23 01 A4 24 04 B0 25 02 58 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00", &list);
-  CHECK(list.queue_count() == 5);
-  QueueItem item;
-  REQUIRE(list.queue_item(0, &item));
-  CHECK(item.zone == 1);
-  CHECK(item.flags == 0x20);
-  CHECK(item.seconds == 1488);
-  REQUIRE(list.queue_item(2, &item));
-  CHECK(item.zone == 3);
-  CHECK(item.seconds == 420);
-  REQUIRE(list.queue_item(4, &item));
-  CHECK(item.zone == 5);
-  CHECK(item.seconds == 600);
-  CHECK(list.changed(Field::QUEUE));
+  REQUIRE(list.queue.has_value());
+  CHECK(list.queue->count == 5);
+  CHECK(list.queue->slots[0].zone == 1);
+  CHECK(list.queue->slots[0].flags == 0x20);
+  CHECK(list.queue->slots[0].seconds == 1488);
+  CHECK(list.queue->slots[2].zone == 3);
+  CHECK(list.queue->slots[2].seconds == 420);
+  CHECK(list.queue->slots[4].zone == 5);
+  CHECK(list.queue->slots[4].seconds == 600);
 }
 
 TEST_CASE("schedule pages fill run times, days and start slots") {
   EspTm2Model model;
   ControllerState state;
   APPLY(model, "A0 00 00 00 00 04 00", &state);
-  uint16_t delay = 1;
-  REQUIRE(state.station_delay(&delay));
-  CHECK(delay == 0);
+  CHECK(state.station_delay == 0);
   // Byte 2 is also the rain delay, but that comes from 4C or 36. Page fields are the editable ones.
-  uint16_t rain = 0;
-  CHECK_FALSE(state.rain_delay(&rain));
-  bool bypassed = true;
-  REQUIRE(state.global_bypass(&bypassed));
-  CHECK_FALSE(bypassed);
+  CHECK_FALSE(state.rain_delay_days.has_value());
+  CHECK(state.global_bypass == false);
 
   APPLY(model, "A0 00 10 6A 06 01 00 64 01", &state);
-  bool on = false;
-  REQUIRE(state.watering_day(0, 0, &on));
-  CHECK(on);
-  REQUIRE(state.watering_day(0, 1, &on));
-  CHECK_FALSE(on);
-  REQUIRE(state.watering_day(0, 6, &on));
-  CHECK_FALSE(on);
-  uint8_t frequency = 0;
-  REQUIRE(state.frequency(0, &frequency));
-  CHECK(frequency == FREQ_CYCLIC);
-  uint8_t cycle = 0;
-  REQUIRE(state.cycle_days(0, &cycle));
-  CHECK(cycle == 6);
-  uint8_t until = 0;
-  REQUIRE(state.days_until(0, &until));
-  CHECK(until == 1);
+  CHECK(state.watering_day[0][0] == true);
+  CHECK(state.watering_day[0][1] == false);
+  CHECK(state.watering_day[0][6] == false);
+  CHECK(state.frequency[0] == FREQ_CYCLIC);
+  CHECK(state.cycle_days[0] == 6);
+  CHECK(state.days_until[0] == 1);
 
   APPLY(model, "A0 00 60 00 F0 FF FF FF FF FF FF", &state);
-  int32_t minutes = 0;
-  REQUIRE(state.start_minutes(0, 0, &minutes));
-  CHECK(minutes == 240);
-  REQUIRE(state.start_enabled(0, 0, &on));
-  CHECK(on);
-  REQUIRE(state.start_minutes(0, 1, &minutes));
-  CHECK(minutes == -1);
-  REQUIRE(state.start_enabled(0, 1, &on));
-  CHECK_FALSE(on);
+  CHECK(state.start_minutes[0][0] == 240);
+  CHECK(state.start_minutes[0][1] == -1);
 
   APPLY(model, "A0 00 80 00 19 00 01 00 00 00 14 00 02 00 00", &state);
-  uint16_t run = 0;
-  REQUIRE(state.run_minutes(1, 0, &run));
-  CHECK(run == 25);
-  REQUIRE(state.run_minutes(1, 1, &run));
-  CHECK(run == 1);
-  REQUIRE(state.run_minutes(2, 0, &run));
-  CHECK(run == 20);
-  REQUIRE(state.run_minutes(2, 2, &run));
-  CHECK(run == 0);
+  CHECK(state.run_minutes[0][0] == 25);
+  CHECK(state.run_minutes[0][1] == 1);
+  CHECK(state.run_minutes[1][0] == 20);
+  CHECK(state.run_minutes[1][2] == 0);
 }
 
 TEST_CASE("locate maps zones onto run-time pages") {
@@ -358,7 +275,6 @@ TEST_CASE("slow poll and schedule pages follow the fields in use") {
   FieldSet used;
   used.add(Field::SEASONAL_ADJUST);
   used.add(Field::RUN_TIME);
-  used.add(Field::ZONE_FAULT);
   used.add(Field::SCHEDULE_CHANGED);
 
   Capabilities caps;
@@ -366,17 +282,12 @@ TEST_CASE("slow poll and schedule pages follow the fields in use") {
   event.command = 0x4A;
   event.supported = true;
   model.note_support(event, &caps);
-  CommandSupport faults;
-  faults.command = 0x3D;
-  faults.supported = true;
-  model.note_support(faults, &caps);
 
   RequestList slow;
   model.slow_poll(caps, used, &slow);
-  expect_requests(slow, {"30 00", "30 01", "30 02", "4A 01", "3D 00"});
+  expect_requests(slow, {"30 00", "30 01", "30 02", "4A 01"});
 
   caps.event_timestamp = false;
-  caps.station_error = false;
   RequestList quiet;
   model.slow_poll(caps, used, &quiet);
   expect_requests(quiet, {"30 00", "30 01", "30 02"});
@@ -386,9 +297,8 @@ TEST_CASE("reading a page and editing it use the same map") {
   // locate() is the only place that knows where a field lives. Write a value with it,
   // read it back with it, and the two must agree for every field, zone, program and slot.
   EspTm2Model model;
-  const Field fields[] = {Field::RUN_TIME,  Field::WATERING_DAY, Field::CYCLE_DAYS,
-                          Field::DAYS_UNTIL_NEXT, Field::FREQUENCY,    Field::START_TIME,
-                          Field::STATION_DELAY,   Field::GLOBAL_SENSOR_BYPASS, Field::ZONE_SENSOR_BYPASS};
+  const Field fields[] = {Field::RUN_TIME,  Field::WATERING_DAY, Field::CYCLE_DAYS,    Field::DAYS_UNTIL_NEXT,
+                          Field::FREQUENCY, Field::START_TIME,   Field::STATION_DELAY, Field::GLOBAL_SENSOR_BYPASS};
   for (Field field : fields) {
     for (uint8_t zone = 0; zone <= STATE_ZONES; zone++) {
       for (uint8_t program = 0; program < STATE_PROGRAMS; program++) {
@@ -413,38 +323,11 @@ TEST_CASE("a non-FFFF 4C budget is not program A's") {
   EspTm2Model model;
   ControllerState state;
   APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 00 50 00 00 00", &state);
-  uint16_t percent = 0;
-  CHECK_FALSE(state.seasonal(0, &percent));
+  CHECK_FALSE(state.seasonal[0].has_value());
   APPLY(model, "B0 00 00 64", &state);
-  REQUIRE(state.seasonal(0, &percent));
-  CHECK(percent == 100);
-  state.clear_changed();
+  CHECK(state.seasonal[0] == 100);
   APPLY(model, "CC 14 0B 23 08 17 E7 00 03 00 01 00 50 00 00 00", &state);
-  REQUIRE(state.seasonal(0, &percent));
-  CHECK(percent == 100);
-  CHECK_FALSE(state.changed(Field::SEASONAL_ADJUST, 0, 0));
-}
-
-TEST_CASE("page 20 fills each zone's rain-sensor bypass") {
-  EspTm2Model model;
-  ControllerState state;
-  // Zone 1 obeys the sensor (01), zone 2 bypasses it (00), the rest obey.
-  APPLY(model, "A0 00 20 01 00 01 01 01 01 01 01 01 01 01 01", &state);
-  bool bypassed = true;
-  REQUIRE(state.zone_bypass(1, &bypassed));
-  CHECK_FALSE(bypassed);
-  REQUIRE(state.zone_bypass(2, &bypassed));
-  CHECK(bypassed);
-  REQUIRE(state.zone_bypass(12, &bypassed));
-  CHECK_FALSE(bypassed);
-  CHECK(state.changed(Field::ZONE_SENSOR_BYPASS, 2));
-
-  // A shorter reply sets only the zones it carries.
-  ControllerState partial;
-  APPLY(model, "A0 00 20 00 01", &partial);
-  REQUIRE(partial.zone_bypass(2, &bypassed));
-  CHECK_FALSE(bypassed);
-  CHECK_FALSE(partial.zone_bypass(3, &bypassed));
+  CHECK(state.seasonal[0] == 100);
 }
 
 TEST_CASE("the start-slot switch turns a slot off but never writes a time") {

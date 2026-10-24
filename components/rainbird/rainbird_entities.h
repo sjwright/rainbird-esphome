@@ -37,6 +37,9 @@ class BoundEntity {
   }
   const EntityBinding &binding() const { return this->binding_; }
 
+  // The value the hub last published to this entity, so an unchanged one is not sent again.
+  std::optional<double> shown{};
+
  protected:
   EntityBinding binding_{};
 };

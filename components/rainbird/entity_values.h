@@ -7,7 +7,7 @@
 #include "clock_sync.h"
 #include "controller_state.h"
 #include "entity_kind.h"
-#include "model.h"
+#include "model_esp_tm2.h"
 #include "session.h"
 
 namespace esphome::rainbird {
@@ -19,20 +19,10 @@ namespace esphome::rainbird {
 // How a kind writes. The same names as Write in entity_kinds.py.
 enum class WritePath : uint8_t { NONE, LOCAL, COMMAND, SCHEDULE_PAGE };
 
-// Where a kind's value comes from, and so which change flag republishes it.
-enum class Source : uint8_t {
-  STATE,     // ControllerState: `field` and `also` changed
-  LINK,      // Session::link()
-  IDENTITY,  // Session::identity()
-};
-
 struct KindInfo {
   EntityKind kind;
   // Shown and polled. For a schedule-page kind, also the field a write edits. NO_FIELD: none.
   Field field;
-  // Also shown: a change republishes the entity, but this kind does not poll it.
-  Field also;
-  Source source;
   WritePath write;
 };
 
@@ -48,15 +38,13 @@ struct EntityBinding {
 
 // Adds what an entity shows to the poll plan (PLAN 6.4): the fields to poll and the schedule
 // pages to read. Set config->experimental and valve_queue first: queue-mode valves need the queue list.
-void note_binding(const Model &model, const EntityBinding &binding, SessionConfig *config);
+void note_binding(const EspTm2Model &model, const EntityBinding &binding, SessionConfig *config);
 
-// Everything an entity can show, and the change flags for what is not in ControllerState.
+// Everything an entity can show.
 struct Readout {
   const ControllerState &state;
   const Identity &identity;
   const LinkStatus &link;
-  bool identity_changed{false};
-  LinkChanges link_changes{};
 };
 
 Readout readout(const Session &session);
@@ -69,9 +57,6 @@ struct TextContext {
   // Seconds since 2000 on the controller's clock to ISO 8601 UTC. Unset: no schedule_changed text.
   std::function<bool(uint32_t seconds_since_2000, std::string *out)> timestamp;
 };
-
-// True when a value the entity shows may have changed since the last clear_changed().
-bool kind_changed(const EntityBinding &binding, const Readout &readout);
 
 // The value to publish. False while it is unknown: nothing is shown until the controller says it.
 bool bool_value(const EntityBinding &binding, const Readout &readout, bool *out);

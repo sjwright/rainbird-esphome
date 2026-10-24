@@ -8,6 +8,7 @@ from esphome.core import ID
 
 from .classes import RainbirdComponent, RainbirdSendRawAction, RainbirdZone, RainbirdZoneAction
 from .const import ACTION_SEND_RAW, ACTION_ZONE_QUEUE, ACTION_ZONE_START, CONF_ZONE
+from .models import ESP_TM2
 
 
 def _payload(value):
@@ -24,8 +25,9 @@ def _zone_action_schema():
     return cv.Schema(
         {
             cv.GenerateID(): cv.use_id(RainbirdComponent),
+            # A number first, so an out-of-range number reports its range rather than a bad id.
             cv.Required(CONF_ZONE): cv.Any(
-                cv.use_id(RainbirdZone), cv.templatable(cv.int_range(min=1, max=22))
+                cv.templatable(cv.int_range(min=1, max=ESP_TM2.zones)), cv.use_id(RainbirdZone)
             ),
             cv.Required(CONF_DURATION): cv.templatable(cv.positive_time_period_milliseconds),
         }

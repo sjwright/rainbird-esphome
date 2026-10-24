@@ -3,7 +3,7 @@
 from esphome.components import esp32
 from esphome.components.remote_base import CONF_RECEIVER_ID, CONF_TRANSMITTER_ID
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_MODEL, CONF_PLATFORM, CONF_RMT_SYMBOLS, CONF_TIME_ID
+from esphome.const import CONF_ID, CONF_PLATFORM, CONF_RMT_SYMBOLS, CONF_TIME_ID
 from esphome.core import CORE
 import esphome.final_validate as fv
 
@@ -33,7 +33,7 @@ from .entity_kinds import (
     platform_keys,
     resolve_kind,
 )
-from .models import MODELS
+from .models import ESP_TM2
 
 CONF_RECEIVE_SYMBOLS = "receive_symbols"
 CONF_NON_BLOCKING = "non_blocking"
@@ -376,7 +376,7 @@ def _check_dependencies(hub: dict) -> None:
 
     Without it the control only logs a warning when used, so the config fails here instead.
     """
-    model = MODELS[str(hub[CONF_MODEL]).upper()]
+    model = ESP_TM2
     bindings = {_generated_binding(item) for item in hub.get(CONF_GENERATED, [])}
     for domain, entry in _platform_entries(hub[CONF_ID]):
         bindings.update(binding for binding, _ in _entry_bindings(entry, domain, model))
@@ -417,20 +417,6 @@ def validate_entity_platform(domain: str):
 
 def _validate_entity_platform(config: dict, domain: str) -> None:
     hub = _declaring(config[CONF_RAINBIRD_ID])
-    model = MODELS[str(hub[CONF_MODEL]).upper()]
-    zone = config.get(CONF_ZONE)
-    program = config.get(CONF_PROGRAM)
-    if isinstance(program, str):
-        program = program.upper()
-    if zone is not None and not 1 <= zone <= model.zones:
-        raise cv.Invalid(f"Zone {zone} is outside 1–{model.zones} for {model.name}")
-    if program is not None and (len(program) != 1 or program not in model.letters):
-        raise cv.Invalid(
-            f"Program {program} is not valid for {model.name} (programs {', '.join(model.letters)})"
-        )
-    slot = config.get(CONF_SLOT)
-    if isinstance(slot, int) and not 1 <= slot <= model.starts:
-        raise cv.Invalid(f"Slot {slot} is outside 1–{model.starts} for {model.name}")
     if (
         domain == "text_sensor"
         and _key(KindId.SCHEDULE_CHANGED) in config
@@ -444,4 +430,4 @@ def _validate_entity_platform(config: dict, domain: str) -> None:
         raise cv.Invalid(
             "sync_clock needs time_id on the rainbird hub: it sets the controller to that clock's local time."
         )
-    _check_duplicates(config, domain, hub, model)
+    _check_duplicates(config, domain, hub, ESP_TM2)

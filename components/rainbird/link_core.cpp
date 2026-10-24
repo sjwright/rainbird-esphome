@@ -1,5 +1,6 @@
 #include "link_core.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "elapsed.h"
@@ -191,14 +192,15 @@ bool LinkCore::on_frame(const uint8_t *payload, size_t size, const Reply *parsed
     this->replies_++;
     this->busy_ = false;
     this->consecutive_failures_ = 0;
-    // Do not start the next request while our duplicate copy may still be on the wire.
-    if (since_sent < this->total_ms_) {
-      this->ready_from_ = this->sent_at_;
-      this->ready_delay_ = this->total_ms_ + this->timing_.gap_ms;
-    } else {
-      this->ready_from_ = now_ms;
-      this->ready_delay_ = this->timing_.gap_ms;
+    // Sent twice, the controller may answer the second copy too. That answer ends no later than
+    // one reply, or one copy, after this one. Wait for it, so it lands with nothing in flight and
+    // counts as a duplicate. Otherwise it would answer an identical next request (SPEC 8.5).
+    uint32_t hold = 0;
+    if (this->total_ms_ > this->first_copy_ms_) {
+      hold = std::max(frame_air_ms(size + REPLY_FRAME_OVERHEAD), this->total_ms_ - this->first_copy_ms_);
     }
+    this->ready_from_ = now_ms;
+    this->ready_delay_ = hold + this->timing_.gap_ms;
     std::memcpy(this->last_reply_, payload, size);
     this->last_reply_size_ = size;
     this->last_reply_at_ = now_ms;

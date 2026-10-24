@@ -10,10 +10,8 @@
 namespace esphome::rainbird {
 
 struct ModelLimits {
-  const char *name;
   uint8_t zones;
   uint8_t programs;
-  uint8_t starts;
   uint16_t seasonal_min_percent;
   uint16_t seasonal_max_percent;
   uint16_t rain_delay_max_days;
@@ -26,7 +24,6 @@ struct Capabilities {
   bool event_timestamp{false};   // 4A
   bool advance{false};           // 42
   bool queue_run{false};         // 4B
-  bool station_error{false};     // 3D
   bool controller_state{false};  // 49, irrigation on/off
   bool test_stations{false};     // 3A
 };
@@ -56,11 +53,6 @@ enum class CodecKind : uint8_t {
   SLOT_ENABLED,
   BIT,
   GLOBAL_BYPASS,  // logical on (bypassed) is wire 0x01
-  ZONE_BYPASS,    // logical on (ignores the sensor) is wire 0x00, the opposite of page 00
-};
-
-struct ValueCodec {
-  CodecKind kind{CodecKind::NONE};
 };
 
 struct PageField {
@@ -70,34 +62,10 @@ struct PageField {
   uint8_t mask{0xFF};
 };
 
-struct OptionList {
-  const char *const *names;
-  uint8_t count;
-};
-
-class Model {
- public:
-  virtual ~Model() = default;
-  virtual const ModelLimits &limits() const = 0;
-  virtual bool accepts(uint16_t model_id) const = 0;
-  virtual void short_poll(const Capabilities &caps, FieldSet used, RequestList *out) const = 0;
-  virtual void slow_poll(const Capabilities &caps, FieldSet used, RequestList *out) const = 0;
-  // The page map: where a schedule field lives. Reading a page and editing one use this
-  // and nothing else, so the two cannot disagree. No value: not a page field, or out of range.
-  virtual std::optional<PageField> locate(Field field, uint8_t zone, uint8_t program, uint8_t index) const = 0;
-  virtual ValueCodec codec(Field field) const = 0;
-  virtual OptionList frequency_options() const = 0;
-  virtual void apply_reply(const Reply &reply, ControllerState *state) const = 0;
-  virtual void note_support(const CommandSupport &support, Capabilities *caps) const = 0;
-  // Copy the page, then change one field. Every other byte stays, including program-page bytes 3 and 4.
-  virtual bool patch(uint8_t page, const uint8_t *data, size_t size, Field field, uint8_t zone, uint8_t program,
-                     uint8_t index, int32_t value, uint8_t *out, size_t *out_size) const = 0;
-};
-
 // The logical value of one page field: minutes, days, 0/1 for a day bit or a bypass, -1 for an
 // off start slot. False when the field does not fit in `size`.
-bool read_codec(const ValueCodec &codec, const PageField &field, const uint8_t *data, size_t size, int32_t *value);
+bool read_codec(CodecKind kind, const PageField &field, const uint8_t *data, size_t size, int32_t *value);
 // The inverse. Other bytes and other bits of the same byte are left as they are.
-bool write_codec(const ValueCodec &codec, const PageField &field, int32_t value, uint8_t *data, size_t size);
+bool write_codec(CodecKind kind, const PageField &field, int32_t value, uint8_t *data, size_t size);
 
 }  // namespace esphome::rainbird

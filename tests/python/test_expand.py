@@ -304,7 +304,7 @@ def test_resolve_model():
     assert model.name == "ESP-TM2"
     assert model.zones == 12
     assert model.letters == "ABC"
-    with pytest.raises(ConfigError, match="not implemented yet"):
+    with pytest.raises(ConfigError, match="Unknown model"):
         resolve_model("ESP-ME")
     with pytest.raises(ConfigError, match="Unknown model"):
         resolve_model("ESP-NOPE")

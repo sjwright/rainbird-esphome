@@ -28,12 +28,6 @@ class Write(Enum):
     SCHEDULE_PAGE = "schedule_page"
 
 
-class Gate(Enum):
-    NONE = "none"
-    ALLOW_WRITES = "allow_writes"
-    EXPERIMENTAL = "experimental"
-
-
 class KindId(IntEnum):
     VALVE = 1
     RUN_DURATION = 2
@@ -70,13 +64,11 @@ class KindId(IntEnum):
     RUN_TIME = 33
     IRRIGATION_SET = 34
     GLOBAL_BYPASS = 35
-    ZONE_BYPASS = 36
-    WATERING_DAY = 37
-    START_ENABLED = 38
-    ZONE_FAULT = 39
-    FREQUENCY = 40
-    START_TIME = 41
-    CONTROLLER_CLOCK = 42
+    WATERING_DAY = 36
+    START_ENABLED = 37
+    FREQUENCY = 38
+    START_TIME = 39
+    CONTROLLER_CLOCK = 40
 
 
 # Zone 0 and program 255 mean "this binding does not use that index".
@@ -105,7 +97,7 @@ _DOMAIN_SUFFIX = {
     "datetime": "datetime",
 }
 
-# Same order as FREQUENCY_NAMES in model_esp_tm2.cpp. The select index is the wire byte.
+# The select index is the wire byte: FREQ_CUSTOM to FREQ_EVEN in sip_commands.h.
 FREQUENCY_OPTIONS = ("Custom days", "Cyclic", "Odd days", "Even days")
 
 _PLURAL_SUFFIX = {
@@ -130,7 +122,6 @@ class EntityKind:
     fan_out: FanOut = FanOut.NONE
     default: bool = False
     write: Write = Write.NONE
-    gate: Gate = Gate.NONE
     limits: tuple[int, int, int] | None = None
     unit: str | None = None
     # Set when the hub key is not `<key>_<domain>` (start_time_switches).
@@ -378,7 +369,6 @@ KINDS = (
         Scope.CONTROLLER,
         "Next zone",
         write=Write.COMMAND,
-        gate=Gate.EXPERIMENTAL,
         icon="mdi:skip-next",
     ),
     EntityKind(
@@ -388,7 +378,6 @@ KINDS = (
         Scope.CONTROLLER,
         "Test all zones",
         write=Write.COMMAND,
-        gate=Gate.EXPERIMENTAL,
         entity_category="diagnostic",
         icon="mdi:test-tube",
     ),
@@ -431,7 +420,6 @@ KINDS = (
         Scope.CONTROLLER,
         "Delay between zones",
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
         # The TM2 manual: "from 1 second to 9 hours". 0 is no delay. The page field is u16 seconds.
         limits=(0, 9 * 3600, 1),
         unit="s",
@@ -457,7 +445,6 @@ KINDS = (
         Scope.PROGRAM,
         "{program} cycle days",
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
         limits=(0, 255, 1),
         unit="d",
     ),
@@ -468,7 +455,6 @@ KINDS = (
         Scope.PROGRAM,
         "{program} days until next run",
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
         limits=(0, 255, 1),
         unit="d",
     ),
@@ -480,7 +466,6 @@ KINDS = (
         "{zone} {program} run time",
         fan_out=FanOut.PROGRAM,
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
         limits=(0, 65535, 1),
         unit="min",
         key_override="run_time_numbers",
@@ -492,7 +477,6 @@ KINDS = (
         Scope.CONTROLLER,
         "Irrigation enabled",
         write=Write.COMMAND,
-        gate=Gate.EXPERIMENTAL,
         icon="mdi:water-check",
     ),
     EntityKind(
@@ -502,18 +486,7 @@ KINDS = (
         Scope.CONTROLLER,
         "Ignore rain sensor",
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
         entity_category="config",
-        icon="mdi:weather-rainy",
-    ),
-    EntityKind(
-        KindId.ZONE_BYPASS,
-        "sensor_bypass",
-        "switch",
-        Scope.ZONE,
-        "{zone} ignores rain sensor",
-        write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
         icon="mdi:weather-rainy",
     ),
     EntityKind(
@@ -524,7 +497,6 @@ KINDS = (
         "{program} {day}",
         fan_out=FanOut.DAY,
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
     ),
     EntityKind(
         KindId.START_ENABLED,
@@ -534,16 +506,7 @@ KINDS = (
         "{program} start {slot} enabled",
         fan_out=FanOut.SLOT,
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
         key_override="start_time_switches",
-    ),
-    EntityKind(
-        KindId.ZONE_FAULT,
-        "fault",
-        "binary_sensor",
-        Scope.ZONE,
-        "{zone} fault",
-        device_class="problem",
     ),
     EntityKind(
         KindId.FREQUENCY,
@@ -552,7 +515,6 @@ KINDS = (
         Scope.PROGRAM,
         "{program} frequency",
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
     ),
     EntityKind(
         KindId.START_TIME,
@@ -562,7 +524,6 @@ KINDS = (
         "{program} start {slot}",
         fan_out=FanOut.SLOT,
         write=Write.SCHEDULE_PAGE,
-        gate=Gate.ALLOW_WRITES,
     ),
     EntityKind(
         KindId.CONTROLLER_CLOCK,

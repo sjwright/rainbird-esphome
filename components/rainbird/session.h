@@ -6,7 +6,7 @@
 
 #include "controller_state.h"
 #include "link_core.h"
-#include "model.h"
+#include "model_esp_tm2.h"
 #include "schedule_editor.h"
 #include "sip_commands.h"
 
@@ -62,14 +62,6 @@ struct LinkStatus {
   uint32_t unexpected{0};
 };
 
-// Which LinkStatus values changed since clear_changed(). Each entity republishes only for its own:
-// a reply that leaves the error count alone does not republish it.
-struct LinkChanges {
-  bool connected{false};
-  bool response{false};
-  bool errors{false};
-};
-
 enum class SessionStage : uint8_t {
   PASSIVE,   // listen_only: decode only
   MANUAL,    // polling off: only send_raw transmits
@@ -105,7 +97,7 @@ enum class ControlOp : uint8_t {
   SET_RAIN_DELAY,
   SET_IRRIGATION,
   TEST_ZONES,
-  SET_CLOCK,  // 11 then 13: both are queued or neither is
+  SET_CLOCK,  // 11, then 13 only once 11 is acknowledged
 };
 
 struct Control {
@@ -123,7 +115,7 @@ struct Control {
 
 enum class ControlResult : uint8_t {
   QUEUED,
-  REFUSED_NOT_READY,     // not identified, model refused, listen-only, or writes off
+  REFUSED_NOT_READY,     // not identified, probe unanswered, queue unread, model refused, listen-only, or writes off
   REFUSED_LINK_DOWN,     // the controller is not answering
   REFUSED_EXPERIMENTAL,  // 42, 3A, 49 and send_raw
   REFUSED_UNSUPPORTED,   // the 04 probe said no
@@ -156,7 +148,7 @@ struct SessionEvent {
 
 class Session {
  public:
-  Session(const Model &model, const SessionConfig &config);
+  Session(const EspTm2Model &model, const SessionConfig &config);
 
   void start(uint32_t now_ms);
   // PollingComponent::update(). Enqueues a poll cycle unless one is pending.
@@ -197,6 +189,8 @@ class Session {
   const Capabilities &capabilities() const { return this->caps_; }
   // True when 04 was refused, so every optional command is assumed until a NAK says otherwise.
   bool capabilities_assumed() const { return this->caps_assumed_; }
+  // False while the 04 probe for this command has had no answer. Its capability is then unknown, not "no".
+  bool capability_known(uint8_t opcode) const { return (this->probes_answered_ & probe_bit_(opcode)) != 0; }
   // The schedule pages read, for the log.
   const PageSet &pages() const { return this->config_.pages; }
   // D12: control and write commands are allowed only for an accepted model id.
@@ -207,13 +201,9 @@ class Session {
   uint32_t clock_serial() const { return this->clock_serial_; }
   uint32_t clock_read_at() const { return this->clock_read_at_; }
 
-  // Change flags for identity() and link(). ControllerState keeps its own per field.
-  bool identity_changed() const { return this->identity_changed_; }
-  const LinkChanges &link_changes() const { return this->link_changes_; }
-  // True when anything may need publishing: a reply was applied, or identity() or link() changed.
-  bool anything_changed() const;
-  // After publishing: clears these and every ControllerState cell.
-  void clear_changed();
+  // Moves on whenever state(), identity() or link() may have changed, so the hub can skip
+  // publishing when nothing did. Each entity still publishes only a value that differs.
+  uint32_t revision() const { return this->revision_; }
 
  private:
   bool enqueue_(const ByteBuf &request, Priority priority, TagKind kind, uint8_t detail = 0,
@@ -230,19 +220,23 @@ class Session {
   bool schedule_due_(uint32_t now_ms) const;
   void read_schedule_(uint32_t now_ms, Priority priority, size_t *count);
   void note_unsupported_(uint8_t opcode);
+  static uint8_t probe_bit_(uint8_t opcode);
+  void retry_probes_();
+  void settle_refused_probes_();
   void note_clock_reading_(uint32_t at_ms);
   bool watering_() const;
   bool ready_for_command_() const;
   bool link_down_() const;
-  ControlResult unsupported_() const;
+  ControlResult unsupported_(uint8_t opcode) const;
   bool enqueue_command_(const ByteBuf &request, uint32_t now_ms, uint8_t program = 0);
   void follow_up_(uint32_t now_ms);
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
+  bool queued_(uint8_t zone) const;
   bool zone_missing_(uint8_t zone) const;
   void fail_edit_(const char *reason);
   void handle_page_(const Completion &done);
 
-  const Model &model_;
+  const EspTm2Model &model_;
   SessionConfig config_;
   LinkCore link_;
   ControllerState state_{};
@@ -256,8 +250,11 @@ class Session {
   bool probe_answered_{false};  // some 04 got an 84 reply
   bool probe_refused_{false};   // some 04 got a NAK
   bool caps_assumed_{false};
-  bool probes_done_{false};
-  bool state_touched_{false};  // a reply was applied since clear_changed()
+  uint8_t probes_answered_{0};   // one bit per probed command: an 84 reply or a NAK came back
+  uint8_t probes_refused_{0};    // probes NAKed and not yet settled (settle_refused_probes_)
+  bool probe_retry_{false};      // the next slow-group cycle asks the unanswered probes again
+  bool date_after_time_{false};  // a clock set: the date goes once the time is acknowledged
+  PackedDate date_to_set_{};
   size_t schedule_pending_{0};
   uint32_t poll_count_{0};
   uint32_t last_schedule_read_{0};
@@ -271,8 +268,7 @@ class Session {
   uint32_t down_since_{0};
   uint32_t last_frame_at_{0};
   bool frame_seen_{false};
-  bool identity_changed_{false};
-  LinkChanges link_changes_{};
+  uint32_t revision_{0};
   uint32_t clock_serial_{0};
   uint32_t clock_read_at_{0};
   bool time_pending_{false};  // a 10 reply waiting for its 12

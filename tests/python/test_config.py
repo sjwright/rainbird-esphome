@@ -274,8 +274,8 @@ def test_send_raw_needs_experimental(tmp_path: Path):
     assert "listen_only" in blob, blob
 
 
-def test_unimplemented_and_unknown_model(tmp_path: Path):
-    _expect_fail(tmp_path, "not implemented yet", model="ESP-ME")
+def test_unknown_model(tmp_path: Path):
+    _expect_fail(tmp_path, "Unknown model", model="ESP-ME")
     _expect_fail(tmp_path, "Unknown model", model="ESP-NOPE")
 
 
@@ -363,9 +363,8 @@ def test_switches_reject_restore_mode(tmp_path: Path):
     extra = """
 switch:
   - platform: rainbird
-    zone: 1
-    sensor_bypass:
-      name: Front bypass
+    rain_sensor_bypass:
+      name: Ignore rain sensor
       restore_mode: RESTORE_DEFAULT_OFF
 """
     _expect_fail(tmp_path, "restore_mode does nothing", extra=extra)
@@ -565,3 +564,16 @@ def test_full_example_validates(tmp_path: Path):
     )
     result = _run(tmp_path / "full.yaml", tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_zone_action_refuses_a_zone_the_model_lacks(tmp_path: Path):
+    extra = """
+button:
+  - platform: template
+    name: Run zone 15
+    on_press:
+      - rainbird.zone.start:
+          zone: 15
+          duration: 1min
+"""
+    _expect_fail(tmp_path, "at most 12", extra=extra)

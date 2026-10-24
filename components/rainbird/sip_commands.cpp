@@ -4,15 +4,6 @@ namespace esphome::rainbird {
 
 uint16_t be16(uint8_t hi, uint8_t lo) { return (static_cast<uint16_t>(hi) << 8) | lo; }
 
-uint16_t queue_seconds(uint8_t hi, uint8_t lo) { return be16(hi, lo); }
-
-QueueProgram queue_program(uint8_t byte) {
-  QueueProgram out;
-  out.none = byte == QUEUE_PROGRAM_NONE;
-  out.index = byte;
-  return out;
-}
-
 bool nak_is_unsupported(uint8_t code) { return (code & 0x01) != 0; }
 
 uint8_t run_time_page(uint8_t zone) {
@@ -129,7 +120,6 @@ ByteBuf request_queue(uint8_t page) { return op_byte(0x3B, page); }
 ByteBuf request_irrigation_state() { return op(0x48); }
 ByteBuf request_rain_sensor() { return op(0x3E); }
 ByteBuf request_event_timestamp(uint8_t event) { return op_byte(0x4A, event); }
-ByteBuf request_station_error(uint8_t page) { return op_byte(0x3D, page); }
 ByteBuf request_rain_delay() { return op(0x36); }
 
 ByteBuf request_run_station(uint16_t zone, uint8_t minutes) {
@@ -301,7 +291,7 @@ bool parse_combined_state(const uint8_t *payload, size_t size, CombinedState *ou
   out->sensor = payload[9];
   out->irrigation_state = payload[10];
   out->seasonal_adjust = be16(payload[11], payload[12]);
-  out->remaining_seconds = queue_seconds(payload[13], payload[14]);
+  out->remaining_seconds = be16(payload[13], payload[14]);
   out->active_zone = payload[15];
   return true;
 }
@@ -311,9 +301,9 @@ bool parse_queue_now(const uint8_t *payload, size_t size, QueueNow *out) {
     return false;
   }
   out->queued = payload[2];
-  out->remaining_seconds = queue_seconds(payload[4], payload[5]);
+  out->remaining_seconds = be16(payload[4], payload[5]);
   out->zone = payload[8];
-  out->program = queue_program(payload[9]);
+  out->program = payload[9];
   out->active = payload[11];
   return true;
 }
@@ -335,7 +325,7 @@ bool parse_queue_list(const uint8_t *payload, size_t size, QueueList *out) {
     QueueSlot &slot = out->slots[out->count];
     slot.zone = raw & 0x1F;
     slot.flags = raw & 0xE0;
-    slot.seconds = queue_seconds(payload[index + 1], payload[index + 2]);
+    slot.seconds = be16(payload[index + 1], payload[index + 2]);
     out->count++;
     index += 3;
   }

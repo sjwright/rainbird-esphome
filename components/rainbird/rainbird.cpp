@@ -60,6 +60,14 @@ bool whole_minutes(float value, uint8_t *minutes) {
   return true;
 }
 
+// True when `value` differs from what was last published, and records it as published.
+template<typename V> bool is_new(std::optional<V> &shown, const V &value) {
+  if (shown == value)
+    return false;
+  shown = value;
+  return true;
+}
+
 const char *stage_text(SessionStage stage) {
   switch (stage) {
     case SessionStage::PASSIVE:
@@ -227,7 +235,7 @@ void RainbirdComponent::update() {
 
 void RainbirdComponent::after_activity_() {
   this->handle_events_();
-  this->publish_changed_();
+  this->publish_();
   this->check_clock_();
 
   // Fast while watering or just after a command (PLAN 6.3). One poller, no second timer.
@@ -297,9 +305,12 @@ void RainbirdComponent::log_controller_() {
   }
   // The 04 answers decide the poll plan and which commands are offered (PLAN 6.3).
   const Capabilities &caps = this->session_->capabilities();
-  ESP_LOGI(TAG, "Controller supports: 4C %s, 4A %s, 42 %s, 4B %s, 3D %s, 49 %s, 3A %s%s", YESNO(caps.combined),
-           YESNO(caps.event_timestamp), YESNO(caps.advance), YESNO(caps.queue_run), YESNO(caps.station_error),
-           YESNO(caps.controller_state), YESNO(caps.test_stations),
+  auto answer = [this](uint8_t opcode, bool supported) {
+    return !this->session_->capability_known(opcode) ? "unknown" : YESNO(supported);
+  };
+  ESP_LOGI(TAG, "Controller supports: 4C %s, 4A %s, 42 %s, 4B %s, 49 %s, 3A %s%s", answer(0x4C, caps.combined),
+           answer(0x4A, caps.event_timestamp), answer(0x42, caps.advance), answer(0x4B, caps.queue_run),
+           answer(0x49, caps.controller_state), answer(0x3A, caps.test_stations),
            this->session_->capabilities_assumed() ? " (04 refused: assumed until a NAK says otherwise)" : "");
   // "00 10 60 80" fits the most a TM2 reads: 14 pages.
   char pages[3 * 16 + 1] = "";
@@ -312,8 +323,7 @@ void RainbirdComponent::log_controller_() {
   ESP_LOGI(TAG, "Schedule pages read: %s", used == 0 ? "none" : pages);
   // 03 00 at startup says which zones the controller has.
   for (const RainbirdZone *zone : this->zones_) {
-    bool available = true;
-    if (this->session_->state().zone_available(zone->get_zone(), &available) && !available) {
+    if (!at(this->session_->state().available, zone->get_zone() - 1).value_or(true)) {
       ESP_LOGW(TAG, "Zone %u (%s) is not on this controller", static_cast<unsigned>(zone->get_zone()),
                this->zone_name_(zone->get_zone()).c_str());
     }
@@ -449,8 +459,7 @@ bool RainbirdComponent::slot_minutes_(uint8_t program, uint8_t index, uint16_t *
 bool RainbirdComponent::start_slot_is_on(uint8_t program, uint8_t index) const {
   if (!this->session_)
     return false;
-  bool on = false;
-  return this->session_->state().start_enabled(program, index, &on) && on;
+  return program < STATE_PROGRAMS && at(this->session_->state().start_minutes[program], index).value_or(-1) >= 0;
 }
 
 bool RainbirdComponent::queue_clock_(uint8_t hour, uint8_t minute, uint8_t second, uint8_t day, uint8_t month,
@@ -634,10 +643,15 @@ void RainbirdComponent::check_clock_() {
   if (!local.is_valid())
     return;
   const ControllerState &state = this->session_->state();
-  WallClock controller;
-  if (!state.clock(&controller.hour, &controller.minute, &controller.second))
+  if (!state.time.has_value())
     return;
-  bool date_valid = state.date(&controller.day, &controller.month, &controller.year);
+  WallClock controller{0, 0, 0, state.time->hour, state.time->minute, state.time->second};
+  bool date_valid = state.date.has_value();
+  if (date_valid) {
+    controller.year = state.date->year;
+    controller.month = state.date->month;
+    controller.day = state.date->day;
+  }
   WallClock here{local.year, local.month, local.day_of_month, local.hour, local.minute, local.second};
   // A UTC-offset change moves local time by an hour, so daylight saving shows up as drift here.
   // WAIT: local midnight is close; the next reading checks again.
@@ -692,29 +706,30 @@ bool RainbirdComponent::local_timestamp_(uint32_t seconds_since_2000, std::strin
 #endif
 }
 
-void RainbirdComponent::publish_changed_() {
+void RainbirdComponent::publish_() {
   // Most passes follow a frame or a loop with nothing new; skip walking every entity then.
-  if (!this->session_->anything_changed())
+  if (this->session_->revision() == this->published_revision_)
     return;
-  const Readout shown = readout(*this->session_);
+  this->published_revision_ = this->session_->revision();
+  const Readout values = readout(*this->session_);
 #ifdef USE_SWITCH
   for (auto *entity : this->switches_) {
     bool value = false;
-    if (kind_changed(entity->binding(), shown) && bool_value(entity->binding(), shown, &value))
+    if (bool_value(entity->binding(), values, &value) && is_new(entity->shown, static_cast<double>(value)))
       entity->publish_state(value);
   }
 #endif
 #ifdef USE_NUMBER
   for (auto *entity : this->numbers_) {
     float value = 0;
-    if (kind_changed(entity->binding(), shown) && number_value(entity->binding(), shown, &value))
+    if (number_value(entity->binding(), values, &value) && is_new(entity->shown, static_cast<double>(value)))
       entity->publish_state(value);
   }
 #endif
 #ifdef USE_BINARY_SENSOR
   for (auto &bound : this->binary_sensors_) {
     bool value = false;
-    if (kind_changed(bound.binding, shown) && bool_value(bound.binding, shown, &value))
+    if (bool_value(bound.binding, values, &value) && is_new(bound.shown, value))
       bound.entity->publish_state(value);
   }
 #endif
@@ -722,22 +737,22 @@ void RainbirdComponent::publish_changed_() {
   for (auto &bound : this->sensors_) {
     float value = 0;
     // Remaining time has its own countdown rules (publish_remaining_).
-    if (bound.binding.kind != EntityKind::REMAINING_TIME && kind_changed(bound.binding, shown) &&
-        number_value(bound.binding, shown, &value))
+    if (bound.binding.kind != EntityKind::REMAINING_TIME && number_value(bound.binding, values, &value) &&
+        is_new(bound.shown, value))
       bound.entity->publish_state(value);
   }
 #endif
 #ifdef USE_TEXT_SENSOR
   for (auto &bound : this->text_sensors_) {
     std::string text;
-    if (kind_changed(bound.binding, shown) && text_value(bound.binding, shown, this->text_, &text))
+    if (text_value(bound.binding, values, this->text_, &text) && is_new(bound.shown, text))
       bound.entity->publish_state(text);
   }
 #endif
 #ifdef USE_SELECT
   for (auto *entity : this->selects_) {
     uint8_t index = 0;
-    if (kind_changed(entity->binding(), shown) && select_index(entity->binding(), shown, &index))
+    if (select_index(entity->binding(), values, &index) && is_new(entity->shown, static_cast<double>(index)))
       entity->publish_state(index);
   }
 #endif
@@ -745,26 +760,29 @@ void RainbirdComponent::publish_changed_() {
   for (auto *entity : this->times_) {
     uint8_t hour = 0;
     uint8_t minute = 0;
-    if (kind_changed(entity->binding(), shown) && start_time(entity->binding(), shown, &hour, &minute))
+    if (start_time(entity->binding(), values, &hour, &minute) &&
+        is_new(entity->shown, static_cast<double>(hour * 60 + minute)))
       entity->show(hour, minute);
   }
 #endif
 #ifdef USE_DATETIME_DATETIME
   for (auto *entity : this->datetimes_) {
     WallClock clock;
-    if (kind_changed(entity->binding(), shown) && controller_clock(shown, &clock))
+    if (controller_clock(values, &clock) && is_new(entity->shown, static_cast<double>(wall_seconds(clock))))
       entity->show(clock.year, clock.month, clock.day, clock.hour, clock.minute, clock.second);
   }
 #endif
-  this->publish_remaining_(shown.state);
-  this->session_->clear_changed();
+  this->publish_remaining_();
 }
 
-void RainbirdComponent::publish_remaining_(const ControllerState &state) {
+void RainbirdComponent::publish_remaining_() {
 #ifdef USE_SENSOR
-  uint16_t seconds = 0;
-  if (this->remaining_sensors_.empty() || !state.remaining_refreshed() || !state.remaining_seconds(&seconds))
+  const ControllerState &state = this->session_->state();
+  if (this->remaining_sensors_.empty() || state.remaining_readings == this->remaining_readings_ ||
+      !state.remaining_seconds.has_value())
     return;
+  this->remaining_readings_ = state.remaining_readings;
+  uint16_t seconds = *state.remaining_seconds;
   if (!this->countdown_.reading(seconds, millis()))
     return;
   this->publish_remaining_sensors_(seconds);
@@ -774,8 +792,6 @@ void RainbirdComponent::publish_remaining_(const ControllerState &state) {
   } else {
     this->cancel_interval(COUNTDOWN_INTERVAL_ID);
   }
-#else
-  (void) state;
 #endif
 }
 
