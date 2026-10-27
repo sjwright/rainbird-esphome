@@ -7,6 +7,7 @@ from esphome.components import (
     button,
     datetime,
     number,
+    remote_base,
     select,
     sensor,
     switch,
@@ -122,7 +123,12 @@ async def _add_listener(
     # Only the receiver on the controller's TX line feeds state; the monitor just logs.
     cg.add(listener.set_controller(controller))
     receiver = await cg.get_variable(receiver_id)
-    cg.add(receiver.register_listener(listener))
+    # From ESPHome 2026.10 the listener list is sized at codegen, so every listener
+    # has to be counted through add_listener. Earlier versions have no such helper.
+    if hasattr(remote_base, "add_listener"):
+        remote_base.add_listener(receiver, listener)
+    else:
+        cg.add(receiver.register_listener(listener))
 
 
 def _receiver_gpio(receiver_id):

@@ -36,6 +36,7 @@ jobs:
         esphome:
           - "2026.9.0"
           - "2026.9.1"
+          - "2026.10.0"
         config:
           - tests/components/rainbird/test.esp32-idf.yaml
           - tests/components/rainbird/test.esp32-ard.yaml

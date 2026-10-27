@@ -20,7 +20,7 @@ api:
               - logger.log:
                   level: WARN
                   format: "run_zone: minutes must be 1 to 255, not %d"
-                  args: [minutes]
+                  args: ["static_cast<int>(minutes)"]  # int32_t is long on RISC-V
     - action: queue_zone
       variables:
         zone: int
@@ -37,7 +37,7 @@ api:
               - logger.log:
                   level: WARN
                   format: "queue_zone: minutes must be 1 to 255, not %d"
-                  args: [minutes]
+                  args: ["static_cast<int>(minutes)"]  # int32_t is long on RISC-V
     - action: set_rain_delay
       variables:
         days: int
