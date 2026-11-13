@@ -16,60 +16,121 @@ size_t encode_frame(const uint8_t *payload, size_t length, bool reply, uint8_t *
   if (out == nullptr || length > MAX_PAYLOAD || (length > 0 && payload == nullptr)) {
     return 0;
   }
-  size_t size = (reply ? 3 : 2) + 1 + 1 + length + 1 + 1;
-  if (cap < size) {
-    return 0;
-  }
   size_t i = 0;
-  out[i++] = FRAME_PREAMBLE;
-  out[i++] = FRAME_PREAMBLE;
+  bool fits = true;
+  auto put = [&](uint8_t byte) {
+    if (i >= cap) {
+      fits = false;
+      return;
+    }
+    out[i++] = byte;
+  };
+  auto put_escaped = [&](uint8_t byte) {
+    if (frame_needs_escape(byte)) {
+      put(FRAME_ESCAPE);
+      put(static_cast<uint8_t>(byte - FRAME_ESCAPE_OFFSET));
+    } else {
+      put(byte);
+    }
+  };
+  put(FRAME_PREAMBLE);
+  put(FRAME_PREAMBLE);
   if (reply) {
-    out[i++] = FRAME_PREAMBLE;
+    put(FRAME_PREAMBLE);
   }
-  out[i++] = FRAME_START;
-  out[i++] = static_cast<uint8_t>(length);
+  put(FRAME_START);
+  put_escaped(static_cast<uint8_t>(length));
   for (size_t p = 0; p < length; p++) {
-    out[i++] = payload[p];
+    put_escaped(payload[p]);
   }
-  out[i++] = frame_checksum(static_cast<uint8_t>(length), payload);
-  out[i++] = FRAME_END;
-  return i;
+  put_escaped(frame_checksum(static_cast<uint8_t>(length), payload));
+  put(FRAME_END);
+  return fits ? i : 0;
 }
 
-std::vector<Frame> find_frames(const std::vector<uint8_t> &bits) {
-  auto byte_at = [&bits](size_t bit) {
-    uint8_t value = 0;
-    for (size_t i = 0; i < 8; i++) {
-      value = static_cast<uint8_t>((value << 1) | bits[bit + i]);
+namespace {
+
+uint8_t byte_at(const std::vector<uint8_t> &bits, size_t bit) {
+  uint8_t value = 0;
+  for (size_t i = 0; i < 8; i++) {
+    value = static_cast<uint8_t>((value << 1) | bits[bit + i]);
+  }
+  return value;
+}
+
+// One frame whose length byte starts at `bit`. Returns the bits it used, or 0.
+size_t read_frame(const std::vector<uint8_t> &bits, size_t bit, bool unescape, Frame *frame) {
+  size_t at = bit;
+  uint8_t escaped = 0;
+  auto next = [&](uint8_t *out) {
+    if (at + 8 > bits.size()) {
+      return false;
     }
-    return value;
+    uint8_t byte = byte_at(bits, at);
+    at += 8;
+    if (unescape && byte == FRAME_ESCAPE) {
+      if (at + 8 > bits.size()) {
+        return false;
+      }
+      uint8_t code = byte_at(bits, at);
+      at += 8;
+      byte = static_cast<uint8_t>(code + FRAME_ESCAPE_OFFSET);
+      if (!frame_needs_escape(byte)) {
+        return false;  // 1B followed by something that is not 01, 02 or 03
+      }
+      escaped |= frame_escape_bit(byte);
+    }
+    *out = byte;
+    return true;
   };
+  uint8_t length = 0;
+  if (!next(&length) || length > MAX_PAYLOAD) {
+    return 0;
+  }
+  *frame = Frame{};
+  frame->length = length;
+  for (uint8_t i = 0; i < length; i++) {
+    if (!next(&frame->payload[i])) {
+      return 0;
+    }
+  }
+  uint8_t checksum = 0;
+  if (!next(&checksum) || checksum != frame_checksum(length, frame->payload)) {
+    return 0;
+  }
+  if (at + 8 > bits.size() || byte_at(bits, at) != FRAME_END) {
+    return 0;
+  }
+  at += 8;
+  frame->escaped = escaped;
+  return at - bit;
+}
+
+}  // namespace
+
+std::vector<Frame> find_frames(const std::vector<uint8_t> &bits) {
   std::vector<Frame> frames;
   size_t at = 0;
-  // F5 F5 1C and the length byte, then the length decides the rest.
+  // F5 F5 1C, then the length decides the rest.
   while (at + 32 <= bits.size()) {
-    uint8_t length = byte_at(at + 24);
-    // 24-bit preamble, then length, payload, checksum and end.
-    size_t total = 24 + 8 * (static_cast<size_t>(length) + 3);
-    if (byte_at(at) != FRAME_PREAMBLE || byte_at(at + 8) != FRAME_PREAMBLE || byte_at(at + 16) != FRAME_START ||
-        length > MAX_PAYLOAD || at + total > bits.size()) {
+    if (byte_at(bits, at) != FRAME_PREAMBLE || byte_at(bits, at + 8) != FRAME_PREAMBLE ||
+        byte_at(bits, at + 16) != FRAME_START) {
       at++;
       continue;
     }
     Frame frame{};
-    frame.length = length;
-    for (uint8_t i = 0; i < length; i++) {
-      frame.payload[i] = byte_at(at + 32 + static_cast<size_t>(i) * 8);
+    // Plain first, so a controller that does not escape still decodes as it did before.
+    size_t used = read_frame(bits, at + 24, false, &frame);
+    if (used == 0) {
+      used = read_frame(bits, at + 24, true, &frame);
     }
-    uint8_t checksum = byte_at(at + 32 + static_cast<size_t>(length) * 8);
-    uint8_t end = byte_at(at + 40 + static_cast<size_t>(length) * 8);
-    if (checksum != frame_checksum(length, frame.payload) || end != FRAME_END) {
+    if (used == 0) {
       // A preamble inside the bytes this one claimed may still start a real frame.
       at++;
       continue;
     }
     frames.push_back(frame);
-    at += total;
+    at += 24 + used;
   }
   return frames;
 }

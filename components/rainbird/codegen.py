@@ -34,6 +34,7 @@ from .const import (
     CONF_CLOCK_SYNC,
     CONF_EXPERIMENTAL,
     CONF_GENERATED,
+    CONF_HANDSHAKE,
     CONF_LISTEN_ONLY,
     CONF_MAX_DRIFT,
     CONF_MONITOR_RECEIVER_ID,
@@ -151,6 +152,7 @@ async def hub_to_code(config):
     cg.add(var.set_model_name(config[CONF_MODEL]))
     cg.add(var.set_listen_only(config[CONF_LISTEN_ONLY]))
     cg.add(var.set_experimental(config[CONF_EXPERIMENTAL]))
+    cg.add(var.set_handshake(config[CONF_HANDSHAKE]))
     cg.add(var.set_valve_queue(config[CONF_VALVE_SWITCH_MODE] == "queue"))
     cg.add(var.set_allow_writes(config[CONF_SCHEDULE][CONF_ALLOW_WRITES]))
     if CONF_CLOCK_SYNC in config:

@@ -438,6 +438,8 @@ void EspTm2Model::apply_reply(const Reply &reply, ControllerState *state) const 
       break;
     case ReplyKind::ACK:
     case ReplyKind::NAK:
+    case ReplyKind::HANDSHAKE:
+    case ReplyKind::HANDSHAKE_DONE:
     case ReplyKind::MODEL:
     case ReplyKind::SUPPORT:
     case ReplyKind::SERIAL_NUMBER:

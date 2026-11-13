@@ -81,8 +81,43 @@ ByteBuf op_byte(uint8_t opcode, uint8_t arg) {
   return buf;
 }
 
+ByteBuf op_word(uint8_t opcode, uint32_t word) {
+  ByteBuf buf;
+  buf.push(opcode);
+  buf.push(static_cast<uint8_t>(word >> 24));
+  buf.push(static_cast<uint8_t>(word >> 16));
+  buf.push(static_cast<uint8_t>(word >> 8));
+  buf.push(static_cast<uint8_t>(word));
+  return buf;
+}
+
+uint32_t be32(const uint8_t *p) {
+  return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+}
+
 }  // namespace
 
+uint32_t handshake_answer(uint32_t x) {
+  // 13 steps of a 32-bit LFSR: shift left, feed in the parity of the tapped bits.
+  constexpr uint32_t TAPS = 0x80718611;
+  for (int i = 0; i < 13; i++) {
+    uint32_t tapped = x & TAPS;
+    uint32_t parity = 0;
+    while (tapped != 0) {
+      parity ^= 1;
+      tapped &= tapped - 1;
+    }
+    x = (x << 1) | parity;
+    if (x == 0) {
+      x = 0xFFFFFFFF;
+    }
+  }
+  return x;
+}
+
+ByteBuf request_handshake(uint32_t challenge) { return op_word(0x06, challenge); }
+ByteBuf request_handshake_answer(uint32_t answer) { return op_word(0x07, answer); }
 ByteBuf request_model() { return op(0x02); }
 ByteBuf request_stations(uint8_t page) { return op_byte(0x03, page); }
 ByteBuf request_support(uint8_t command) { return op_byte(0x04, command); }
@@ -180,6 +215,15 @@ bool request_write_page(uint8_t page, const uint8_t *data, size_t size, ByteBuf 
   for (size_t i = 0; i < size; i++) {
     out->push(data[i]);
   }
+  return true;
+}
+
+bool parse_handshake(const uint8_t *payload, size_t size, HandshakeChallenge *out) {
+  if (out == nullptr || !exact(payload, size, 9, 0x86)) {
+    return false;
+  }
+  out->answer = be32(payload + 1);
+  out->challenge = be32(payload + 5);
   return true;
 }
 
@@ -408,6 +452,18 @@ bool parse_reply(const uint8_t *payload, size_t size, Reply *out) {
         return false;
       }
       out->kind = ReplyKind::NAK;
+      return true;
+    case 0x86:
+      if (!parse_handshake(payload, size, &out->handshake)) {
+        return false;
+      }
+      out->kind = ReplyKind::HANDSHAKE;
+      return true;
+    case 0x87:
+      if (size != 1) {
+        return false;
+      }
+      out->kind = ReplyKind::HANDSHAKE_DONE;
       return true;
     case 0x82:
       if (!parse_model(payload, size, &out->model)) {

@@ -26,6 +26,7 @@ from .const import (
     CONF_DISABLED,
     CONF_EXPERIMENTAL,
     CONF_GENERATED,
+    CONF_HANDSHAKE,
     CONF_LISTEN_ONLY,
     CONF_MAX_DRIFT,
     CONF_MONITOR_RECEIVER_ID,
@@ -241,6 +242,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_CLOCK_SYNC): _bare_mapping(CLOCK_SCHEMA),
             cv.Optional(CONF_SCHEDULE): _bare_mapping(SCHEDULE_SCHEMA),
             cv.Optional(CONF_EXPERIMENTAL, default=False): cv.boolean,
+            # 06/07 challenge exchange before 02. A controller that refuses 06 skips it.
+            cv.Optional(CONF_HANDSHAKE, default=True): cv.boolean,
             cv.Optional(CONF_ZONE_DEFAULTS): _optional_mapping,
             cv.Optional(CONF_ZONES): _mapping_or_list,
             cv.Optional(CONF_PROGRAM_DEFAULTS): _optional_mapping,

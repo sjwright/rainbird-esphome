@@ -225,3 +225,52 @@ TEST_CASE("a preamble inside a rejected frame is still found") {
   REQUIRE(frames.size() == 1);
   check_payload(frames[0], second);
 }
+
+TEST_CASE("1B, 1C and 1D are escaped on the way out") {
+  uint8_t frame[MAX_FRAME_BYTES];
+  // Set time 12:56:29. 29 is 1D, the end byte.
+  const uint8_t set_time[] = {0x11, 0x0C, 0x38, 0x1D};
+  size_t size = encode_frame(set_time, sizeof(set_time), false, frame, sizeof(frame));
+  CHECK(to_hex(frame, size) == "F5 F5 1C 04 11 0C 38 1B 03 76 1D");
+
+  const uint8_t all[] = {0x1B, 0x1C, 0x1D};
+  size = encode_frame(all, sizeof(all), false, frame, sizeof(frame));
+  // Checksum 03 + 1B + 1C + 1D = 57.
+  CHECK(to_hex(frame, size) == "F5 F5 1C 03 1B 01 1B 02 1B 03 57 1D");
+
+  // A length of 1D is escaped as well.
+  uint8_t long_payload[0x1D] = {};
+  size = encode_frame(long_payload, sizeof(long_payload), false, frame, sizeof(frame));
+  CHECK(to_hex(frame, 6) == "F5 F5 1C 1B 03 00");
+}
+
+TEST_CASE("escaped frames decode, checked by their checksum") {
+  // The 4C reply recorded on 13 Nov 2026 with the clock at 12:56:29.
+  auto wire = from_hex("F5 F5 F5 1C 10 CC 0C 38 1B 03 0D B7 EA 00 00 01 01 FF FF 00 00 00 EB 1D");
+  std::vector<Frame> frames = frames_from_bytes(wire.data(), wire.size());
+  REQUIRE(frames.size() == 1);
+  check_payload(frames[0], from_hex("CC 0C 38 1D 0D B7 EA 00 00 01 01 FF FF 00 00 00"));
+  CHECK(frames[0].escaped == frame_escape_bit(0x1D));
+
+  // What encode_frame writes, find_frames reads back.
+  const uint8_t all[] = {0x1B, 0x1C, 0x1D, 0x00, 0x1B};
+  uint8_t frame[MAX_FRAME_BYTES];
+  size_t size = encode_frame(all, sizeof(all), true, frame, sizeof(frame));
+  frames = frames_from_bytes(frame, size);
+  REQUIRE(frames.size() == 1);
+  check_payload(frames[0], std::vector<uint8_t>(all, all + sizeof(all)));
+  CHECK(frames[0].escaped == (frame_escape_bit(0x1B) | frame_escape_bit(0x1C) | frame_escape_bit(0x1D)));
+
+  // A plain frame still decodes plain, with no escapes noted.
+  auto plain = from_hex("F5 F5 F5 1C 10 CC 0C 38 1E 0D B7 EA 00 00 01 01 FF FF 00 00 00 EC 1D");
+  frames = frames_from_bytes(plain.data(), plain.size());
+  REQUIRE(frames.size() == 1);
+  CHECK(frames[0].escaped == 0);
+
+  // A wrong checksum is still refused, escaped or not.
+  auto bad = from_hex("F5 F5 F5 1C 10 CC 0C 38 1B 03 0D B7 EA 00 00 01 01 FF FF 00 00 00 EC 1D");
+  CHECK(frames_from_bytes(bad.data(), bad.size()).empty());
+  // 1B followed by anything but 01, 02 or 03 is not an escape.
+  auto odd = from_hex("F5 F5 F5 1C 02 01 1B 05 21 1D");
+  CHECK(frames_from_bytes(odd.data(), odd.size()).empty());
+}

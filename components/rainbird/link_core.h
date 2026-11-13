@@ -35,6 +35,7 @@ enum class Delivery : uint8_t {
 
 // Frames to send now, both copies already concatenated with no gap.
 struct Transmission {
+  ByteBuf payload{};  // the request, unescaped, for logging
   uint8_t bytes[2 * MAX_FRAME_BYTES]{};
   size_t size{0};
   uint32_t first_copy_ms{0};  // air time of the first copy

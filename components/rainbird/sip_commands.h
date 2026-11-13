@@ -84,6 +84,14 @@ bool date_valid(const PackedDate &date);
 
 // --- requests ---
 
+// Session handshake, before 02 (SPEC 5.0). Each side sends a 32-bit challenge, most significant
+// byte first, and the other answers with handshake_answer() of it:
+//   06 AAAAAAAA  ->  86 T(A) BBBBBBBB  ->  07 T(B)  ->  87
+// Published by biggestchungus:
+// https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/18
+uint32_t handshake_answer(uint32_t challenge);
+ByteBuf request_handshake(uint32_t challenge);
+ByteBuf request_handshake_answer(uint32_t answer);
 ByteBuf request_model();
 ByteBuf request_stations(uint8_t page);
 ByteBuf request_support(uint8_t command);
@@ -115,6 +123,11 @@ ByteBuf request_read_page(uint8_t page);
 bool request_write_page(uint8_t page, const uint8_t *data, size_t size, ByteBuf *out);
 
 // --- replies ---
+
+struct HandshakeChallenge {
+  uint32_t answer{0};     // the controller's T() of our challenge
+  uint32_t challenge{0};  // the controller's own challenge, for us to answer
+};
 
 struct ModelVersion {
   uint16_t model_id{0};
@@ -221,6 +234,7 @@ struct SchedulePage {
   uint8_t size{0};
 };
 
+bool parse_handshake(const uint8_t *payload, size_t size, HandshakeChallenge *out);
 bool parse_model(const uint8_t *payload, size_t size, ModelVersion *out);
 bool parse_stations(const uint8_t *payload, size_t size, StationMask *out);
 bool parse_support(const uint8_t *payload, size_t size, CommandSupport *out);
@@ -248,6 +262,8 @@ enum class ReplyKind : uint8_t {
   NONE = 0,
   ACK,
   NAK,
+  HANDSHAKE,       // 86: answer and challenge
+  HANDSHAKE_DONE,  // 87
   MODEL,
   STATIONS,
   SUPPORT,
@@ -283,6 +299,7 @@ struct Reply {
   union {
     Ack ack;
     Nak nak;
+    HandshakeChallenge handshake;
     ModelVersion model;
     StationMask stations;
     CommandSupport support;

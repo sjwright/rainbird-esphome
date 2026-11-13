@@ -49,20 +49,16 @@ struct FakeController {
   }
 };
 
-// The payload of the first frame in a transmission: F5 F5 1C len payload chk 1D.
+// The request a transmission carries, unescaped.
 inline std::vector<uint8_t> first_payload(const esphome::rainbird::Transmission &tx) {
-  if (tx.size < 4) {
-    return {};
-  }
-  uint8_t length = tx.bytes[3];
-  return std::vector<uint8_t>(tx.bytes + 4, tx.bytes + 4 + length);
+  return std::vector<uint8_t>(tx.payload.data, tx.payload.data + tx.payload.size);
 }
 
 // Runs the session against the fake until it has been quiet for a while or
 // `limit_ms` has passed. Returns the clock. `poll_every_ms` calls poll() like
 // PollingComponent; 0 means never.
-inline uint32_t run_session(esphome::rainbird::Session &session, FakeController &fake, uint32_t now,
-                            uint32_t limit_ms, uint32_t poll_every_ms = 0) {
+inline uint32_t run_session(esphome::rainbird::Session &session, FakeController &fake, uint32_t now, uint32_t limit_ms,
+                            uint32_t poll_every_ms = 0) {
   using namespace esphome::rainbird;
   uint32_t end = now + limit_ms;
   uint32_t next_poll = now + poll_every_ms;

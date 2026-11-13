@@ -109,6 +109,7 @@ class RainbirdComponent final : public PollingComponent {
   void set_listen_only(bool listen_only) { this->listen_only_ = listen_only; }
   void set_allow_writes(bool allow_writes) { this->allow_writes_ = allow_writes; }
   void set_experimental(bool experimental) { this->experimental_ = experimental; }
+  void set_handshake(bool handshake) { this->handshake_ = handshake; }
   void set_valve_queue(bool valve_queue) { this->valve_queue_ = valve_queue; }
   // Only called when the YAML has a clock_sync block. time_id alone does not sync.
   void set_clock_sync(uint32_t max_drift_ms) {
@@ -180,6 +181,8 @@ class RainbirdComponent final : public PollingComponent {
   };
 
   template<typename F> void for_each_binding_(F &&visit) const;
+  void note_escapes_(const ByteBuf &payload, bool sent);
+  void note_escapes_(uint8_t escapes, bool sent);
   void deliver_frame_(const Frame &frame, const char *which, bool controller);
   void transmit_(const Transmission &tx);
   void release_receiver_pads_();
@@ -248,6 +251,9 @@ class RainbirdComponent final : public PollingComponent {
   bool listen_only_{false};
   bool allow_writes_{false};
   bool experimental_{false};
+  bool handshake_{true};
+  uint8_t escapes_sent_logged_{0};
+  uint8_t escapes_received_logged_{0};
   bool valve_queue_{false};
   bool clock_sync_{false};
   uint32_t max_drift_ms_{30000};

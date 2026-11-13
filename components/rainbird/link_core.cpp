@@ -148,6 +148,7 @@ bool LinkCore::next_transmission(uint32_t now_ms, Transmission *out) {
     return false;
   }
   out->size = first;
+  out->payload = next.request;
   if (this->timing_.repeat_short && next.delivery != Delivery::ONCE && next.request.size == 2) {
     // The second copy follows with no gap. Encoding both as one byte run keeps it gapless.
     std::memcpy(out->bytes + first, out->bytes, first);

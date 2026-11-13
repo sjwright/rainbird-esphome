@@ -6,11 +6,24 @@ the `rainbird` ESPHome component in this repository.
 
 ## Sources and confidence
 
-Two sources feed this document:
+Four sources feed this document:
 
 - **WIRE.md**: oscilloscope captures of a real LNK2 module talking to an
   ESP-TM2. It covers the physical layer and framing, and it confirms that the
   payloads are ordinary Rain Bird SIP commands.
+- **ESP-ME3 teardown** by **adidooo**:
+  [post #16](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/16)
+  in the Home Assistant community thread "Reverse engineering accessory port
+  Rain Bird ESP-RZX", 6 November 2026. adidooo traced an LNK2 board (firmware
+  3.97) and captured its traffic with an ESP-ME3 (model `0009`, firmware
+  2.12). The ME3 uses a different link layer but the same SIP commands. It is
+  the main source for the LNK2 circuit in section 1 and for section 9.
+- **Session handshake** by **biggestchungus**:
+  [post #18](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/18)
+  in the same thread, 8 November 2026. It gives the `06` / `07` challenge
+  exchange and the T() transform in 5.0. Section 1.5 also cites post #18,
+  and [post #14](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/14)
+  by **banoz**, on the LNK2's firmware.
 - **pyrainbird** (commit `aac99b0`): a Python library that sends the same SIP
   commands to the LNK2 over WiFi, wrapped in JSON-RPC (`tunnelSip`). Its
   command schema (`pyrainbird/resources/sipcommands.yaml`), decoders
@@ -31,6 +44,8 @@ Each fact below carries a confidence tag:
 | **[code]** | Implemented in pyrainbird's encoder or decoder, but no capture backs the detail |
 | **[doc]** | Stated only in pyrainbird's docs or in the command names it extracted from the Rain Bird app |
 | **[inferred]** | Worked out in this document from the evidence; not stated anywhere |
+| **[reported]** | Posted or told to us by someone else, with no capture of our own or pyrainbird source yet. The source is named where it is used. |
+| **[ME3]** | From adidooo's ESP-ME3 teardown ([post #16](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/16)). Measured on an ME3, so it applies to the TM2 only where the hardware is shared |
 
 Where sources disagree, the conflict is called out with **⚠ Conflict**.
 
@@ -40,19 +55,36 @@ Where sources disagree, the conflict is called out with **⚠ Conflict**.
 
 ### 1.1 Connector
 
-The ESP-TM2 accessory connector is a 5-pin, JST-compatible header.
+The ESP-TM2 accessory connector is a 5-pin header with 2.54 mm pitch. A JST XH
+flylead fits it. WIRE.md calls the pins J1–J5. On the LNK2 board they are pads
+1–5 of connector J1, in the same order. The ESP-ME3 uses the same pinout.
+**[ME3]**
 
-| Pin | Function | Notes |
-|-----|----------|-------|
-| J1 | 24 V AC | Powers the module |
-| J2 | Controller TX | Controller → module, through optocoupler 1 |
-| J3 | Signal return | Common return for both data lines |
-| J4 | Controller RX | Module → controller, through optocoupler 2 |
-| J5 | 24 V AC | Powers the module |
+| Pin | Function | Direction | Idle level vs J3, ESP-ME3 **[ME3]** |
+|-----|----------|-----------|-------------------------------------|
+| J1 | 24 V AC | supply | about 34.5 V AC |
+| J2 | Controller TX | controller → module, through optocoupler 1 | 1.1 V DC with the LNK2 fitted (its LED lit); 0 V with nothing fitted |
+| J3 | COM | return for both data lines | 0 V (reference) |
+| J4 | Controller RX | module → controller, through optocoupler 2 | 3.2 V DC (the controller's pull-up) |
+| J5 | 24 V AC | supply | about 10 V AC |
 
-The LNK2 isolates both data lines with VO617A-2 optocouplers. A replacement
-needs a 24 V AC → 5 V DC supply, an ESP32, two optocouplers and a few
-resistors.
+The controller side of the data lines, as measured on the ME3 **[ME3]**:
+
+- J1 to J5 is about 28 V AC.
+- **J3 is not one leg of the 24 V AC.** It sits between the two AC legs, so
+  don't assume it is earth. Keep both data lines isolated from the ESP32, as
+  the LNK2 does.
+- **J2 drives the receive LED itself.** The controller supplies the current and
+  limits it, so the LED goes straight across J2 and J3 with no series resistor.
+  The current is not yet known.
+- **J4 is pulled up inside the controller**, to about 3.2 V. The transmit
+  optocoupler's transistor pulls it to J3.
+
+The TM2 hasn't been measured. Its idle levels may differ, because its line
+idles in a different state (1.4). See open question 16.
+
+A replacement needs a 24 V AC → 5 V DC supply, an ESP32, two optocouplers and a
+few resistors (1.3).
 
 ### 1.2 Line coding
 
@@ -65,25 +97,85 @@ resistors.
 - No UART-style start or stop bits were reported. Treat each frame as a
   continuous Manchester bitstream of whole bytes. **[inferred]**
 
-### 1.3 Signal polarity at the ESP32
+### 1.3 The LNK2 interface circuit [ME3]
+
+adidooo's ME3 teardown ([post #16](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/16)) traced the LNK2 board. WIRE.md's trace of a TM2's LNK2 agrees
+where they overlap: two VO617A optocouplers, with the module transmitting on
+GPIO26. So it is probably the same board. **[inferred]**
+
+| | Optocoupler 1: receive | Optocoupler 2: transmit |
+|---|---|---|
+| LNK2 part | U2 | U3 |
+| LED | Across J2 and J3, driven by the controller. No series resistor. | 3V3 → LED → 200 Ω → GPIO26 |
+| Transistor | Collector on 3V3, emitter straight to **GPIO25**, no resistor (emitter follower) | Across J4 and J3 |
+| Sense | Current out of J2 reads high at GPIO25 | GPIO26 low lights the LED and pulls J4 to J3 |
+
+- Both paths are **non-inverting**: GPIO26 high leaves J4 high, and current
+  out of J2 reads high at GPIO25.
+- The transmit LED current is about (3.3 − 1.2) / 200 ≈ 10 mA.
+- Both optocouplers sit on the solder side, directly under the J1 pads. U2 is
+  mounted the other way round to U3.
+- ⚠ **Conflict:** WIRE.md reads the parts as **VO617A-2** (current transfer
+  ratio 63–125 %). adidooo's teardown reads **VO617A-4** (160–320 %). They may be
+  different board revisions. For a build, prefer a higher grade (-3 or -4).
+  The controller limits the receive LED current to a value no one has
+  measured, so a higher ratio leaves more margin.
+
+**For our own interface** the receive side does not have to copy the LNK2:
+
+- PLAN.md's build puts the receive transistor's output on a pull-up of a few
+  kΩ. That inverts relative to the LNK2's emitter follower. The receiver locks
+  polarity on its own (1.4), so either works.
+- Whichever topology is used, give the transistor a real load resistor. The
+  LNK2's emitter follower has nothing pulling GPIO25 down, so its falling edge
+  depends on leakage. adidooo fits a 1 kΩ pull-down on their own build
+  (2.2 kΩ if the idle level sits below about 2.5 V). Slow edges skew the
+  208 µs half-bits against the receiver's ±30 % tolerance.
+
+### 1.4 Signal polarity at the ESP32
 
 These observations are at the LNK2's own ESP32 pins:
 
-- The module transmits on **GPIO26**.
-- Replies arrive **inverted** at optocoupler 1's emitter compared with the
-  module's transmit polarity.
+- The module transmits on **GPIO26** and receives on **GPIO25**. **[ME3]**
+- Replies arrive **inverted** at optocoupler 1's emitter (GPIO25) compared
+  with the module's transmit polarity.
 - Replies **start with an extra half-bit** before the first data bit.
 
 A receiver should not hard-code polarity or the starting phase. The `F5`
 preamble bytes (section 2) give it a known pattern to lock onto first.
 **[inferred]**
 
-### 1.4 LNK2 debug pads (for reference only)
+Since the transmit path does not invert (1.3), GPIO26 idling low (1.2) means the
+transmit LED is lit between frames, which holds J4 at J3. The ME3's UART is the
+opposite: GPIO26 idles high and J4 sits at 3.2 V. **[inferred]** A meter on J4
+with the LNK2 fitted and idle would settle it (open question 16).
 
-The LNK2 board exposes its ESP32 programming pins on a castellated edge,
-counted from the top with the connector up: 1 EN, 4 GND, 6 GPIO1 (TX0),
-7 GPIO3 (RX0), 8 3V3, 9 GPIO0. Its firmware is flash-encrypted, so a flash
-dump is not usable. Whether the LNK2 can be reflashed with ESPHome is unknown.
+### 1.5 The LNK2 board
+
+- **Board:** PWBA 691040. **[ME3]**
+- **Parts:** an ESP32-WROOM-32D module (U5, ESP32-D0WD), a switching
+  regulator U1 with a 10 µH inductor L1, a pairing button S1 and LED D3.
+  **[ME3]**
+- **The regulator is not isolated.** The LNK2's ESP32 ground sits on the
+  rectified 24 V AC. **[ME3]** A scope or logic analyser clipped to the LNK2's
+  own pins must float: run it from a battery or an ungrounded supply, and keep
+  its other leads off earth. Otherwise the rectified AC shorts through earth.
+  Don't assume J3 is earth either (1.1). Float the instrument for any
+  measurement on this port unless you have checked.
+- **Debug pads:** the ESP32 programming pins are on a castellated edge,
+  counted from the top with the connector up: 1 EN, 4 GND, 6 GPIO1 (TX0),
+  7 GPIO3 (RX0), 8 3V3, 9 GPIO0.
+- **Firmware:** flash-encrypted on the WIRE.md unit, so a flash dump is not
+  usable. The ME3 unit was the same, with the key eFuse read-protected.
+  **[ME3]** Two other posters in the same thread disagree. banoz has an
+  identical-looking LNK2 with readable firmware
+  ([post #14](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/14)), and biggestchungus says unencrypted firmware can be
+  read by a fragile method ([post #18](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/18)). **[reported]** Whether the LNK2 can be reflashed with ESPHome is unknown.
+- **Controller firmware updates:** the LNK2's cloud connection can trigger a
+  controller firmware update, according to biggestchungus
+  ([post #18](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/18)). **[reported]** An update could change
+  the session handshake (5.0). Once an ESPHome interface replaces the LNK2,
+  keep the LNK2 off the controller.
 
 ---
 
@@ -106,8 +198,9 @@ Reply    (controller → module):     F5 F5 F5 1C <len> <payload…> <chk> 1D
 | `1D` | 1 | End of frame |
 
 Every captured frame passed this checksum. The receiver should read exactly
-`len` payload bytes rather than scan for `1D`, because `1D` can also appear in
-the payload or checksum. **[inferred]**
+`len` payload bytes rather than scan for `1D`. **[inferred]** `1D` does not in
+fact appear raw inside a frame: the controller escapes it (2.4). **⚠ Conflict**
+with the earlier reading of this section, which assumed it could.
 
 pyrainbird's `tunnelSip` `length` parameter is the same number as `len`, and
 its `data` hex string is the `payload`.
@@ -137,6 +230,40 @@ These were computed from the rule above, not captured.
 - Keep one request in flight at a time. pyrainbird notes that controllers only
   handle one client request at a time. **[doc]**
 
+### 2.4 Byte stuffing [wire] [inferred]
+
+After the `1C` start byte, the controller sends a `1B`, `1C` or `1D` as `1B`
+followed by the byte minus `1A`. The length and checksum count the original
+bytes.
+
+| Byte | On the wire | Seen |
+|------|-------------|------|
+| `1B` | `1B 01` | not yet: inferred |
+| `1C` | `1B 02` | not yet: inferred |
+| `1D` | `1B 03` | **[wire]** 13 Nov 2026 |
+
+Seen once, in a `4C` reply with the clock at 12:56:29
+(`tests/captures/tm2-escaped-reply.txt`):
+
+```
+wire:     F5 F5 F5 1C 10 CC 0C 38 1B 03 0D B7 EA 00 00 01 01 FF FF 00 00 00 EB 1D
+payload:  CC 0C 38 1D 0D B7 EA 00 00 01 01 FF FF 00 00 00          (16 bytes, chk EB)
+```
+
+The frame is one byte longer than `len` says, and `EB` is the checksum of the
+payload with `1D`, not of the bytes on the wire. One sample also fits another rule:
+XOR with `1E` gives `1D → 03` and `1C → 02`, but `1B → 05`.
+
+Unknown: whether requests must be escaped too. The hub escapes them, by the
+same rule, and logs the first time it sends each escape, so a NAK or a timeout
+right after that log line points here. It decodes a reply plain first, then
+with escapes undone, and takes either only with a good checksum and end byte.
+
+**Relevance:** `4C` carries the time, so without this its reply fails at
+:27–:29 seconds, and for three minutes every hour at xx:27–xx:29. Any field
+that reaches 27–29 (minutes, days, run times, schedule bytes) is affected the
+same way.
+
 ---
 
 ## 3. Payload conventions
@@ -150,8 +277,10 @@ These were computed from the rule above, not captured.
   pyrainbird names them `PGM A`, `PGM B` and so on (`data.py`).
 - Zone bitmasks are 4 bytes per page and cover 32 stations. Within each byte,
   **bit 0 is the lowest station**. Byte *n* of page *p* covers stations
-  `32p + 8n + 1` to `32p + 8n + 8`. Example: `3F 00 00 00` = stations 1–6.
-  **[test]**
+  `32p + 8n + 1` to `32p + 8n + 8`. Example: mask bytes `3F 00 00 00` =
+  stations 1–6. **[test]** So a mask is effectively a little-endian u32, the
+  one exception to big-endian. The ME3 reads it the same way: `BF 00 04 00 00 00`
+  while station 3 ran. **[ME3]**
 
 ### 3.2 Packed date [test] [wire]
 
@@ -255,6 +384,52 @@ offsets start at 0, the opcode.
 
 Each command lists its **Relevance**: what it means for irrigation or
 configuration, and what it is good for in this project.
+
+### 5.0 Session handshake
+
+#### `06` / `07` challenge exchange [reported]
+
+Not in pyrainbird. Posted by biggestchungus in
+[post #18](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/18)
+of the Home Assistant thread, 8 November 2026. It came into use here on
+13 November 2026, after a TM2 on our own interface refused every command, `02`
+and `12` included, with NAK `01`. Not yet confirmed on the wire. Each side picks a 32-bit challenge, most significant byte
+first, and the other answers with T() of it:
+
+```
+→ 06 AA AA AA AA          our challenge A
+← 86 T(A) BB BB BB BB     the controller's answer, then its challenge B
+→ 07 T(B)                 our answer
+← 87                      done
+```
+
+T() is 13 steps of a 32-bit LFSR. Each step takes the parity of `x & 0x80718611`,
+shifts `x` left by one (dropping the top bit) with that parity as the new low
+bit, and replaces an all-zero result with `FFFFFFFF`. Example: T(`12345678`) =
+`8ACF17EB`. (Both the algorithm and the example are from biggestchungus.)
+
+T() is linear over GF(2): T(a ⊕ b) = T(a) ⊕ T(b), apart from the all-zero
+case. Flipping one input bit flips 3–11 output bits, about 7 on average.
+**[inferred]** (computed from the definition)
+
+The ME3's LNK2 runs an exchange of the same shape. Over 356 handshakes
+captured by adidooo
+([post #16](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/16)),
+the controller's reply was always `86` plus 8 bytes, and the final reply was
+always `87`. **[ME3]** adidooo could not find the transform and reported that the answer looked random. Their analysis
+treated the module's answer (`07`) as a function of both A and B. It is T(B)
+alone, and A is independent of B, so compared against A it does look random.
+That fits their numbers: about 48 % of bits flipping per input bit, and no
+linear structure. **[inferred]** (This analysis of adidooo's results is ours.)
+Whether the ME3 uses the same mask and step
+count is unconfirmed (section 9).
+
+**Relevance:** the hub runs it before `02` (`handshake: true`, the default).
+A controller that refuses `06` is identified without it. A wrong T(A) from the
+controller is logged and the exchange carries on; a NAK of `07` sends the session
+back to idle, and the next poll starts again with a new challenge. The LNK2
+capture in WIRE.md starts mid-session, so it shows none of this. A controller
+firmware update could change T(); see 1.5.
 
 ### 5.1 Identification and capabilities
 
@@ -485,7 +660,9 @@ ME3 replies (7-byte page 0).
 capture shows `1` while nothing is running: `C8 01` with an empty queue, and
 `CC … 01 …` with no active zone. This is most likely **"irrigation enabled"**:
 the controller is not switched off, so automatic schedules will run.
-**[inferred]** Confirm by switching the controller to OFF.
+**[inferred]** adidooo's ME3 teardown backs this up. It labels `C8 00` as OFF and
+`C8 01` as AUTO, and read `C8 01` while a manual run was watering. **[ME3]**
+Confirm on the TM2 by switching it to OFF.
 
 **Relevance:** Shows whether automatic watering is enabled. Binary sensor
 "Irrigation enabled". Also available as byte 10 of `CC`.
@@ -623,14 +800,17 @@ every source:
   `advance_zone(3)`.
 - The command table extracted from the app calls the byte "station".
 
-Nothing in pyrainbird ever sends `00`. What remains unknown is whether the
-zone named is the one to jump to or the one to skip. **[inferred]**
+Nothing in pyrainbird ever sends `00`, but the ME3's LNK2 does: it sends
+`42 00` and gets `01 42`. **[ME3]** So `00` is probably "advance to the next
+zone", and a zone number picks one. **[inferred]** What remains unknown is
+whether a zone named is the one to jump to or the one to skip.
 
-To find out, try these in order with a queue running:
+To find out, try these in order with a queue running, reading `3B 00` after
+each:
 
-1. the next queued zone (from `3B 01`);
-2. the currently running zone;
-3. `00`.
+1. `00`;
+2. the next queued zone (from `3B 01`);
+3. the currently running zone.
 
 **Relevance:** "Advance to next zone" button, sending the next queued zone's
 number.
@@ -647,7 +827,8 @@ This runs every zone in turn: the TM2 "Test all stations" function.
 ⚠ **Conflict:** pyrainbird's protocol doc says `NN` is the **minutes per
 station**, but pyrainbird's API passes a zone number (`test_zone(zone)`). The
 TM2 front-panel test asks for minutes, so minutes is more likely.
-**[inferred]**
+**[inferred]** adidooo's ME3 teardown lists the byte as minutes and got `01 3A`.
+**[ME3]**
 
 **Relevance:** "Test all zones" button, with a minutes number entity.
 
@@ -953,6 +1134,235 @@ component's debug log will settle most of them.
     10 %, and what does 0 % do?
 15. **NAK code bits**: do the codes the TM2 actually returns match the
     documented bit meanings (3.3)? Record every NAK seen while probing.
+16. **TM2 idle levels** (1.1, 1.4): with the LNK2 fitted and idle, measure J2
+    and J4 against J3 with a meter. Does J4 sit at J3, as inferred, or at about
+    3.2 V, as on the ME3?
+17. **Receive LED current** (1.3): how much current does J2 deliver into an
+    LED? Measure it with a meter in series with optocoupler 1's LED. It
+    decides which optocoupler grade and load resistor give clean edges.
+
+---
+
+## 9. ESP-ME3 notes (for future support)
+
+This section collects what adidooo's ESP-ME3 teardown
+([post #16](https://community.home-assistant.io/t/reverse-engineering-accessory-port-rain-bird-esp-rzx/998452/16)) found, as a starting point for ME3 support. Everything
+here is **[ME3]** unless it is tagged otherwise. It comes from one person's
+captures. We have not checked any of it.
+
+### 9.1 What is shared with the TM2
+
+- The connector and pinout (1.1).
+- The LNK2 board and its interface circuit (1.3, 1.5).
+- The SIP payloads (sections 3 and 5): the same opcodes, reply = request +
+  `0x80`, ACK `01 <op>`, NAK `00 <op> …`.
+- The handshake opcodes `06` / `86` / `07` / `87` (5.0).
+
+What differs is the link layer (9.2) and how schedules are stored (9.5).
+
+### 9.2 Link layer
+
+- **UART**, 9600 baud, 8N1, LSB first, 3.3 V logic. Idles high. Not inverted
+  at the LNK2's ESP32 pins.
+- The module is the master. The controller answers 6–40 ms after each
+  request, and the LNK2 sends a request about every 100 ms.
+- The ME3 does not answer this component's Manchester link. adidooo
+  fitted it in place of the LNK2, polled `02` and `3F`, and
+  power-cycled the controller. There was no reply, and no edges at all.
+
+Frame, in both directions:
+
+```
+1C <len> 00 <payload…> <crc> 1D
+```
+
+| Field | Size | Meaning |
+|-------|------|---------|
+| `1C` | 1 | Start of frame |
+| `len` | 1 | Number of payload bytes. The `00` after it is not counted. |
+| `00` | 1 | adidooo calls it a role byte. `00` in both directions; its meaning is unknown. |
+| `payload` | `len` | SIP command or reply |
+| `crc` | 1 | CRC-8 over `len 00 payload`: polynomial `0x07`, initial value `00`. No reflection and no final XOR **[inferred]**, which matches the captured `87` frame. |
+| `1D` | 1 | End of frame |
+
+Bytes between `1C` and `1D` are stuffed after the CRC is computed:
+
+| On the wire | Means |
+|-------------|-------|
+| `1B 01` | `1C` |
+| `1B 02` | `1B` |
+| `1B 03` | `1D` |
+
+Compared with the TM2: there is no `F5` preamble, the check is a CRC instead
+of a sum, and the frame has the extra `00`. Because `1D` can't appear inside a
+stuffed frame, a receiver can scan for it.
+
+Worked examples, computed from the rules above **[inferred]**:
+
+| Purpose | Frame |
+|---------|-------|
+| Stop irrigation | `1C 01 00 40 AC 1D` |
+| Run station 3 for 1 minute | `1C 04 00 39 00 03 01 93 1D` |
+| Run station 3 for 27 minutes (`1B` is stuffed) | `1C 04 00 39 00 03 1B 02 D5 1D` |
+| Handshake complete: captured, and it checks | `1C 01 00 87 F7 1D` |
+
+### 9.3 Handshake
+
+The controller ignores the command set until the handshake completes, as on
+the TM2 (5.0). The captures match 5.0's shape: the controller's reply is
+always `86` plus 8 bytes, and the final reply is always `87`.
+
+- **First test for ME3 support:** run biggestchungus's T() from 5.0, mask
+  `80718611` and 13 steps, against an ME3.
+- **If it fails:** T() is linear (5.0). Every captured handshake gives two
+  input/output pairs, (A, T(A)) and (B, T(B)), and 32 independent pairs
+  determine a linear map. **[inferred]**
+- **Unexplained:** adidooo saw op `06` in only 54 % of the module's first
+  frames, with about 60 other opcodes in the rest. It could be a capture or
+  un-stuffing problem.
+
+### 9.4 Commands
+
+These are the same as on the TM2 unless listed.
+
+| Op | ME3 | Compared with the TM2 |
+|----|-----|-----------------------|
+| `02` | `82 00 09 02 0C`: model `0009`, version 2.12 | TM2 model IDs are in 4.1 |
+| `03` | `03 00` → `83 00 FF 1F 00 00`: 13 stations | Same layout |
+| `0B` | `8B 03 0B 00 01 B1 00 19 00`: 8 data bytes, layout unknown | The TM2 sends 4 (5.1) |
+| `30` | Programs 0–3 | The TM2 has 3 programs |
+| `3A` | `3A <minutes>` → `01 3A` | Settles the minutes question for the ME3 (5.4) |
+| `3B` | Pages 0–3. Page 0 is the running state and pages 1–3 the queue. The LNK2 reads 2 and 3 only while watering. | WIRE.md shows only page 0 polled |
+| `3D` | Polled with pages 0–2. Unknown here too. | Same |
+| `42` | `42 00` → `01 42` | 5.4 |
+| `48` | `C8 00` = OFF, `C8 01` = AUTO | Supports 5.3's reading |
+| `4B` | `4B <station u16> <minutes>` | 5.4 reads it as `4B PP ZZ MM`. The bytes are the same for stations up to 255. |
+| `4C` | Not polled | The TM2's main status poll |
+| `62` | Polled; reply not described | Not seen on the TM2 |
+| `63` | `63` → `E3 <installed 0/1> 00`: flow sensor fitted | The TM2 has no flow sensor input (section 6) |
+| `64` | `64 <installed 0/1> 00` → `01 64` | Same |
+| `0C` | Object protocol (9.5) | Not used on the TM2 (section 6) |
+| `20` / `21` | Not seen in the captures. Schedules go through `0C`. | The TM2's schedule pages (5.6) |
+
+The LNK2's poll runs about every 13 s, one request at a time:
+
+```
+12        date
+10        time
+0B        firmware version
+03 00     available stations
+30 00–03  water budget, programs A–D
+3B 00     running state
+3B 01     queue
+62        unknown
+63        flow sensor
+3F 00     active stations 1–32
+3F 01     active stations 33–64
+3D 00–02  station errors (?)
+36        rain delay
+3E        rain sensor
+4A 01     event timestamp
+48        irrigation state
+0C        object protocol
+```
+
+On top of that:
+
+- `3B 02` and `3B 03` while watering.
+- Object `0D` (rain sensor active) every 15–20 s.
+- The event log about every 2 minutes.
+- The whole configuration at startup and after any "module" write (9.5).
+
+### 9.5 Object protocol (`0C` / `8C`)
+
+Programs and schedules are read and written as numbered objects, carried in a
+`0C` request and an `8C` reply. pyrainbird calls `0C` UniversalMessageRequest
+(section 6).
+
+**Routing.** adidooo's figure of the full envelope was not readable, so
+where these fields sit in the frame is not known.
+
+| Destination | Source | Use | Read (request / reply) | Write (request / reply) |
+|-------------|--------|-----|------------------------|-------------------------|
+| `08 05 00 00` | `0C 00 00 00` | Configuration | `07` / `08` | `05` / `06` |
+| `01 01 00 00` | `0C 00 00 00` | "Module" | `03` / `04` | `01` / `02` |
+| `01 01 00 00` | `0E 00 00 00` | Event log | | |
+
+**Body, configuration routing:**
+
+```
+read:   07 0B <n> <descr> × n                       → 08 0B <n> (<descr> <type> <values>) × n
+write:  05 0B <n> (<descr> <type> <values>) × n     → 06 0B 00
+```
+
+- `descr`: the object number (u16), a dimension count (u8), then one
+  (start u16, end u16) pair per dimension.
+- `type`: `01` = u8, `02` = u16, `04` = u32.
+- Everything in the body is **little-endian**, unlike the big-endian SIP
+  fields.
+
+**Objects:**
+
+| Object | Dimensions | Meaning |
+|--------|------------|---------|
+| `0A` | zone 0–21 | Cycle minutes (cycle and soak) |
+| `0B` | zone 0–21 | Soak minutes |
+| `0D` | none | Rain sensor active (1) or bypassed (0) |
+| `10` | program 0–3 × day 0–6 | Watering days in custom mode, Sunday first |
+| `11` | program 0–3 | Days left before the next cyclic watering |
+| `12` | program 0–3 | Cyclic interval in days |
+| `13` | program 0–3 | Mode: 0 custom, 2 odd, 3 even, 4 cyclic |
+| `14` | none | Rain delay in days (the same value as `36`) |
+| `15` | program × zone 0–21 | Run time in seconds (u32) |
+| `18` | program 0–3 | Seasonal adjust % (u16, the same value as `30`) |
+| `1D` | program × `[0]` × start 0–5 | Start times in minutes from midnight; 1440 = none |
+
+From the dimensions: 4 programs, up to 22 zones and 6 start times per program.
+
+**Not stored on the controller:** zone names, the "wired" flag per zone, soil
+type, automatic seasonal adjust, the calendar, notifications and WiFi. The
+app, the LNK2 or the cloud keeps these.
+
+### 9.6 Hardware
+
+The ME3 uses the same connector and the same optocoupler arrangement, so a TM2
+interface board should work electrically **[inferred]**. Two things change:
+
+- **Transport:** ESPHome's `uart` at 9600 8N1 on the same two pins, in place
+  of `remote_transmitter` and `remote_receiver`.
+- **Polarity:** the UART needs both ESP32 pins idle-high, with no inversion end
+  to end. A receive stage with a pull-up (1.3) inverts, so set `inverted: true`
+  on that pin, or change the stage to an emitter follower with a pull-down.
+
+adidooo's own build used:
+
+- two PC817C optocouplers (any current transfer ratio of about 100–300 %);
+- 220 Ω on the transmit LED, about 9.5 mA;
+- a 1 kΩ pull-down on the receive output (2.2 kΩ if the idle level sits below
+  about 2.5 V);
+- `uart` at 9600 8N1, with no inversion.
+
+### 9.7 What ME3 support would take here [inferred]
+
+- **A UART transport** beside the Manchester one. Today the Manchester side is
+  tied in at three points:
+  - `sip_frame` holds the F5 framing and the additive checksum;
+  - `LinkCore` includes it and times replies with Manchester airtime
+    (`frame_air_ms`);
+  - `RainbirdComponent` talks to `remote_transmitter` and `remote_receiver`.
+- **An ME3 model** beside `model_esp_tm2`. `Session` includes the TM2 model
+  directly today. The ME3 model would have 4 programs and use the object
+  protocol in place of pages `20` / `21`.
+- **The handshake**, once T() is confirmed for the ME3 (9.3).
+
+### 9.8 Open questions for the ME3
+
+1. Does the ME3 use the same T()?
+2. What is the `00` byte after `len`?
+3. What is the layout of the `0B` reply?
+4. What does `62` read?
+5. Where do the routing fields sit in a `0C` envelope?
+6. Why was only 54 % of the module's first frames op `06`?
 
 ---
 

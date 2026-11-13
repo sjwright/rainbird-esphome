@@ -122,8 +122,64 @@ void Session::start(uint32_t now_ms) {
 }
 
 void Session::identify_() {
+  if (!this->config_.handshake) {
+    this->send_identify_();
+    return;
+  }
+  // A fresh challenge each attempt. Zero is avoided: T() maps it to FFFFFFFF.
+  uint32_t challenge = this->config_.random != nullptr ? this->config_.random() : 0;
+  if (this->config_.random == nullptr) {
+    challenge = 0x12345678u + 0x9E3779B9u * this->handshake_count_++;
+  }
+  if (challenge == 0) {
+    challenge = 1;
+  }
+  this->handshake_challenge_ = challenge;
+  this->set_stage_(SessionStage::HANDSHAKE);
+  this->enqueue_(request_handshake(challenge), Priority::FOLLOW_UP, TagKind::HANDSHAKE, 1);
+}
+
+void Session::send_identify_() {
   this->set_stage_(SessionStage::IDENTIFY);
   this->enqueue_(request_model(), Priority::FOLLOW_UP, TagKind::IDENTIFY);
+}
+
+void Session::handle_handshake_(const Completion &done) {
+  SessionEvent event;
+  event.kind = SessionEventKind::HANDSHAKE;
+  if (done.outcome == Outcome::FAILED) {
+    // Nothing answered. Like a silent 02: wait for the next poll, then start again.
+    this->set_stage_(SessionStage::IDLE);
+    return;
+  }
+  if (tag_detail(done.tag) == 1) {
+    if (done.outcome == Outcome::REPLY && done.reply.kind == ReplyKind::HANDSHAKE) {
+      if (done.reply.handshake.answer != handshake_answer(this->handshake_challenge_)) {
+        // Carry on: what matters is whether the controller accepts our answer to its challenge.
+        event.code = 1;
+        event.reason = "the controller's answer to our challenge is not the expected one";
+        this->push_event_(event);
+      }
+      this->enqueue_(request_handshake_answer(handshake_answer(done.reply.handshake.challenge)), Priority::FOLLOW_UP,
+                     TagKind::HANDSHAKE, 2);
+      return;
+    }
+    // A NAK or any other answer: this controller has no handshake. Identify as before.
+    event.reason = "the controller does not use one";
+    this->push_event_(event);
+    this->send_identify_();
+    return;
+  }
+  if (done.outcome == Outcome::NAK) {
+    event.code = 1;
+    event.reason = "the controller refused our answer";
+    this->push_event_(event);
+    this->set_stage_(SessionStage::IDLE);
+    return;
+  }
+  event.reason = done.reply.kind == ReplyKind::HANDSHAKE_DONE ? "complete" : "complete (no 87)";
+  this->push_event_(event);
+  this->send_identify_();
 }
 
 void Session::restart_() {
@@ -180,6 +236,7 @@ void Session::poll(uint32_t now_ms) {
     case SessionStage::IDLE:
       this->identify_();
       return;
+    case SessionStage::HANDSHAKE:
     case SessionStage::IDENTIFY:
     case SessionStage::PROBE:
     case SessionStage::SCHEDULE:
@@ -428,6 +485,9 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
   }
 
   switch (tag_kind(done.tag)) {
+    case TagKind::HANDSHAKE:
+      this->handle_handshake_(done);
+      return;
     case TagKind::IDENTIFY:
       if (done.outcome == Outcome::FAILED) {
         this->set_stage_(SessionStage::IDLE);

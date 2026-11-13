@@ -15,7 +15,7 @@ SRCS = \
 	../../components/rainbird/clock_sync.cpp \
 	../../components/rainbird/entity_values.cpp
 
-TESTS = test_main.cpp test_manchester.cpp test_frame.cpp test_commands.cpp test_model.cpp test_replay.cpp test_link.cpp test_session.cpp test_schedule_editor.cpp test_clock_sync.cpp test_entity_values.cpp
+TESTS = test_main.cpp test_manchester.cpp test_frame.cpp test_commands.cpp test_model.cpp test_replay.cpp test_link.cpp test_session.cpp test_schedule_editor.cpp test_clock_sync.cpp test_entity_values.cpp test_handshake.cpp
 
 HDRS = \
 	../../components/rainbird/manchester.h \

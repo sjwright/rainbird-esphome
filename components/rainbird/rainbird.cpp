@@ -76,6 +76,8 @@ const char *stage_text(SessionStage stage) {
       return "manual (update_interval: never)";
     case SessionStage::IDLE:
       return "waiting for the controller";
+    case SessionStage::HANDSHAKE:
+      return "handshaking";
     case SessionStage::IDENTIFY:
       return "identifying";
     case SessionStage::PROBE:
@@ -139,6 +141,8 @@ void RainbirdComponent::setup() {
   config.refresh_interval_ms = this->refresh_interval_ms_;
   config.allow_writes = this->allow_writes_;
   config.experimental = this->experimental_;
+  config.handshake = this->handshake_;
+  config.random = random_uint32;
   config.valve_queue = this->valve_queue_;
   config.accept_ids = this->accept_ids_;
   // What the configured entities show decides what is polled and which schedule pages are read (PLAN 6.4).
@@ -292,6 +296,13 @@ void RainbirdComponent::handle_events_() {
       case SessionEventKind::EDIT_FAILED:
         ESP_LOGE(TAG, "Schedule edit failed: %s", event.reason);
         break;
+      case SessionEventKind::HANDSHAKE:
+        if (event.code != 0) {
+          ESP_LOGW(TAG, "Handshake: %s", event.reason);
+        } else {
+          ESP_LOGI(TAG, "Handshake: %s", event.reason);
+        }
+        break;
     }
   }
 }
@@ -343,7 +354,8 @@ void RainbirdComponent::transmit_(const Transmission &tx) {
     return;
   }
   char pretty[format_hex_pretty_size(MAX_PAYLOAD)];
-  ESP_LOGD(TAG, "Send %s", format_hex_pretty_to(pretty, tx.bytes + 4, tx.bytes[3]));
+  ESP_LOGD(TAG, "Send %s", format_hex_pretty_to(pretty, tx.payload.data, tx.payload.size));
+  this->note_escapes_(tx.payload, true);
   // The transmitter pin's inverted: flag is the electrical polarity. Bytes stay normal.
   std::vector<int32_t> timings = manchester_encode(tx.bytes, tx.size, Polarity::NORMAL, Phase::ALIGNED);
   auto call = this->transmitter_->transmit();
@@ -377,8 +389,42 @@ bool RainbirdReceiver::on_receive(remote_base::RemoteReceiveData data) {
   return true;
 }
 
+void RainbirdComponent::note_escapes_(const ByteBuf &payload, bool sent) {
+  // The length and checksum are escaped too, so recompute what encode_frame escaped.
+  uint8_t used = 0;
+  auto note = [&used](uint8_t byte) {
+    if (frame_needs_escape(byte))
+      used |= frame_escape_bit(byte);
+  };
+  note(payload.size);
+  for (uint8_t i = 0; i < payload.size; i++)
+    note(payload.data[i]);
+  note(frame_checksum(payload.size, payload.data));
+  this->note_escapes_(used, sent);
+}
+
+void RainbirdComponent::note_escapes_(uint8_t escapes, bool sent) {
+  // Logged once per byte and direction: only 1D -> 1B 03 in a reply has been seen (SPEC 2.4).
+  uint8_t &logged = sent ? this->escapes_sent_logged_ : this->escapes_received_logged_;
+  uint8_t fresh = escapes & static_cast<uint8_t>(~logged);
+  for (uint8_t byte = FRAME_ESCAPE; byte <= FRAME_END; byte++) {
+    if ((fresh & frame_escape_bit(byte)) == 0)
+      continue;
+    if (sent) {
+      ESP_LOGI(TAG,
+               "Sending %02X escaped as 1B %02X for the first time. A NAK or no answer to this request "
+               "would mean requests are not escaped.",
+               byte, byte - FRAME_ESCAPE_OFFSET);
+    } else {
+      ESP_LOGI(TAG, "The controller escaped %02X as 1B %02X (first time seen)", byte, byte - FRAME_ESCAPE_OFFSET);
+    }
+  }
+  logged |= fresh;
+}
+
 void RainbirdComponent::deliver_frame_(const Frame &frame, const char *which, bool controller) {
   char pretty[format_hex_pretty_size(MAX_PAYLOAD)];
+  this->note_escapes_(frame.escaped, false);
   if (!controller) {
     // The monitor hears another master's requests. They are logged for protocol work and go
     // nowhere else: on_frame and on_nak report the controller's replies (PLAN 4.5).
@@ -820,14 +866,15 @@ void RainbirdComponent::dump_config() {
                 "  Valve mode: %s\n"
                 "  Schedule writes: %s\n"
                 "  Experimental: %s\n"
+                "  Handshake: %s\n"
                 "  Zones: %u\n"
                 "  Programs: %u\n"
                 "  Schedule refresh: %u ms",
                 this->model_name_, this->session_ ? stage_text(this->session_->stage()) : "not started",
                 this->listen_only_ ? "off (listen only)" : "on", YESNO(this->listen_only_),
                 this->valve_queue_ ? "queue" : "start", YESNO(this->allow_writes_), YESNO(this->experimental_),
-                static_cast<unsigned>(this->zones_.size()), static_cast<unsigned>(this->programs_.size()),
-                static_cast<unsigned>(this->refresh_interval_ms_));
+                YESNO(this->handshake_), static_cast<unsigned>(this->zones_.size()),
+                static_cast<unsigned>(this->programs_.size()), static_cast<unsigned>(this->refresh_interval_ms_));
   if (this->clock_sync_) {
     ESP_LOGCONFIG(TAG, "  Clock sync: max drift %u ms", static_cast<unsigned>(this->max_drift_ms_));
   } else {

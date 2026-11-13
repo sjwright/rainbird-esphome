@@ -27,6 +27,11 @@ struct SessionConfig {
   // moves on to the next queued zone (42, with experimental) instead of stopping everything.
   bool valve_queue{false};
   bool allow_writes{false};  // schedule page writes (21)
+  // Exchange challenges (06, 07) before identifying. A controller that refuses 06 is identified
+  // without it. Off here so the host tests start at 02; the YAML option defaults to on.
+  bool handshake{false};
+  // Source of handshake challenges. Null uses a fixed sequence, which is only fit for tests.
+  uint32_t (*random)(){nullptr};
   uint32_t update_interval_ms{15000};
   uint32_t fast_interval_ms{3000};
   uint32_t fast_hold_ms{30000};  // fast polling after a command
@@ -63,12 +68,13 @@ struct LinkStatus {
 };
 
 enum class SessionStage : uint8_t {
-  PASSIVE,   // listen_only: decode only
-  MANUAL,    // polling off: only send_raw transmits
-  IDLE,      // not identified yet, or identification failed; the next poll retries
-  IDENTIFY,  // 02 in flight
-  PROBE,     // 0B, 05, 03 and the 04 probes
-  SCHEDULE,  // first read of the schedule pages in use
+  PASSIVE,    // listen_only: decode only
+  MANUAL,     // polling off: only send_raw transmits
+  IDLE,       // not identified yet, or identification failed; the next poll retries
+  HANDSHAKE,  // 06/07 challenge exchange in flight, before 02
+  IDENTIFY,   // 02 in flight
+  PROBE,      // 0B, 05, 03 and the 04 probes
+  SCHEDULE,   // first read of the schedule pages in use
   RUNNING,
 };
 
@@ -80,8 +86,9 @@ enum class TagKind : uint8_t {
   SCHEDULE = 4,
   POLL = 5,
   RAW = 6,
-  CONTROL = 7,  // a command that may already have been acted on; sent once. The detail is its program.
-  PAGE = 8,     // one schedule edit: read, write, read back
+  CONTROL = 7,    // a command that may already have been acted on; sent once. The detail is its program.
+  PAGE = 8,       // one schedule edit: read, write, read back
+  HANDSHAKE = 9,  // the detail is the step: 1 for 06, 2 for 07
 };
 
 // A control command. Minutes, percent and days share `value`. Clock fields are separate.
@@ -136,6 +143,7 @@ enum class SessionEventKind : uint8_t {
   NAK,          // the controller refused `opcode` with `code`
   PAGE_WRITE,   // a schedule page write is queued and page_write() has its bytes. Log it before it goes.
   EDIT_FAILED,  // a schedule edit stopped; `reason` says why
+  HANDSHAKE,    // the handshake finished or went wrong; `reason` says which, `code` is 1 when it went wrong
 };
 
 struct SessionEvent {
@@ -212,7 +220,9 @@ class Session {
   void push_event_(const SessionEvent &event);
   void set_stage_(SessionStage stage);
   void set_connected_(bool connected, uint32_t now_ms);
-  void identify_();
+  void identify_();  // the handshake when configured, then 02
+  void send_identify_();
+  void handle_handshake_(const Completion &done);
   void restart_();
   void handle_(const Completion &done, uint32_t now_ms);
   void finish_probes_(uint32_t now_ms);
@@ -250,8 +260,10 @@ class Session {
   bool probe_answered_{false};  // some 04 got an 84 reply
   bool probe_refused_{false};   // some 04 got a NAK
   bool caps_assumed_{false};
-  uint8_t probes_answered_{0};   // one bit per probed command: an 84 reply or a NAK came back
-  uint8_t probes_refused_{0};    // probes NAKed and not yet settled (settle_refused_probes_)
+  uint8_t probes_answered_{0};  // one bit per probed command: an 84 reply or a NAK came back
+  uint8_t probes_refused_{0};   // probes NAKed and not yet settled (settle_refused_probes_)
+  uint32_t handshake_challenge_{0};
+  uint32_t handshake_count_{0};  // challenges made without config_.random
   bool probe_retry_{false};      // the next slow-group cycle asks the unanswered probes again
   bool date_after_time_{false};  // a clock set: the date goes once the time is acknowledged
   PackedDate date_to_set_{};
