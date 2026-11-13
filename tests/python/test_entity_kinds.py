@@ -1,35 +1,37 @@
+import importlib.util
 from pathlib import Path
-import re
 
-from rainbird.entity_kinds import KINDS, KindId, Scope, platform_keys, resolve_kind
+from rainbird.entity_kinds import KINDS, KindId, Scope, Write, platform_keys, resolve_kind
+from rainbird.models import ESP_TM2
 
-COMPONENT = Path(__file__).resolve().parents[2] / "components" / "rainbird"
-HEADER = COMPONENT / "entity_kind.h"
-TABLE = COMPONENT / "entity_values.cpp"
-MODEL = COMPONENT / "model_esp_tm2.cpp"
+REPO = Path(__file__).resolve().parents[2]
 
 
-def test_cpp_enum_matches_kind_ids():
-    # The C++ hub switches on these numbers, so the two lists must agree exactly.
-    text = HEADER.read_text()
-    body = text[text.index("enum class EntityKind") :]
-    body = body[: body.index("};")]
-    cpp = {name: int(value) for name, value in re.findall(r"(\w+)\s*=\s*(\d+)", body)}
-    py = {kind.name: int(kind.value) for kind in KindId}
-    assert cpp == py
+def _generator(name: str = "gen_kinds"):
+    spec = importlib.util.spec_from_file_location(name, REPO / "tools" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def test_cpp_kind_table_writes_the_same_way():
-    # entity_values.cpp has one KindInfo row per kind. Its WritePath decides what submit() does
-    # and whether a number is a local setting, so it must match the YAML side's Write.
-    text = TABLE.read_text()
-    text = text[text.index("constexpr KindInfo KINDS[]") :]
-    text = text[: text.index("};")]
-    rows = re.findall(r"\{EntityKind::(\w+), [^{}]*WritePath::(\w+)\}", text)
-    cpp = dict(rows)
-    assert len(cpp) == len(rows), "a kind has two rows"
-    py = {kind.kind_id.name: kind.write.name for kind in KINDS}
-    assert cpp == py
+def test_generated_headers_are_current():
+    # entity_kind.h and model_limits.h are written from the Python tables. A stale one means
+    # the C++ hub and the YAML side disagree about a kind or a limit.
+    stale = [path.name for path in _generator().stale()]
+    assert not stale, f"{stale} out of date. Run: python3 tools/gen_kinds.py"
+
+
+def test_readme_entity_tables_are_current():
+    # The README's entity tables are written from the kind table, so it cannot list an
+    # entity that does not exist or miss one that does.
+    assert not _generator("gen_docs").stale(), "Run: python3 tools/gen_docs.py"
+
+
+def test_schedule_page_kinds_name_the_field_they_edit():
+    # A schedule-page write edits its kind's field, so every such kind needs one.
+    for kind in KINDS:
+        if kind.write is Write.SCHEDULE_PAGE:
+            assert kind.field, kind.key
 
 
 def test_every_kind_id_is_used_once():
@@ -49,16 +51,13 @@ def test_running_means_zone_or_program_by_selector():
     assert watering is not None and watering.scope is Scope.CONTROLLER
 
 
-def test_number_limits_match_the_model():
+def test_number_limits_come_from_the_model():
     # The session refuses a command outside the model's ranges; the entity offers the same range.
-    text = MODEL.read_text()
-    consts = {name: int(value) for name, value in re.findall(r"constexpr \w+ (\w+) = (\d+);", text)}
     limits = {kind.kind_id: kind.limits for kind in KINDS}
-    seasonal = limits[KindId.SEASONAL_ADJUST]
-    assert (seasonal[0], seasonal[1]) == (
-        consts["SEASONAL_MIN_PERCENT"],
-        consts["SEASONAL_MAX_PERCENT"],
+    assert limits[KindId.SEASONAL_ADJUST][:2] == (
+        ESP_TM2.seasonal_min_percent,
+        ESP_TM2.seasonal_max_percent,
     )
-    assert limits[KindId.RAIN_DELAY][1] == consts["RAIN_DELAY_MAX_DAYS"]
-    assert limits[KindId.RUN_DURATION][1] == consts["RUN_MAX_MINUTES"]
-    assert limits[KindId.TEST_DURATION][1] == consts["RUN_MAX_MINUTES"]
+    assert limits[KindId.RAIN_DELAY][1] == ESP_TM2.rain_delay_max_days
+    assert limits[KindId.RUN_DURATION][1] == ESP_TM2.run_max_minutes
+    assert limits[KindId.TEST_DURATION][1] == ESP_TM2.run_max_minutes

@@ -18,9 +18,25 @@ class Model:
     starts: int
     # Program A is wire program 0.
     letters: str
+    # Value ranges, from the controller's manual. The number entities offer these and the
+    # session refuses a command outside them; tools/gen_kinds.py writes them into model_limits.h.
+    seasonal_min_percent: int
+    seasonal_max_percent: int
+    rain_delay_max_days: int
+    # 39, 4B and 3A take minutes in one byte.
+    run_max_minutes: int
 
 
-ESP_TM2 = Model("ESP-TM2", zones=12, starts=4, letters="ABC")
+ESP_TM2 = Model(
+    "ESP-TM2",
+    zones=12,
+    starts=4,
+    letters="ABC",
+    seasonal_min_percent=5,  # "from 5% up to 200%"
+    seasonal_max_percent=200,
+    rain_delay_max_days=14,  # "Suspend watering for up to 14 days"
+    run_max_minutes=255,
+)
 
 
 def program_index(letter: str) -> int:

@@ -1,39 +1,22 @@
-"""Final validation for the wire layer (PLAN.md 6.1) and model limits."""
+"""Final validation for the wire layer (PLAN.md 6.1): the transmitter, the receivers and RMT memory.
+
+The entity checks that run alongside are in entity_checks.py.
+"""
 
 from esphome.components import esp32
 from esphome.components.remote_base import CONF_RECEIVER_ID, CONF_TRANSMITTER_ID
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PLATFORM, CONF_RMT_SYMBOLS, CONF_TIME_ID
+from esphome.const import CONF_ID, CONF_PLATFORM, CONF_RMT_SYMBOLS
 from esphome.core import CORE
 import esphome.final_validate as fv
 
 from .const import (
     ACTION_SEND_RAW,
-    CONF_DAY,
     CONF_EXPERIMENTAL,
-    CONF_GENERATED,
     CONF_LISTEN_ONLY,
     CONF_MONITOR_RECEIVER_ID,
-    CONF_PROGRAM,
-    CONF_RAINBIRD_ID,
-    CONF_SLOT,
-    CONF_ZONE,
-    GENERATED_CONFIG,
-    GENERATED_INDEX,
-    GENERATED_KIND,
 )
-from .entity_kinds import (
-    KINDS_BY_ID,
-    NO_PROGRAM,
-    NO_ZONE,
-    FanOut,
-    KindId,
-    Scope,
-    Write,
-    platform_keys,
-    resolve_kind,
-)
-from .models import ESP_TM2
+from .entity_checks import check_dependencies, declaring
 
 CONF_RECEIVE_SYMBOLS = "receive_symbols"
 CONF_NON_BLOCKING = "non_blocking"
@@ -87,12 +70,6 @@ def _label(config: dict, fallback: str) -> str:
     ident = config.get(CONF_ID)
     name = getattr(ident, "id", None)
     return name or fallback
-
-
-def _declaring(ident):
-    full = fv.full_config.get()
-    path = full.get_path_for_id(ident)[:-1]
-    return full.get_config_for_path(path)
 
 
 def _check_receiver(rx: dict, variant: str | None) -> None:
@@ -267,167 +244,13 @@ def validate_hub(config: dict) -> None:
         if ident in seen:
             continue
         seen.add(ident)
-        _check_receiver(_declaring(ident), variant)
+        _check_receiver(declaring(ident), variant)
 
     if not config.get(CONF_LISTEN_ONLY) and CONF_TRANSMITTER_ID in config:
-        _check_transmitter(_declaring(config[CONF_TRANSMITTER_ID]))
+        _check_transmitter(declaring(config[CONF_TRANSMITTER_ID]))
     _check_send_raw(config)
-    _check_dependencies(config)
+    check_dependencies(config)
 
     if variant is None:
         return
     _check_rmt_memory(variant)
-
-
-def _key(kind_id: KindId) -> str:
-    return KINDS_BY_ID[int(kind_id)].key
-
-
-def _generated_binding(item: dict) -> tuple[int, int, int, int]:
-    return (item[GENERATED_KIND], item[CONF_ZONE], item[CONF_PROGRAM], item[GENERATED_INDEX])
-
-
-def _entry_bindings(entry: dict, domain: str, model) -> list[tuple[tuple[int, int, int, int], str]]:
-    """(binding, label) for each control a hand-written platform entry creates.
-
-    Only controls count: two switches for one valve is a mistake, while a
-    second read-only sensor for the same value is harmless.
-    """
-    out = []
-    zone = entry.get(CONF_ZONE)
-    program = entry.get(CONF_PROGRAM)
-    program_index = NO_PROGRAM
-    if isinstance(program, str) and len(program) == 1 and program.upper() in model.letters:
-        program_index = model.letters.index(program.upper())
-    for key in platform_keys(domain):
-        if key not in entry:
-            continue
-        kind = resolve_kind(domain, key, zone=zone is not None, program=program is not None)
-        if kind is None or kind.write is Write.NONE:
-            continue
-        index = 0
-        if kind.fan_out is FanOut.DAY:
-            index = entry.get(CONF_DAY, 0)
-        elif kind.fan_out is FanOut.SLOT and isinstance(entry.get(CONF_SLOT), int):
-            index = entry[CONF_SLOT] - 1
-        uses_program = kind.scope is Scope.PROGRAM or kind.fan_out is FanOut.PROGRAM
-        binding = (
-            int(kind.kind_id),
-            zone if kind.scope is Scope.ZONE else NO_ZONE,
-            program_index if uses_program else NO_PROGRAM,
-            index,
-        )
-        where = f"zone {zone}" if kind.scope is Scope.ZONE else f"program {program}"
-        if kind.fan_out is FanOut.SLOT:
-            where += f" slot {entry.get(CONF_SLOT)}"
-        elif kind.fan_out is FanOut.DAY:
-            where += f" day {index}"
-        out.append((binding, f"{domain} {kind.key} for {where}"))
-    return out
-
-
-# The domains whose platform entries can hold controls.
-_CONTROL_DOMAINS = ("switch", "number", "button", "select", "datetime")
-
-
-def _platform_entries(hub_id):
-    """(domain, entry) for every hand-written control entry on this hub."""
-    full = fv.full_config.get()
-    for domain in _CONTROL_DOMAINS:
-        entries = full.get(domain) or []
-        if isinstance(entries, dict):
-            entries = [entries]
-        for entry in entries:
-            if not isinstance(entry, dict) or entry.get(CONF_PLATFORM) != "rainbird":
-                continue
-            if entry.get(CONF_RAINBIRD_ID) != hub_id:
-                continue
-            yield domain, entry
-
-
-def _check_duplicates(config: dict, domain: str, hub: dict, model) -> None:
-    """One entity per binding. Hand-written entries cannot repeat the hub's or each other's."""
-    mine = _entry_bindings(config, domain, model)
-    if not mine:
-        return
-    counts: dict[tuple[int, int, int, int], int] = {}
-    generated_ids: dict[tuple[int, int, int, int], str] = {}
-    for item in hub.get(CONF_GENERATED, []):
-        binding = _generated_binding(item)
-        counts[binding] = counts.get(binding, 0) + 1
-        generated_ids[binding] = str(item[GENERATED_CONFIG][CONF_ID])
-    for entry_domain, entry in _platform_entries(config[CONF_RAINBIRD_ID]):
-        for binding, _ in _entry_bindings(entry, entry_domain, model):
-            counts[binding] = counts.get(binding, 0) + 1
-    for binding, label in mine:
-        if counts.get(binding, 0) <= 1:
-            continue
-        if binding in generated_ids:
-            raise cv.Invalid(
-                f"The rainbird hub already creates this {label} "
-                f"(id {generated_ids[binding]}). Remove this entry, or turn the hub's "
-                "copy off with `false` under that zone or program."
-            )
-        raise cv.Invalid(f"This {label} is defined more than once.")
-
-
-def _check_dependencies(hub: dict) -> None:
-    """Controls that use another entity's value need that entity on the same hub.
-
-    Without it the control only logs a warning when used, so the config fails here instead.
-    """
-    model = ESP_TM2
-    bindings = {_generated_binding(item) for item in hub.get(CONF_GENERATED, [])}
-    for domain, entry in _platform_entries(hub[CONF_ID]):
-        bindings.update(binding for binding, _ in _entry_bindings(entry, domain, model))
-    kinds = {binding[0] for binding in bindings}
-    if KindId.TEST_ALL in kinds and KindId.TEST_DURATION not in kinds:
-        raise cv.Invalid(
-            "The test_all_zones button needs a test_duration number on the same rainbird hub: "
-            "the button runs each zone for that many minutes."
-        )
-    for kind_id, zone, program, index in sorted(bindings):
-        if kind_id in (KindId.VALVE, KindId.QUEUE_ZONE):
-            if (KindId.RUN_DURATION, zone, NO_PROGRAM, 0) not in bindings:
-                control = "valve switch" if kind_id == KindId.VALVE else "queue button"
-                raise cv.Invalid(
-                    f"The zone {zone} {control} needs that zone's run_duration number on the same "
-                    "rainbird hub: it runs the zone for that many minutes. To show only whether the "
-                    "zone runs, use its running binary sensor."
-                )
-        if (
-            kind_id == KindId.START_ENABLED
-            and (KindId.START_TIME, NO_ZONE, program, index) not in bindings
-        ):
-            letter = model.letters[program] if program < len(model.letters) else "?"
-            raise cv.Invalid(
-                f"The program {letter} start {index + 1} enabled switch needs that slot's start_time "
-                "entity on the same rainbird hub: turning a slot on writes the time it shows."
-            )
-
-
-def validate_entity_platform(domain: str):
-    """Final validator for a platform module: model limits and duplicate entities."""
-
-    def validator(config: dict) -> None:
-        _validate_entity_platform(config, domain)
-
-    return validator
-
-
-def _validate_entity_platform(config: dict, domain: str) -> None:
-    hub = _declaring(config[CONF_RAINBIRD_ID])
-    if (
-        domain == "text_sensor"
-        and _key(KindId.SCHEDULE_CHANGED) in config
-        and CONF_TIME_ID not in hub
-    ):
-        raise cv.Invalid(
-            "schedule_changed needs time_id on the rainbird hub: the controller stamps it in "
-            "local time, and the time zone converts it."
-        )
-    if domain == "button" and _key(KindId.SYNC_CLOCK) in config and CONF_TIME_ID not in hub:
-        raise cv.Invalid(
-            "sync_clock needs time_id on the rainbird hub: it sets the controller to that clock's local time."
-        )
-    _check_duplicates(config, domain, hub, ESP_TM2)

@@ -1,50 +1,53 @@
 # Host build for the pure C++ layers. No ESPHome include path, so a protocol
 # file that includes ESPHome fails here (PLAN.md 5.1).
+#
+#   make test          build what changed and run the tests
+#   make test SAN=1    the same under AddressSanitizer and UBSan (its own build directory)
+#   make -j test       compile in parallel
 CXX ?= g++
-CXXFLAGS ?= -std=gnu++17 -Wall -Wextra -Werror -I../../components/rainbird -DCAPTURES_DIR=\"../captures\"
+COMPONENT = ../../components/rainbird
+CXXFLAGS ?= -std=gnu++17 -Wall -Wextra -Werror
+CPPFLAGS += -I$(COMPONENT) -DCAPTURES_DIR=\"../captures\" -MMD -MP
 
-SRCS = \
-	../../components/rainbird/manchester.cpp \
-	../../components/rainbird/sip_frame.cpp \
-	../../components/rainbird/sip_commands.cpp \
-	../../components/rainbird/controller_state.cpp \
-	../../components/rainbird/model_esp_tm2.cpp \
-	../../components/rainbird/link_core.cpp \
-	../../components/rainbird/session.cpp \
-	../../components/rainbird/schedule_editor.cpp \
-	../../components/rainbird/clock_sync.cpp \
-	../../components/rainbird/entity_values.cpp
+ifeq ($(SAN),1)
+BUILD = build-san
+CXXFLAGS += -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined
+LDFLAGS += -fsanitize=address,undefined
+else
+BUILD = build
+endif
 
-TESTS = test_main.cpp test_manchester.cpp test_frame.cpp test_commands.cpp test_model.cpp test_replay.cpp test_link.cpp test_session.cpp test_schedule_editor.cpp test_clock_sync.cpp test_entity_values.cpp test_handshake.cpp
+# The pure layers, by name. A file that needs ESPHome does not belong in this list.
+SRCS = manchester sip_frame sip_commands controller_state model_esp_tm2 link_core session \
+	schedule_editor clock_sync entity_values entity_writes
 
-HDRS = \
-	../../components/rainbird/manchester.h \
-	../../components/rainbird/sip_frame.h \
-	../../components/rainbird/sip_commands.h \
-	../../components/rainbird/controller_state.h \
-	../../components/rainbird/model.h \
-	../../components/rainbird/model_esp_tm2.h \
-	../../components/rainbird/link_core.h \
-	../../components/rainbird/session.h \
-	../../components/rainbird/schedule_editor.h \
-	../../components/rainbird/clock_sync.h \
-	../../components/rainbird/countdown.h \
-	../../components/rainbird/elapsed.h \
-	../../components/rainbird/entity_kind.h \
-	../../components/rainbird/entity_values.h \
-	doctest.h hex.h vectors.h fixture.h fake_controller.h
+TESTS = $(basename $(wildcard test_*.cpp))
+
+SRC_OBJS = $(SRCS:%=$(BUILD)/src_%.o)
+TEST_OBJS = $(TESTS:%=$(BUILD)/%.o)
 
 .PHONY: test clean
 
-test: test_runner
-	./test_runner
+test: $(BUILD)/test_runner
+	./$(BUILD)/test_runner
 
-test_runner: $(TESTS) $(SRCS) $(HDRS)
-	$(CXX) $(CXXFLAGS) -o $@ $(TESTS) $(SRCS)
+$(BUILD)/test_runner: $(TEST_OBJS) $(SRC_OBJS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^
 
 # Fills in a fixture's expect lines. Used by tools/raw_to_fixture.py.
-decode_fixture: decode_fixture.cpp $(SRCS) $(HDRS)
-	$(CXX) $(CXXFLAGS) -o $@ decode_fixture.cpp $(SRCS)
+decode_fixture: $(BUILD)/decode_fixture.o $(SRC_OBJS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/src_%.o: $(COMPONENT)/%.cpp | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
+
+$(BUILD)/%.o: %.cpp | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
+
+$(BUILD):
+	mkdir -p $@
 
 clean:
-	rm -f test_runner decode_fixture
+	rm -rf build build-san test_runner decode_fixture
+
+-include $(wildcard $(BUILD)/*.d)

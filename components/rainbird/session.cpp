@@ -184,12 +184,12 @@ void Session::handle_handshake_(const Completion &done) {
 
 void Session::restart_() {
   // What was learned at startup belongs to the controller that answered then, and so does
-  // its state: a command after this is decided on what the new controller reports. Entities
-  // keep showing the old values until new ones arrive, because nothing can be unpublished.
+  // its state: a command after this is decided on what the new controller reports.
+  this->edit_count_ = 0;
   if (this->editor_.active()) {
     this->fail_edit_("the controller stopped answering");
   }
-  this->state_ = ControllerState{};
+  this->forget_state_(false);
   this->identity_ = Identity{};
   this->time_pending_ = false;
   this->link_.drop_queued(Priority::POLL);
@@ -447,6 +447,11 @@ void Session::set_connected_(bool connected, uint32_t now_ms) {
       // a different controller. The edit loses its next step with them.
       this->link_.drop_queued(Priority::USER);
       this->date_after_time_ = false;  // its time was dropped with the other commands
+      this->edit_count_ = 0;           // and so are the edits waiting behind the one in flight
+      // What was read is no longer known to be true: a zone shown running may have stopped.
+      // Everything is read again when the controller answers, the schedule included.
+      this->forget_state_(true);
+      this->schedule_stale_ = this->schedule_read_once_;
       if (this->editor_.active()) {
         this->fail_edit_("the controller stopped answering");
       }
@@ -457,6 +462,20 @@ void Session::set_connected_(bool connected, uint32_t now_ms) {
   }
   this->link_status_.connected_known = true;
   this->link_status_.connected = connected;
+}
+
+void Session::forget_state_(bool keep_zones) {
+  ControllerState fresh;
+  // The count only ever moves on, so whoever watches it never sees an old number come round again.
+  fresh.remaining_readings = this->state_.remaining_readings + 1;
+  if (keep_zones) {
+    // Which zones the controller has is read once, at startup. A restart reads it again.
+    for (size_t i = 0; i < STATE_ZONES; i++) {
+      fresh.available[i] = this->state_.available[i];
+    }
+  }
+  this->state_ = fresh;
+  this->time_pending_ = false;
 }
 
 void Session::handle_(const Completion &done, uint32_t now_ms) {
@@ -834,6 +853,36 @@ void Session::fail_edit_(const char *reason) {
   // A write whose acknowledgement was lost may still have landed. Read the schedule again so
   // the entities show what the controller holds.
   this->schedule_stale_ = true;
+  this->start_next_edit_();
+}
+
+bool Session::start_edit_(const PendingEdit &edit) {
+  ByteBuf read;
+  if (!this->editor_.start(edit.field, edit.zone, edit.program, edit.index, edit.value, &read)) {
+    return false;
+  }
+  if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
+    this->editor_.cancel();
+    return false;
+  }
+  return true;
+}
+
+void Session::start_next_edit_() {
+  while (!this->editor_.active() && this->edit_count_ > 0) {
+    PendingEdit next = this->edits_[0];
+    for (size_t i = 0; i + 1 < this->edit_count_; i++) {
+      this->edits_[i] = this->edits_[i + 1];
+    }
+    this->edit_count_--;
+    if (!this->start_edit_(next)) {
+      // Reported, because the caller was told this edit was queued. Then the one after it is tried.
+      SessionEvent event;
+      event.kind = SessionEventKind::EDIT_FAILED;
+      event.reason = "a waiting edit could not be started";
+      this->push_event_(event);
+    }
+  }
 }
 
 ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value,
@@ -847,17 +896,31 @@ ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program,
   if (this->link_down_()) {
     return ControlResult::REFUSED_LINK_DOWN;
   }
-  if (this->editor_.active()) {
-    return ControlResult::REFUSED_BUSY;
-  }
-  ByteBuf read;
-  if (!this->editor_.start(field, zone, program, index, value, &read)) {
+  if (!this->model_.locate(field, zone, program, index).has_value()) {
     return ControlResult::REFUSED_RANGE;
   }
-  if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
-    this->editor_.cancel();
+  PendingEdit edit;
+  edit.field = field;
+  edit.zone = zone;
+  edit.program = program;
+  edit.index = index;
+  edit.value = value;
+  if (!this->editor_.active()) {
+    return this->start_edit_(edit) ? ControlResult::QUEUED : ControlResult::REFUSED_BUSY;
+  }
+  // One edit at a time on the wire. This one waits; each edit reads its page afresh, so two
+  // edits to one page do not undo each other.
+  for (size_t i = 0; i < this->edit_count_; i++) {
+    PendingEdit &waiting = this->edits_[i];
+    if (waiting.field == field && waiting.zone == zone && waiting.program == program && waiting.index == index) {
+      waiting.value = value;  // the same field again: the later value is the one wanted
+      return ControlResult::QUEUED;
+    }
+  }
+  if (this->edit_count_ >= EDIT_CAP) {
     return ControlResult::REFUSED_BUSY;
   }
+  this->edits_[this->edit_count_++] = edit;
   return ControlResult::QUEUED;
 }
 
@@ -887,6 +950,7 @@ void Session::handle_page_(const Completion &done) {
       }
       return;
     case ScheduleEditor::Step::DONE:
+      this->start_next_edit_();
       return;
     case ScheduleEditor::Step::FAILED:
       this->fail_edit_(this->editor_.reason());

@@ -11,7 +11,8 @@ __pycache__/
 venv/
 
 # Host unit-test binaries
-tests/unit/test_runner
+tests/unit/build/
+tests/unit/build-san/
 tests/unit/decode_fixture
 
 # Editors / OS

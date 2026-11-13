@@ -1071,3 +1071,152 @@ TEST_CASE("the revision moves on when there is something to publish, and only th
   run_session(session, fake, live.now, 5000);
   CHECK(session.revision() != revision);
 }
+
+// A controller that keeps page 10 and takes writes to it, so edits in a row see each other.
+struct PageController {
+  std::vector<uint8_t> page = from_hex("6A 06 01 00 64 01");
+  std::vector<std::string> writes;
+
+  uint32_t run(Session &session, uint32_t now, uint32_t limit_ms) {
+    uint32_t end = now + limit_ms;
+    while (static_cast<int32_t>(end - now) > 0) {
+      session.tick(now);
+      Transmission tx;
+      if (!session.next_transmission(now, &tx)) {
+        if (!session.busy()) {
+          break;
+        }
+        now += 5;
+        continue;
+      }
+      std::vector<uint8_t> request = first_payload(tx);
+      std::vector<uint8_t> reply;
+      if (request.size() == 3 && request[0] == 0x20 && request[2] == 0x10) {
+        reply = from_hex("A0 00 10");
+        reply.insert(reply.end(), this->page.begin(), this->page.end());
+      } else if (request.size() > 3 && request[0] == 0x21 && request[2] == 0x10) {
+        this->page.assign(request.begin() + 3, request.end());
+        this->writes.push_back(to_hex(this->page.data(), this->page.size()));
+        reply = from_hex("01 21");
+      } else {
+        continue;  // anything else goes unanswered
+      }
+      now += tx.first_copy_ms + 30;
+      session.on_frame(reply.data(), reply.size(), now);
+    }
+    return now;
+  }
+};
+
+TEST_CASE("schedule edits asked for while one runs wait their turn, and each sees the last one's write") {
+  SessionConfig config = config_with({Field::WATERING_DAY, Field::FREQUENCY});
+  config.allow_writes = true;
+  config.pages.add(0x10);
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  // 6A is Monday, Wednesday, Friday and Saturday. Monday off, Wednesday off, then the frequency
+  // twice: the second value replaces the first while both wait.
+  REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 0, 0, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 2, 0, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_ODD, now) == ControlResult::QUEUED);
+  // Out of range is still refused at once, not queued and failed later.
+  CHECK(session.edit_schedule(Field::WATERING_DAY, 0, 0, 7, 0, now) == ControlResult::REFUSED_RANGE);
+
+  PageController controller;
+  now = controller.run(session, now, 20000);
+  CHECK(controller.writes ==
+        std::vector<std::string>{"68 06 01 00 64 01", "60 06 01 00 64 01", "60 06 01 00 64 02"});
+  CHECK_FALSE(take_event_of(session, SessionEventKind::EDIT_FAILED));
+  CHECK(session.state().watering_day[0][0] == std::optional<bool>(false));
+  CHECK(session.state().watering_day[0][2] == std::optional<bool>(false));
+  CHECK(session.state().frequency[0] == std::optional<uint8_t>(FREQ_ODD));
+}
+
+TEST_CASE("an edit that fails does not stop the ones waiting behind it") {
+  SessionConfig config = config_with({Field::WATERING_DAY, Field::START_ENABLED});
+  config.allow_writes = true;
+  config.pages.add(0x10);
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  // Page 60 is never answered, so the first edit's read times out.
+  REQUIRE(session.edit_schedule(Field::START_ENABLED, 0, 0, 0, 0, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 0, 0, now) == ControlResult::QUEUED);
+  PageController controller;
+  now = controller.run(session, now, 20000);
+  CHECK(take_event_of(session, SessionEventKind::EDIT_FAILED));
+  CHECK(controller.writes == std::vector<std::string>{"68 06 01 00 64 01"});
+}
+
+TEST_CASE("only so many edits wait, and a lost link drops them with the one in flight") {
+  SessionConfig config = config_with({Field::RUN_TIME});
+  config.allow_writes = true;
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  // One in flight and eight waiting, each a different field. The tenth has nowhere to go.
+  int queued = 0;
+  ControlResult last = ControlResult::QUEUED;
+  for (uint8_t zone = 1; zone <= 12 && last == ControlResult::QUEUED; zone++) {
+    last = session.edit_schedule(Field::RUN_TIME, zone, 0, 0, 10, now);
+    queued += last == ControlResult::QUEUED ? 1 : 0;
+  }
+  CHECK(queued == 9);
+  CHECK(last == ControlResult::REFUSED_BUSY);
+
+  // Nothing answers. The first read fails after its retries; with the link still up, each
+  // waiting edit then tries its own read. Three failed requests in a row mark the link down,
+  // and what is still waiting goes with it: nothing more is sent.
+  FakeController silent;
+  now = run_session(session, silent, now, 60000);
+  CHECK(session.link().connected == false);
+  size_t reads = 0;
+  for (const std::string &request : silent.requests) {
+    reads += request.rfind("20 00 8", 0) == 0 ? 1 : 0;
+  }
+  CHECK(reads == 9);  // three edits, three attempts each
+  CHECK(session.edit_schedule(Field::RUN_TIME, 1, 0, 0, 10, now) == ControlResult::REFUSED_LINK_DOWN);
+  CHECK_FALSE(session.busy());
+}
+
+TEST_CASE("a lost link forgets what was read, keeps which zones exist, and reads it all again") {
+  EspTm2Model model;
+  SessionConfig config = config_with({Field::ZONES_RUNNING, Field::FREQUENCY});
+  config.pages.add(0x10);
+  Session session(model, config);
+  FakeController fake = FakeController::upgraded_tm2();
+  session.start(0);
+  uint32_t now = run_session(session, fake, 0, 10000);
+  REQUIRE(session.state().running[0] == std::optional<bool>(true));
+  REQUIRE(session.state().frequency[0].has_value());
+  REQUIRE(session.state().available[0] == std::optional<bool>(true));
+  uint32_t readings = session.state().remaining_readings;
+
+  fake.replies.clear();
+  for (int i = 0; i < 3; i++) {
+    session.poll(now);
+    now = run_session(session, fake, now, 5000);
+  }
+  REQUIRE_FALSE(session.link().connected);
+  // A zone shown running may have stopped since, so nothing is shown as known.
+  CHECK_FALSE(session.state().running[0].has_value());
+  CHECK_FALSE(session.state().frequency[0].has_value());
+  // 03 00 is only read at startup, and commands check it.
+  CHECK(session.state().available[0] == std::optional<bool>(true));
+  // The count moves on, never back, so a watcher cannot mistake a new reading for an old one.
+  CHECK(session.state().remaining_readings > readings);
+
+  fake = FakeController::upgraded_tm2();
+  fake.requests.clear();
+  session.poll(now);
+  now = run_session(session, fake, now, 5000);
+  session.poll(now);
+  run_session(session, fake, now, 5000);
+  CHECK(session.link().connected);
+  CHECK(session.state().running[0] == std::optional<bool>(true));
+  // The schedule too, without waiting for refresh_interval.
+  CHECK(seen(fake, "20 00 10"));
+  CHECK(session.state().frequency[0].has_value());
+}

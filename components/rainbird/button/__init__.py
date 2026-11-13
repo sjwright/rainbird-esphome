@@ -1,7 +1,7 @@
 """`button: - platform: rainbird`. Generated from the kind table; see platform.py."""
 
+from ..entity_checks import validate_entity_platform
 from ..platform import platform_schema, platform_to_code
-from ..wire import validate_entity_platform
 
 CONFIG_SCHEMA = platform_schema("button")
 

@@ -13,8 +13,8 @@
 namespace esphome::rainbird {
 
 // What each entity kind shows, what it polls and how it writes (PLAN 5.3). Pure, so the
-// hub only publishes and the rules here run in host tests. entity_kinds.py is the same
-// table for the YAML side; tests/python/test_entity_kinds.py checks the write paths agree.
+// hub only publishes and the rules here run in host tests. The table itself is generated from
+// entity_kinds.py, the YAML side's table (tools/gen_kinds.py).
 
 // How a kind writes. The same names as Write in entity_kinds.py.
 enum class WritePath : uint8_t { NONE, LOCAL, COMMAND, SCHEDULE_PAGE };

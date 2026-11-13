@@ -31,4 +31,43 @@ class Countdown {
   uint32_t at_{0};
 };
 
+// When the time remaining runs out, as a wall-clock instant: one value Home Assistant can count
+// down to by itself, in place of a sensor that changes every second. Pure, like Countdown.
+class EndTime {
+ public:
+  // Two readings of a steady countdown land within a second of each other. More than this apart
+  // and the end really has moved: the controller paused, or another zone started.
+  static constexpr int64_t TOLERANCE_S = 2;
+
+  // A controller reading of `seconds` left, taken at `now` (seconds since the epoch). True when
+  // the end to show has changed; end() is then the new one.
+  bool reading(uint16_t seconds, int64_t now) {
+    if (seconds == 0) {
+      return this->set_(0);
+    }
+    int64_t end = now + seconds;
+    int64_t moved = end > this->end_ ? end - this->end_ : this->end_ - end;
+    if (this->end_ != 0 && moved <= TOLERANCE_S) {
+      return false;
+    }
+    return this->set_(end);
+  }
+  // Nothing is known any more (the link went down). True when that changes what is shown.
+  bool clear() { return this->set_(0); }
+
+  // Seconds since the epoch, or 0 when nothing is running.
+  int64_t end() const { return this->end_; }
+
+ private:
+  bool set_(int64_t end) {
+    bool changed = !this->known_ || end != this->end_;
+    this->known_ = true;
+    this->end_ = end;
+    return changed;
+  }
+
+  bool known_{false};
+  int64_t end_{0};
+};
+
 }  // namespace esphome::rainbird

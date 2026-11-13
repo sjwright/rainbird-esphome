@@ -1,8 +1,17 @@
-# Implementation plan: `rainbird` ESPHome component
+# Design: `rainbird` ESPHome component
 
-This plan describes how to build an ESPHome external component that replaces
-the Rain Bird LNK2 WiFi module. The component talks to the controller directly
+This describes how the component is built: an ESPHome external component that
+replaces the Rain Bird LNK2 WiFi module and talks to the controller directly
 over its accessory port, using the protocol in [SPEC.md](SPEC.md).
+
+It began as the implementation plan, and the file keeps that name because code
+comments cite its sections ("PLAN 6.3"). Section numbers are stable for that
+reason. It is kept in step with the code: where the two disagree, that is a
+bug in this file.
+
+- Using the component: [README.md](README.md).
+- The order it was built in, the hardware phases and the design reviews:
+  [HISTORY.md](HISTORY.md).
 
 ## Goals
 
@@ -14,16 +23,14 @@ over its accessory port, using the protocol in [SPEC.md](SPEC.md).
   file layout, C++ and Python idioms, entity schemas, actions and
   `dump_config()` output. Wherever ESPHome already provides a piece, use it
   rather than writing our own.
-- **Fully implement the ESP-TM2** (every TM2 variant). Other Rain Bird models
-  are stubbed in the model registry, so a config that names one gets a clear
-  "not implemented" error, and the C++ `Model` interface is the place to add
-  them.
+- **Fully implement the ESP-TM2** (every TM2 variant). It is the only model;
+  a config that names another gets a clear error (section 7).
 - **Be safe by default.** Commands that SPEC.md marks as unverified, mainly
   schedule writes, stay disabled until the user turns them on.
 
 ## Non-goals (v1)
 
-- Implementing other Rain Bird models. They are stubbed only.
+- Implementing other Rain Bird models.
 - Platforms other than ESP32. ESPHome's `remote_transmitter` and
   `remote_receiver` also run on ESP8266, RP2040 and LibreTiny, so other
   platforms may work. They are untested. On those platforms the transmitter
@@ -37,8 +44,8 @@ over its accessory port, using the protocol in [SPEC.md](SPEC.md).
 
 ## 1. Key decisions
 
-Every decision here is final unless marked "open". Each one shapes the YAML in
-section 3.
+Every decision here is final unless marked "open". Each one shapes the YAML a
+user writes (README.md, `examples/full.yaml`).
 
 | # | Decision | Why |
 |---|----------|-----|
@@ -50,7 +57,7 @@ section 3.
 | D6 | **Zone valves are `switch` entities. This is final.** | Changing the domain after release would break every user's entity IDs and automations, so it is decided now. ESPHome's `valve` domain promises a per-valve "close", and the TM2 can only stop all watering, so `valve` would misrepresent the hardware. `switch` also matches `sprinkler` and the Home Assistant Rain Bird integration. |
 | D7 | **Schedule fields use typed entities, never free text.** Watering days are 7 switches per program. Each start-time slot is a `datetime` time entity plus an "enabled" switch, since `FFFF` (off) can't be shown as a time. | Nothing on the write path parses text, and each entity maps to bits or bytes of one page. All are opt-in. |
 | D8 | **Names can contain the placeholders `{zone}`, `{program}`, `{day}` and `{slot}`** | One template in `zone_defaults` or `program_defaults` names the same entity everywhere. Single braces don't clash with ESPHome's `${substitutions}`. |
-| D9 | **Generated IDs are public API from v0.1.0**: `<zone id>_<key>`, e.g. `front_lawn_valve_switch` | Users will write lambdas and automations against them, so changing the scheme is a breaking change. A snapshot test (section 8) guards it. |
+| D9 | **Generated IDs are public API from the first release**: `<zone id>_<key>`, e.g. `front_lawn_valve_switch` | Users will write lambdas and automations against them, so changing the scheme is a breaking change. A snapshot test (section 8) guards it. |
 | D10 | **The wire layer is ESPHome's `remote_transmitter` and `remote_receiver`**, referenced by `transmitter_id` and `receiver_id`. | This is how core's `climate_ir` platforms do it, and how bus-based components take a `uart_id`. ESPHome already provides non-blocking RMT transmit with the carrier off, RMT receive with its own interrupt handler, buffering, overflow warnings and raw dumps, and it maintains that code across ESP-IDF releases. The rainbird component never touches RMT or IRAM. It does call `rtc_gpio_deinit` on the receiver pins after `remote_receiver` setup, because that component leaves original-ESP32 RTC pads on the RTC mux (6.1). Section 6.1 checks the limits. |
 | D11 | **Unverified commands are off by default**: `schedule: allow_writes: false`, `experimental: false`. `rainbird.send_raw` also needs `experimental: true`. | SPEC.md section 8 lists the unverified commands. A raw-send action left in a config would bypass both gates. |
 | D12 | **An unrecognised model ID makes the hub read-only** | If `02` returns an ID outside the model's list, status polling continues but every control and write command is refused. `accept_model_ids:` overrides this. |
@@ -61,408 +68,35 @@ section 3.
 
 ## 2. Using the component
 
-The repository is **https://github.com/sjwright/rainbird-esphome**. It uses
-the layout ESPHome expects for external components: the component lives in
-`components/rainbird/`, next to a README, example configs and reusable
-packages.
+[README.md](README.md) is the user documentation: what to build, the smallest
+config, every hub option, how zones and programs generate entities, and the
+entity tables. Two points of design sit behind it:
 
-**Recommended: a pinned release.** A tag never moves, so there is nothing to
-re-check:
-
-```yaml
-external_components:
-  - source: github://sjwright/rainbird-esphome@v0.1.0
-    components: [rainbird]
-    refresh: never
-```
-
-**The same, written out in full.** Use this form for a fork or a private
-mirror:
-
-```yaml
-external_components:
-  - source:
-      type: git
-      url: https://github.com/sjwright/rainbird-esphome
-      ref: v0.1.0
-    components: [rainbird]
-    refresh: never
-```
-
-**Tracking development.** This uses the default branch, checked for updates
-once a day (ESPHome's default `refresh`):
-
-```yaml
-external_components:
-  - source: github://sjwright/rainbird-esphome@main
-    components: [rainbird]
-    refresh: 1d
-```
-
-**Working on the component itself:**
-`source: { type: local, path: ../rainbird-esphome/components }`.
-
-Every release is tagged `vMAJOR.MINOR.PATCH`. The release notes state the
-minimum ESPHome version, which also appears as `esphome: min_version` in the
-examples.
-
-The smallest working config, on an original ESP32:
-
-```yaml
-remote_transmitter:
-  pin: GPIO26                # → optocoupler 2 → J4 (controller RX)
-  carrier_duty_percent: 100% # plain baseband, no carrier
-
-remote_receiver:
-  pin: GPIO27                # ← optocoupler 1 ← J2 (controller TX)
-  idle: 4ms
-  receive_symbols: 384       # the longest reply needs up to 336
-  rmt_symbols: 384           # original ESP32 only (6.1)
-
-rainbird:
-  model: ESP-TM2
-  zones:
-    - { zone: 1, name: Front lawn }
-    - { zone: 2, name: Back lawn }
-```
-
-With only one transmitter and one receiver in the config, `transmitter_id` and
-`receiver_id` resolve automatically, as they do for any ESPHome component. If
-a transmitter or receiver setting won't work for this protocol, config
-validation names it and gives the value to use (6.1).
-
-That config gives:
-
-- each listed zone a valve switch and a run-duration number;
-- each program a "Run" button and a seasonal-adjust number. When `programs:`
-  is left out, all of the model's programs are created with default names
-  ("Program A" to "Program C"). Write `programs: []` to create none.
-
-Zones work the same way. Leaving out `zones:` creates zones 1–12 named
-"Zone 1" to "Zone 12", and `zones: []` creates none. Add platform blocks
-(section 3) for controller-wide status.
-
-Home Assistant entity IDs follow from the entity names together with the
-node's `friendly_name`. For example, a node with friendly name "Irrigation"
-and a zone named "Front lawn" gives `switch.irrigation_front_lawn`.
-
-> **Turning off any zone switch stops all watering.** The controller only has
-> a stop-all command (`40`). See 6.5 for the details, including the
-> experimental `queue`-mode alternative.
-
-**Home Assistant actions without copying YAML.** The repository ships a
-package that defines the `api:` actions. It can be included straight from
-GitHub:
-
-```yaml
-packages:
-  rainbird_actions: github://sjwright/rainbird-esphome/packages/ha-actions.yaml@v0.1.0
-```
+- **Releases are tags.** Every release is to be tagged `vMAJOR.MINOR.PATCH`,
+  and a config should pin one (`github://sjwright/rainbird-esphome@v…` with
+  `refresh: never`). Until the first tag exists the examples track `main`.
+  The minimum ESPHome version appears as `esphome: min_version` in the
+  examples.
+- **`transmitter_id` and `receiver_id` resolve by themselves** when the config
+  has one transmitter and one receiver, as they do for any ESPHome component.
+  If a transmitter or receiver setting won't work for this protocol, config
+  validation names it and gives the value to use (6.1).
 
 ---
 
-## 3. Full proposed YAML
+## 3. Example YAML
 
-This example uses every option and entity, with comments.
+The examples are files, so CI can validate them:
 
-```yaml
-substitutions:
-  name: irrigation
-  friendly_name: Irrigation
+| File | What it is |
+|------|------------|
+| `examples/minimal.yaml` | The smallest config that validates |
+| `examples/full.yaml` | Every option and every entity, with comments |
+| `examples/sniffer.yaml` | `listen_only`, a monitor receiver, `dump: raw` and `send_raw`, for protocol work |
+| `packages/ha-actions.yaml` | Home Assistant actions (`run_zone`, `queue_zone`, `set_rain_delay`, `stop_watering`), includable as a remote package |
 
-esphome:
-  name: ${name}
-  friendly_name: ${friendly_name}
-  min_version: 2026.9.0      # the oldest release CI builds against (section 11)
-
-esp32:
-  variant: esp32             # `board:` is no longer recommended. ESP32-S2 is not supported (6.1).
-  # framework:               # ESP-IDF is the default; Arduino is opt-in
-  #   type: arduino
-
-logger:
-  level: DEBUG
-
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-
-ota:
-  - platform: esphome
-
-time:
-  - platform: homeassistant
-    id: ha_time
-
-external_components:
-  - source: github://sjwright/rainbird-esphome@v0.1.0
-    components: [rainbird]
-    refresh: never
-
-packages:
-  rainbird_actions: github://sjwright/rainbird-esphome/packages/ha-actions.yaml@v0.1.0
-
-# ---------------------------------------------------------------------------
-# Wire layer: ESPHome's own components (see WIRE.md for the circuit).
-# Any free GPIO works; avoid strapping pins.
-# ---------------------------------------------------------------------------
-remote_transmitter:
-  id: rb_tx
-  pin: GPIO26                # → optocoupler 2 → J4 (controller RX). `inverted:` works
-  carrier_duty_percent: 100% # required: no carrier
-  non_blocking: true         # the ESP32 default; stated to silence the warning
-
-remote_receiver:
-  id: rb_rx
-  pin:                       # ← optocoupler 1 ← J2 (controller TX)
-    number: GPIO27
-    mode:
-      input: true
-      pullup: false          # fit an external pull-up of a few kΩ on the optocoupler output
-  idle: 4ms                  # ends a burst; frames themselves are split by length
-  filter: 50us
-  receive_symbols: 384
-  rmt_symbols: 384           # original ESP32: hardware memory must hold a whole reply
-  # dump: raw                # pulse timings for test fixtures (section 8)
-
-# ---------------------------------------------------------------------------
-# Hub
-# ---------------------------------------------------------------------------
-rainbird:
-  id: rainbird_controller
-  model: ESP-TM2
-  transmitter_id: rb_tx
-  receiver_id: rb_rx
-  # accept_model_ids: [0x000A]   # only for a TM2 variant missing from the built-in list
-
-  update_interval: 15s       # idle poll cycle (the LNK2 polls every 12.5–15 s)
-
-  # What turning a zone switch on does: start (39, replaces the running zone)
-  # or queue (4B, adds it to the end of the queue)
-  valve_switch_mode: start
-
-  # Time source, used for clock sync and to convert controller-local timestamps
-  time_id: ha_time
-  clock_sync:
-    max_drift: 30s           # checked on every clock reading; daylight saving shows as drift
-
-  schedule:
-    refresh_interval: 1h     # re-read pages; also re-read when 4A 01 changes
-    allow_writes: false      # D11: schedule entities are read-only until enabled
-
-  experimental: false        # enables 49, 3A, 42 and rainbird.send_raw
-
-  # -------------------------------------------------------------------------
-  # Zones
-  # -------------------------------------------------------------------------
-  # NOTE: turning off any zone switch stops ALL watering (command 40).
-  #
-  # Defaults apply to every zone. Any key listed here is generated for every
-  # zone, and `{zone}` is replaced by that zone's name. With no zone_defaults,
-  # each zone gets valve_switch and run_duration_number.
-  zone_defaults:
-    valve_switch:
-      name: "{zone}"
-      icon: mdi:sprinkler-variant
-    run_duration_number:
-      name: "{zone} duration"
-      initial_value: 10        # minutes, used by the valve switch and queue button
-      restore_value: true
-      entity_category: config
-    running_binary_sensor:
-      name: "{zone} running"
-      disabled_by_default: true
-    run_time_numbers:        # plural: one per program, "{program}" available
-      name: "{zone} {program} run time"
-      entity_category: config
-    queue_button:
-      name: "{zone} queue"
-      disabled_by_default: true
-    fault_binary_sensor:     # unavailable until 3D is decoded (SPEC 8.4)
-      name: "{zone} fault"
-      disabled_by_default: true
-
-  zones:
-    - { zone: 1,  id: front_lawn, name: Front lawn }
-    - { zone: 2,  id: back_lawn,  name: Back lawn }
-    - { zone: 3,  name: Side path }
-    - zone: 4
-      id: veggies
-      name: Veggie patch
-      run_duration_number:
-        initial_value: 5     # merged over the zone_defaults entry
-      sensor_bypass_switch: "{zone} ignores rain"   # name-only shorthand
-    - zone: 5
-      name: Drip line
-      valve_switch:
-        icon: mdi:water-pump
-        on_turn_on:          # ESPHome's own trigger replaces "zone started"
-          - logger.log: "Drip line started"
-      run_time_numbers: false   # turns off an entity for this zone only
-    - { zone: 6,  name: Pots }
-    - { zone: 7,  name: Front beds }
-    - { zone: 8,  name: Back beds }
-    - { zone: 9,  name: Orchard }
-    - { zone: 10, name: Nature strip }
-    - { zone: 11, name: Greenhouse }
-    - { zone: 12, name: Spare, disabled: true }   # no entities generated
-
-  # -------------------------------------------------------------------------
-  # Programs (A, B, C on the TM2)
-  # -------------------------------------------------------------------------
-  # `{program}` is replaced by the program's name. With no program_defaults,
-  # each program gets start_button and seasonal_adjust_number.
-  program_defaults:
-    start_button:
-      name: "Run {program}"
-    running_binary_sensor:
-      name: "{program} running"
-    seasonal_adjust_number:
-      name: "{program} seasonal adjust"     # 10–200 %
-    frequency_select:
-      name: "{program} frequency"
-      entity_category: config
-    watering_day_switches:   # plural: 7, "{day}" = Monday … Sunday
-      name: "{program} {day}"
-      entity_category: config
-    cycle_days_number:
-      name: "{program} cycle days"
-      entity_category: config
-    days_until_next_number:
-      name: "{program} days until next run"
-      entity_category: config
-    start_time_datetimes:    # plural: 4 time entities, "{slot}" = 1–4
-      name: "{program} start {slot}"
-      entity_category: config
-    start_time_switches:     # plural: 4, slot on/off; required with start_time_datetimes
-      name: "{program} start {slot} enabled"
-      entity_category: config
-
-  programs:
-    - { program: A, id: lawns,  name: Lawns }
-    - { program: B, id: beds,   name: Garden beds }
-    - { program: C, id: drip,   name: Drip }
-
-  # -------------------------------------------------------------------------
-  # Triggers with no entity equivalent
-  # -------------------------------------------------------------------------
-  on_nak:
-    - logger.log:
-        format: "Controller NAK for 0x%02X, code 0x%02X"
-        args: [command, code]
-  # on_frame:                # payload of every valid reply, for protocol work
-  #   - lambda: ESP_LOGD("rb", "%s", format_hex_pretty(payload).c_str());
-
-# ---------------------------------------------------------------------------
-# Controller-wide entities. Every key is optional. `rainbird_id` is only
-# needed when there is more than one hub.
-# ---------------------------------------------------------------------------
-sensor:
-  - platform: rainbird
-    remaining_time:
-      name: Time remaining     # seconds; counts down locally between polls
-    active_zone:
-      name: Active zone        # 0 = none
-    queued_zones:
-      name: Zones queued
-    response_time:
-      name: Controller response time
-      entity_category: diagnostic
-    link_errors:
-      name: Controller link errors  # timeouts and bad frames
-      entity_category: diagnostic
-
-binary_sensor:
-  - platform: rainbird
-    watering:
-      name: Watering           # device_class: running
-    rain_sensor:
-      name: Rain sensor        # device_class: moisture; use `filters: [invert]` if reversed
-    irrigation_enabled:
-      name: Irrigation enabled
-    connected:
-      name: Controller connected   # device_class: connectivity, diagnostic
-
-text_sensor:
-  - platform: rainbird
-    active_program:
-      name: Active program     # "Lawns", "Manual" or "Idle"
-    queue:
-      name: Queue              # "Front lawn 24:48, Back lawn 20:00, …"
-    model:
-      name: Controller model   # "ESP-TM2 (000A), protocol 9.12"
-    firmware_version:
-      name: Controller firmware
-    serial_number:
-      name: Controller serial
-    schedule_changed:
-      name: Schedule last changed   # ISO 8601 timestamp, from 4A 01; needs time_id
-
-number:
-  - platform: rainbird
-    rain_delay:
-      id: rain_delay           # used by the HA action package
-      name: Rain delay         # 0–14 days (37)
-    station_delay:
-      name: Delay between zones   # seconds; needs schedule.allow_writes
-    test_duration:
-      name: Test duration      # minutes per zone for the test button
-
-switch:
-  - platform: rainbird
-    rain_sensor_bypass:
-      name: Ignore rain sensor    # page 00; needs schedule.allow_writes
-    irrigation_enabled:
-      name: Irrigation            # 49; needs experimental: true
-
-button:
-  - platform: rainbird
-    stop:
-      id: stop_watering
-      name: Stop watering      # 40
-    advance:
-      name: Next zone          # 42 + next queued zone; upgraded TM2 + experimental
-    test_all_zones:
-      name: Test all zones     # 3A; experimental
-    sync_clock:
-      name: Sync controller clock
-    refresh:
-      name: Refresh from controller
-      entity_category: diagnostic
-
-datetime:
-  - platform: rainbird
-    controller_clock:
-      name: Controller clock   # type: datetime; setting it sends 11 + 13
-```
-
-**`packages/ha-actions.yaml`** (shipped in the repository) defines the Home
-Assistant actions. Only the zone actions are custom; the rest use ESPHome's
-own entity actions:
-
-```yaml
-api:
-  actions:
-    - action: run_zone
-      variables: { zone: int, minutes: int }
-      then:
-        - rainbird.zone.start:
-            zone: !lambda "return zone;"
-            duration: !lambda "return minutes * 60 * 1000;"
-    - action: queue_zone
-      variables: { zone: int, minutes: int }
-      then:
-        - rainbird.zone.queue:
-            zone: !lambda "return zone;"
-            duration: !lambda "return minutes * 60 * 1000;"
-    - action: set_rain_delay
-      variables: { days: int }
-      then:
-        - number.set: { id: rain_delay, value: !lambda "return days;" }
-    - action: stop_watering
-      then:
-        - button.press: stop_watering
-```
+Only the zone actions in the package are custom; the rest use ESPHome's own
+entity actions (4.5).
 
 ---
 
@@ -475,33 +109,34 @@ api:
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `id` | ID | auto | `RainbirdComponent` |
-| `model` | enum | **required** | `ESP-TM2` is implemented. Every other model in the registry is rejected with "not implemented yet" (section 7). |
+| `model` | string | **required** | `ESP-TM2`, the only model (section 7). Anything else is rejected with a link to the issue tracker. |
 | `transmitter_id` | ID of `remote_transmitter` | the only one | Checked at final validation (6.1) |
 | `receiver_id` | ID of `remote_receiver` | the only one | Checked at final validation (6.1) |
 | `listen_only` | bool | `false` | No transmitter is used. State is decoded from replies to another master, such as an LNK2. |
 | `monitor_receiver_id` | ID of `remote_receiver` | – | A second receiver on J4, so requests from another master are decoded too. Development only. |
 | `accept_model_ids` | list of int | – | Extra model IDs to treat as this model (D12) |
-| `update_interval` | time | `15s` | Idle poll cycle (section 6.4) |
+| `update_interval` | time | `15s` | Idle poll cycle (section 6.4). `never`: manual mode, where nothing is sent except `send_raw`. |
 | `valve_switch_mode` | `start` / `queue` | `start` | Whether turning a zone switch on sends `39` or `4B`. Also changes what "off" does (6.5). |
-| `time_id` | ID of `time` | – | Needed by `clock_sync` and by the `schedule_changed` sensor |
+| `time_id` | ID of `time` | – | Needed by `clock_sync`, `sync_clock`, `schedule_changed` and `ends_at` |
+| `clock_sync` | mapping | absent: no sync | The block has to be present for the clock to be synced; `time_id` alone does not. |
 | `clock_sync.max_drift` | time | `30s` | Sync when the controller drifts further than this, at least 5 s. Checked on every clock reading, from boot on; a UTC-offset change moves local time an hour, so it shows as drift. Needs `time_id`. |
 | `schedule.refresh_interval` | time | `1h` | Full re-read of the schedule pages that configured entities use, at least 1 min. The `4A 01` timestamp triggers re-reads in between, except for the change our own write makes. |
 | `schedule.allow_writes` | bool | `false` | Lets schedule entities write `21 …` pages |
 | `experimental` | bool | `false` | Allows `49`, `3A`, `42` and `rainbird.send_raw` |
+| `handshake` | bool | `true` | Runs the `06`/`07` challenge exchange before `02` (SPEC 5.0). A controller that refuses `06` is identified without it. |
 | `zone_defaults`, `zones` | see 4.2 | all 12 zones | `zones: []` creates none |
 | `program_defaults`, `programs` | see 4.3 | all programs | `programs: []` creates none |
 | `on_nak` | automation | | Variables `command`, `code` |
 | `on_frame` | automation | | Variable `payload` (`std::vector<uint8_t>`) for every valid reply. The monitor receiver's requests are only logged. |
 
-**Internal constants, not options.** These start at the values below. Phase 2
-measures the real behaviour, then the constants are fixed. Only one that turns
-out to need tuning per installation would become an option.
+**Internal constants, not options.** Only one that turns out to need tuning per
+installation would become an option.
 
-| Constant | Initial value | Notes |
+| Constant | Value | Notes |
 |----------|---------------|-------|
 | Request timeout | 400 ms | From the end of the first copy of a request. The longest reply (42 bytes) is about 140 ms on the wire, plus about 30 ms of controller turnaround. |
 | Retries | 2 | For timeouts and bad frames on reads. A NAK is never retried. Commands, schedule writes and `send_raw` are never retried, so a lost reply cannot run a command the controller already acted on. |
-| Duplicate 2-byte requests | on | Copies the LNK2 habit (SPEC 2.3) for reads and `send_raw`. Commands and schedule writes go as one copy, because the controller may act on each. Phase 2 A/B-tests whether it's needed. |
+| Duplicate 2-byte requests | on | Copies the LNK2 habit (SPEC 2.3) for reads and `send_raw`. Commands and schedule writes go as one copy, because the controller may act on each. |
 | Fast poll interval | 3 s | While watering, and for 30 s after a command |
 | Gap between transactions | 20 ms | |
 | Receive polarity | auto, per receiver | Locked separately for each receiver (6.1) |
@@ -523,67 +158,56 @@ out to need tuning per installation would become an option.
 | `disabled` | `false` | Generates no entities for this zone |
 | `device_id` | – | Passed to every entity of the zone, to group a zone as an ESPHome sub-device |
 
-**Generated entities** (one key per entity, or one per program for plural
-keys):
+**Generated entities.** The table of zone entities is in README.md, generated
+from `entity_kinds.py` (5.3). Where each one's value comes from:
 
-| Hub key | Platform key | Domain | Generated by default | Default name | Source → write | Notes |
-|---------|--------------|--------|----------------------|--------------|----------------|-------|
-| `valve_switch` | `valve` | switch | yes | `{zone}` | `3F` → `39`/`4B`. Off: `40` (or `42`, 6.5). | |
-| `run_duration_number` | `run_duration` | number (min, 1–255) | yes | `{zone} duration` | local setting | Used by `valve_switch` and `queue_button`. 255 is the `39` limit. |
-| `running_binary_sensor` | `running` | binary_sensor | no | `{zone} running` | `3F` | Same data as the switch, for read-only dashboards |
-| `queue_button` | `queue` | button | no | `{zone} queue` | → `4B` | |
-| `run_time_numbers` | `run_time` (+ `program:`) | number ×programs (min) | no | `{zone} {program} run time` | pages `80`–`85` → `21 00 8N` | Writing needs `allow_writes` |
-| `sensor_bypass_switch` | `sensor_bypass` | switch | no | `{zone} ignores rain sensor` | page `20` → `21 00 20` | Writing needs `allow_writes` |
-| `fault_binary_sensor` | `fault` | binary_sensor | no | `{zone} fault` | `3D` | Stays unavailable until `3D` is decoded (SPEC 8.4) |
+| Platform key | Source → write |
+|--------------|----------------|
+| `valve` | `3F` → `39`/`4B`. Off: `40` (or `42`, 6.5). |
+| `run_duration` | A local setting. Used by `valve` and `queue`. 255 is the `39` limit. |
+| `running` | `3F` |
+| `queue` | → `4B` |
+| `run_time` (+ `program:`) | pages `80`–`85` → `21 00 8N` |
 
-**How each entity's settings are worked out:**
+Two zone entities were planned and are not built: a per-zone rain-sensor
+bypass (page `20`, whose sense only pyrainbird's docs describe, so nothing
+writes it until a capture shows it) and a zone fault sensor (`3D`, still
+undecoded, SPEC 8.4).
 
-1. If the zone sets the key to `false`, the entity is not generated.
-2. Otherwise, the zone's own settings for that key are merged over the
+**How each entity's settings are worked out** (`expand.py`):
+
+1. With no `zone_defaults`, a zone gets the kinds marked default. With
+   `zone_defaults`, it gets exactly the keys listed there.
+2. If the zone sets a key to `false`, that entity is not generated.
+3. Otherwise, the zone's own settings for that key are merged over the
    `zone_defaults` entry. A zone that sets a key absent from `zone_defaults`
    gets that entity anyway.
-3. A key given as a plain string is read as `{name: <string>}`, as in core's
-   `sprinkler`.
-4. The placeholders in the name are filled in.
-5. If no `id` is given, the generated ID is `<zone id>_<key>`. Plural keys
+4. A key given as a plain string is read as `{name: <string>}`, as in core's
+   `sprinkler`. `true` is an empty mapping.
+5. The placeholders in the name are filled in.
+6. If no `id` is given, the generated ID is `<zone id>_<key>`. Plural keys
    add a suffix: the program letter, day or slot number, e.g.
    `front_lawn_run_time_numbers_a`. These are ESPHome config IDs for
    lambdas, not the deprecated entity `object_id`, which the component never
-   sets or reads.
-6. The result becomes an ordinary platform entry. For example,
-   `valve_switch` on zone 1 becomes
-   `switch: - platform: rainbird, zone: 1, valve: {...}`. It is checked
-   against that platform's normal entity schema, so every standard option
-   (`icon`, `internal`, `entity_category`, `disabled_by_default`,
-   `device_id`, `on_turn_on`, `filters`, …) works.
+   sets or reads. `zone_defaults` cannot set an `id`.
+7. The result is checked against the same entity schema the platform module
+   uses, so every standard option (`icon`, `internal`, `entity_category`,
+   `disabled_by_default`, `device_id`, `on_turn_on`, `filters`, …) works.
+   ESPHome validates a domain as soon as that domain is loaded, so the
+   entities cannot be appended to `switch:`; the hub validates them, keeps
+   them in its own config and builds them itself.
 
-**Writing zone entities by hand** gives exactly the same result:
-
-```yaml
-switch:
-  - platform: rainbird
-    zone: 4
-    valve:
-      name: Veggie patch
-    sensor_bypass:
-      name: Veggie patch ignores rain
-number:
-  - platform: rainbird
-    zone: 4
-    run_duration:
-      name: Veggie patch duration
-  - platform: rainbird
-    zone: 4
-    program: A
-    run_time:
-      name: Veggie patch lawns run time
-```
+**Writing zone entities by hand** as `platform: rainbird` entries gives
+exactly the same result, and those are what `packages`, `!extend` and
+`!remove` edit. A hand-written control that repeats one the hub generates, or
+another hand-written one, fails validation; a second read-only sensor for the
+same value is harmless and allowed.
 
 A valve switch or queue button needs its zone's `run_duration` number, a
 start-slot switch needs that slot's `start_time`, and `test_all_zones` needs
 `test_duration`: each control runs with the other entity's value. Final
 validation fails a config that leaves one out, rather than letting the
-control refuse every press.
+control refuse every press (`entity_checks.py`).
 
 ### 4.3 Programs
 
@@ -595,19 +219,20 @@ control refuse every press.
 | `id` | `<hub id>_program_<a>` | Prefix for the program's generated entity IDs |
 | `name` | `Program A` | Fills `{program}`, and is used in the text of `active_program` and `queue` |
 
-**Generated entities:**
+**Generated entities.** The table is in README.md. Where each one's value
+comes from:
 
-| Hub key | Platform key | Domain | Generated by default | Default name | Source → write |
-|---------|--------------|--------|----------------------|--------------|----------------|
-| `start_button` | `start` | button | yes | `Run {program}` | → `38` |
-| `seasonal_adjust_number` | `seasonal_adjust` | number (%, 10–200) | yes | `{program} seasonal adjust` | `30` → `31`. The 10 % floor is a pyrainbird docstring, not a verified limit; phase 4 probes it (SPEC 8.14). |
-| `running_binary_sensor` | `running` | binary_sensor | no | `{program} running` | `3B 00` byte 9 |
-| `frequency_select` | `frequency` | select | no | `{program} frequency` | page `1P` byte 5. Options come from the model: `Custom days`, `Cyclic`, `Odd days`, `Even days`. |
-| `watering_day_switches` | `watering_day` (+ `day:`) | switch ×7 | no | `{program} {day}` | page `1P` byte 0, one bit each. Used by `Custom days`. |
-| `cycle_days_number` | `cycle_days` | number (days) | no | `{program} cycle days` | page `1P` byte 1 |
-| `days_until_next_number` | `days_until_next` | number (days) | no | `{program} days until next run` | page `1P` byte 2 |
-| `start_time_datetimes` | `start_time` (+ `slot:`) | datetime (time) ×4 | no | `{program} start {slot}` | page `6P`, one u16 each |
-| `start_time_switches` | `start_time_enabled` (+ `slot:`) | switch ×4 | no | `{program} start {slot} enabled` | page `6P`. Off = `FFFF`. Must be enabled together with `start_time_datetimes`. |
+| Platform key | Source → write |
+|--------------|----------------|
+| `start` | → `38` |
+| `seasonal_adjust` | `30` → `31`. 5–200 %, from the TM2 manual. |
+| `running` | `3B 00` byte 9 |
+| `frequency` | page `1P` byte 5. The option index is the wire byte. |
+| `watering_day` (+ `day:`) | page `1P` byte 0, one bit each. Used by `Custom days`. |
+| `cycle_days` | page `1P` byte 1 |
+| `days_until_next` | page `1P` byte 2 |
+| `start_time` (+ `slot:`) | page `6P`, one u16 each |
+| `start_time_enabled` (+ `slot:`) | page `6P`. Off = `FFFF`. Needs that slot's `start_time`. |
 
 Every write to page `1P` or `6P` needs `allow_writes`. Bytes 3
 (`permanentDaysOff`) and 4 (unknown) of page `1P` have no entities; they are
@@ -615,18 +240,9 @@ always copied from a fresh read (6.5).
 
 ### 4.4 Platform keys (controller-wide)
 
-| Platform | Keys |
-|----------|------|
-| `sensor` | `remaining_time`, `active_zone`, `queued_zones`, `response_time`, `link_errors` |
-| `binary_sensor` | `watering`, `rain_sensor`, `irrigation_enabled`, `connected` |
-| `text_sensor` | `active_program`, `queue`, `model`, `firmware_version`, `serial_number`, `schedule_changed` (ISO 8601, device class `timestamp`) |
-| `number` | `rain_delay`, `station_delay`, `test_duration` |
-| `switch` | `rain_sensor_bypass`, `irrigation_enabled` |
-| `button` | `stop`, `advance`, `test_all_zones`, `sync_clock`, `refresh` |
-| `datetime` | `controller_clock` |
-
-Each key takes that domain's normal entity schema. Device classes, units,
-icons and entity categories are set the way core sets them.
+The table of controller entities is in README.md. Each key takes that
+domain's normal entity schema. Device classes, units, icons and entity
+categories are set the way core sets them, from the kind table.
 
 ### 4.5 Actions, conditions and triggers
 
@@ -639,9 +255,10 @@ argument that no entity can take:
 | `rainbird.zone.queue` | same | `4B` |
 | `rainbird.send_raw` | `data` (templatable bytes) | Any payload; the reply arrives through `on_frame`. **Experimental only.** Validation fails without `experimental: true`. |
 
-Durations are rounded **up** to whole minutes and clamped to 1–255. Zone
-references in both zone actions go through one resolver, so the validation
-rules are the same everywhere.
+Durations are rounded **up** to whole minutes. A zone outside 1–255 or a
+duration outside 1 ms to 255 minutes is refused, never clamped: a negative
+minutes value in a template wraps to a huge duration, and clamping that would
+water for over four hours (`plan_zone_run()` in `entity_writes.cpp`).
 
 **Everything else uses ESPHome's own automations:**
 
@@ -668,60 +285,57 @@ events that no entity represents.
 
 ```
 rainbird-esphome/
-├── README.md, LICENSE, SPEC.md, PLAN.md, WIRE.md
+├── README.md                    # user documentation; entity tables generated
+├── PLAN.md, HISTORY.md          # this design, and how it was planned and built
+├── SPEC.md, WIRE.md             # the protocol and the circuit
 ├── components/rainbird/
 │   ├── __init__.py              # component metadata; wires the modules below together
 │   ├── classes.py               # the C++ classes codegen names, and each kind's class
 │   ├── hub_schema.py            # hub schema; validates the entities zones/programs generate
 │   ├── codegen.py               # hub and entity code generation
-│   ├── actions.py               # zone_start, zone_queue, send_raw
+│   ├── actions.py               # zone.start, zone.queue, send_raw
 │   ├── const.py                 # config keys shared by the Python modules
 │   ├── entity_kinds.py          # THE table of entity kinds (5.3), used by hub and platforms
 │   ├── expand.py                # zones/programs → entity declarations (no ESPHome import)
-│   ├── models.py                # model registry: limits, accepted IDs, program letters
+│   ├── bindings.py              # a platform entry's key → kind, zone, program, index
+│   ├── models.py                # the model: limits and program letters
 │   ├── platform.py, schemas.py  # the platform modules and entity schemas, from the kind table
-│   ├── wire.py                  # final validation: wire settings, model limits, dependencies
+│   ├── wire.py                  # final validation: transmitter, receivers, RMT memory
+│   ├── entity_checks.py         # final validation: duplicate controls, dependencies
 │   ├── automation.h             # on_nak / on_frame triggers
 │   ├── rainbird.h/.cpp          # hub: ESPHome glue, publishing, logging, clock sync, actions
 │   ├── rainbird_entities.h/.cpp # one class per writeable domain (5.4)
-│   ├── entity_kind.h            # pure: the EntityKind ids, in step with entity_kinds.py
-│   ├── entity_values.h/.cpp     # pure: the C++ kind table, poll plan per binding, values to show
-│   ├── session.h/.cpp           # pure: startup, probes, polls, commands, events
+│   ├── entity_kind.h            # generated: the EntityKind enum and the kind table rows
+│   ├── model_limits.h           # generated: zone, program and value limits
+│   ├── entity_values.h/.cpp     # pure: the kind table, poll plan per binding, values to show
+│   ├── entity_writes.h/.cpp     # pure: what a write from an entity or action becomes
+│   ├── session.h/.cpp           # pure: startup, probes, polls, commands, edits, events
 │   ├── schedule_editor.h/.cpp   # pure: one schedule edit: read, patch, write, confirm
 │   ├── link_core.h/.cpp         # pure: transport queue, timeouts, retries, reply matching
-│   ├── controller_state.h/.cpp  # pure: field IDs, one cell per value, changed flags
+│   ├── controller_state.h/.cpp  # pure: field IDs and one optional cell per value
 │   ├── clock_sync.h/.cpp        # pure: when the controller clock needs setting
-│   ├── countdown.h              # pure: the remaining-time countdown
+│   ├── countdown.h              # pure: the remaining-time countdown and the end time
 │   ├── elapsed.h                # pure: wrap-safe elapsed-time check
 │   ├── manchester.h/.cpp        # pure: raw timings ↔ bits, polarity/phase lock
-│   ├── sip_frame.h/.cpp         # pure: streaming frame parser + encoder, checksum
+│   ├── sip_frame.h/.cpp         # pure: frame encoder, frame hunter, checksum, escapes
 │   ├── sip_commands.h/.cpp      # pure: request builders, typed reply parsers, quirk helpers
-│   ├── model.h                  # pure: abstract Model (limits, polls, page map, codecs)
-│   ├── model_esp_tm2.h/.cpp     # pure: the one implementation
-│   ├── sensor/__init__.py
-│   ├── binary_sensor/__init__.py
-│   ├── text_sensor/__init__.py
-│   ├── number/__init__.py
-│   ├── switch/__init__.py
-│   ├── button/__init__.py
-│   ├── select/__init__.py
-│   └── datetime/__init__.py
+│   ├── model.h                  # pure: limits, capabilities, page fields and codecs
+│   ├── model_esp_tm2.h/.cpp     # pure: the ESP-TM2
+│   └── sensor/, binary_sensor/, text_sensor/, number/, switch/, button/, select/,
+│       datetime/                # each an __init__.py generated from the kind table
 ├── packages/
 │   └── ha-actions.yaml          # api: actions, includable as a remote package
 ├── examples/
-│   ├── minimal.yaml
-│   ├── full.yaml                # the YAML in section 3
-│   └── sniffer.yaml             # listen_only + monitor receiver + dump: raw + send_raw
+│   ├── minimal.yaml, full.yaml
+│   └── sniffer.yaml, sniffer.md # listen_only + monitor receiver + dump: raw; bench notes
 ├── tools/
+│   ├── gen_kinds.py             # entity_kinds.py, models.py → entity_kind.h, model_limits.h
+│   ├── gen_docs.py              # entity_kinds.py → the entity tables in README.md
 │   └── raw_to_fixture.py        # "Received Raw:" log lines → tests/captures files
 ├── tests/
-│   ├── unit/                    # host-compiled tests of the pure C++ layers
-│   │   ├── Makefile
-│   │   ├── doctest.h
-│   │   ├── test_frame.cpp, test_manchester.cpp, test_commands.cpp, test_replay.cpp
-│   │   └── vectors.h            # every example in SPEC.md as a test vector
-│   ├── python/                  # pytest: expansion of zones/programs, ID snapshot
-│   ├── captures/                # real pulse-timing captures from phase 1 onwards
+│   ├── unit/                    # host-compiled tests of the pure C++ layers (section 8)
+│   ├── python/                  # pytest: expansion, IDs, generated files, config validation
+│   ├── captures/                # pulse-timing captures for the replay test
 │   └── components/rainbird/
 │       ├── common.yaml          # the component config, pins as substitutions
 │       ├── test.esp32-idf.yaml  # core naming: test.<platform>-<framework>.yaml
@@ -746,8 +360,8 @@ so CI tests the code in the PR rather than a published tag.
 
 ### 5.1 Architecture rules
 
-These are fixed now, because they are cheap to follow from the first commit
-and expensive to retrofit.
+These were fixed before the first commit, because they are cheap to follow
+from the start and expensive to retrofit.
 
 ```
 remote_transmitter / remote_receiver           (ESPHome)
@@ -759,7 +373,7 @@ manchester ──► sip_frame ──► sip_commands      (pure C++: wire forma
                      model  ──►  ControllerState   (pure C++: meaning)
                                    │ changed fields
                                    ▼
-link_core ◄── session ──► entity_values          (pure C++: behaviour)
+link_core ◄── session ──► entity_values/_writes  (pure C++: behaviour)
                  ▲  │ events, readout
                  │  ▼
           RainbirdComponent ──► entities          (ESPHome)
@@ -772,29 +386,32 @@ link_core ◄── session ──► entity_values          (pure C++: behaviou
    - `Session` owns the controller conversation and `ControllerState`, and
      reports what happened through one event queue.
    - `LinkCore` owns scheduling: queue, timeouts and retries.
-   - `entity_values` owns the kind table: what each entity shows, polls and
-     writes. `RainbirdComponent` only publishes and logs.
+   - `entity_values` owns the kind table and what each entity shows and
+     polls; `entity_writes` owns what each write becomes. The table itself is
+     generated from `entity_kinds.py` (5.3). `RainbirdComponent` only
+     publishes, logs and carries a write plan out.
    - Replies are parsed in exactly one place; the model never re-parses
      bytes.
-2. **Includes only point down the stack.** The pure layers (`manchester`,
-   `sip_*`, `model*`, `controller_state`) include only the standard library.
+2. **Includes only point down the stack.** The pure layers (everything in
+   the diagram except the ESPHome rows) include only the standard library.
    The host tests enforce this, because they compile those files without
    ESPHome.
-3. **`ControllerState` is the only copy of controller data.** Entities never
-   cache values. A reply updates fields and marks them changed. The hub then
-   publishes only the entities bound to changed fields, so nothing is
-   republished when a poll changes nothing. The only values outside it are
-   local settings that the controller doesn't hold (run durations, test
-   duration).
+3. **`ControllerState` is the only copy of controller data.** Each value is
+   empty until a reply brings it, and is emptied again when the link goes
+   down. `Session::revision()` moves on whenever anything may have changed;
+   the hub then walks its entities and publishes only a value that differs
+   from the one it last published, so nothing is republished when a poll
+   changes nothing. The only values outside it are local settings that the
+   controller doesn't hold (run durations, test duration).
 4. **Every write from an entity goes through one function**,
-   `RainbirdComponent::submit()`, which picks the command. The model gate
+   `RainbirdComponent::submit()`. What the write means is decided by the pure
+   `plan_write()`; `submit()` hands the plan to the session. The model gate
    (D12), `allow_writes`, `experimental` and capability checks live in
    `Session::control()` and `Session::edit_schedule()` and nowhere else.
 5. **Protocol quirks are named functions in `sip_commands`, written once.**
-   Examples: `nak_is_unsupported(code)` (bit 0), `queue_program(byte)`
-   (`FF` = manual or idle), `queue_seconds()` (big-endian seconds), and
-   `run_time_page(zone)` / `run_time_offset(zone, program)` for the 1-based
-   zone mapping. Call sites never repeat the arithmetic.
+   Examples: `nak_is_unsupported(code)` (bit 0), `QUEUE_PROGRAM_NONE`
+   (`FF` = manual or idle), and `run_time_page(zone)` /
+   `run_time_offset(zone, program)` for the 1-based zone mapping. Call sites never repeat the arithmetic.
 6. **No statics or globals.** `MULTI_CONF` allows several hubs, so all state
    hangs off component instances. That includes decoder state, which is kept
    per receiver.
@@ -808,8 +425,8 @@ on 2026-10-20 (section 11).
 - Namespace `esphome::rainbird`. The namespace must match the component name.
 - `this->` everywhere, members with a trailing underscore, `snake_case`
   methods, and `final` on concrete classes, as core does.
-- **Log tags** are declared with `ESPHOME_LOG_TAG(TAG, "rainbird.link");` at
-  namespace scope in each `.cpp`. That macro arrives in 2026.10.0, so a shared
+- **The log tag** is declared with `ESPHOME_LOG_TAG(TAG, "rainbird");` at
+  namespace scope in `rainbird.cpp`, the only file that logs. That macro arrives in 2026.10.0, so a shared
   header carries core's documented fallback for older releases:
   ```cpp
   #ifndef ESPHOME_LOG_TAG
@@ -823,9 +440,9 @@ on 2026-10-20 (section 11).
   already log published states at VERBOSE. Frame dumps are VERBOSE, through
   `format_hex_pretty_to` into a stack buffer. They move to `ESP_LOGV_HEX`
   once `min_version` includes it.
-- `SUB_SENSOR`, `SUB_BINARY_SENSOR` and `SUB_TEXT_SENSOR` setters for the
-  read-only controller-wide entities, each include inside `#ifdef USE_SENSOR`
-  (etc.) guards, as `ld2410` does.
+- Read-only entities are ESPHome's own classes, registered with the hub
+  together with their binding (`add_sensor(entity, kind, zone, program,
+  index)`). Each domain's code sits inside `#ifdef USE_SENSOR` (etc.) guards.
 - **Status** uses `status_set_warning()` / `status_clear_warning()` while the
   link is down. The named form of `status_momentary_warning` is deprecated
   (removal in 2027.5.0) and is not used.
@@ -851,7 +468,8 @@ on 2026-10-20 (section 11).
 - **Final validation** (`FINAL_VALIDATE_SCHEMA`) reads the referenced
   transmitter and receiver configs with `fv.full_config` and
   `get_declaring_config`, the way components that use `uart` check the bus
-  settings (6.1).
+  settings (6.1). The entity checks that run in the same pass are in
+  `entity_checks.py`.
 - **Entity schemas** come from the domain helpers: `switch.switch_schema(...)`,
   `number.number_schema(..., unit_of_measurement=...)`,
   `button.button_schema(...)`, `select.select_schema(...)`,
@@ -859,8 +477,10 @@ on 2026-10-20 (section 11).
   are created with `new_switch`, `new_number(config, min_value=, max_value=,
   step=)` and so on, and parented with `cg.register_parented()`.
 - The hub is wired to the wire layer with
-  `cg.add(hub.set_transmitter(await cg.get_variable(...)))` and
-  `remote_base.register_listener(hub_receiver_adapter, config)`.
+  `cg.add(hub.set_transmitter(await cg.get_variable(...)))` and a
+  `RainbirdReceiver` listener per receiver. From 2026.10 the listener list is
+  sized at codegen, so it is added with `remote_base.add_listener()` where
+  that exists and `register_listener()` otherwise.
 - **Not used yet, to adopt later** (11.3): `cg.add_pin()`,
   `cg.add_variable()`, `sub_switches()` and the `Apply*` classes.
 - **No PlatformIO-specific hooks** (`cg.add_library`, `platformio_options`).
@@ -875,44 +495,60 @@ Every entity the component can create is one row:
 
 ```python
 EntityKind(
-    key="run_time",               # platform key; hub key = run_time_numbers
-    domain="number",
-    scope=Scope.ZONE,             # CONTROLLER | ZONE | PROGRAM
+    KindId.RUN_TIME,              # the number the C++ EntityKind enum uses
+    "run_time",                   # platform key
+    "number",                     # domain
+    Scope.ZONE,                   # CONTROLLER | ZONE | PROGRAM
+    "{zone} {program} run time",  # default name
     fan_out=FanOut.PROGRAM,       # NONE | PROGRAM | DAY | SLOT
-    default=False,                # generated by zone_defaults when absent?
-    default_name="{zone} {program} run time",
-    field=Field.RUN_TIME,         # ControllerState field it reads
     write=Write.SCHEDULE_PAGE,    # NONE | LOCAL | COMMAND | SCHEDULE_PAGE
-    gate=Gate.ALLOW_WRITES,       # NONE | ALLOW_WRITES | EXPERIMENTAL
-    schema=lambda: number.number_schema(RainbirdNumber, unit_of_measurement=UNIT_MINUTE,
-                                        entity_category=ENTITY_CATEGORY_CONFIG),
-    limits=(0, 255, 1),
+    limits=(0, 65535, 1),
+    unit="min",
+    key_override="run_time_numbers",  # hub key, when it is not <key>_<domain>
+    field="RUN_TIME",             # the ControllerState field it shows and edits
+    doc="One per program; a platform entry also takes `program:`.",
 )
 ```
+
+Rows also carry the entity defaults (`device_class`, `state_class`,
+`entity_category`, `icon`, `accuracy`, `mode`) as plain strings, so the module
+imports without ESPHome and the host tests can load it.
 
 The table drives everything else:
 
 - the hub's `zone_defaults` / `program_defaults` keys, including their
-  `_<domain>` and plural spellings;
-- the platform schemas and their keys;
-- the expansion of zones and programs into platform entries;
-- the C++ binding passed to each entity (`kind`, `zone`, `program`, `index`);
+  `_<domain>` and plural spellings (`hub_key()`);
+- the platform schemas and their keys (`platform.py`, `schemas.py`);
+- the expansion of zones and programs into entity declarations (`expand.py`);
+- the binding passed to each entity (`kind`, `zone`, `program`, `index`),
+  worked out in one place (`bindings.py`) for codegen and for the duplicate
+  and dependency checks alike;
+- the C++ side: `tools/gen_kinds.py` writes the `EntityKind` enum and the
+  rows of the C++ kind table into `entity_kind.h`, so the two tables cannot
+  disagree. Number limits come from `models.py`, which the same tool writes
+  into `model_limits.h` for the session's range checks;
 - the poll plan: which `Field`s are used decides which requests are polled
   (6.4);
-- the docs tables in 4.2–4.4, generated by a script rather than hand-edited.
+- the entity tables in README.md (`tools/gen_docs.py`).
 
-Adding an entity kind means one row and, if it needs a new field, one parser
-case. There are no hand-written branches per key.
+A Python test fails when a generated file is out of date, so CI catches a row
+changed without running the tools.
+
+Adding an entity kind means one row, a run of both tools and, if it needs a
+new field, one parser case and one reader in `entity_values.cpp`.
+
+Whether a kind needs `experimental` or `allow_writes` is not in the table: the
+session decides that per command (5.1 rule 4).
 
 ### 5.4 C++ classes
 
 **One class per writeable domain.** `write_state()` / `control()` are pure
 virtual, so each writeable domain needs one subclass. Each class carries a
 binding (`kind`, `zone`, `program`, `index`) and forwards writes to
-`RainbirdComponent::submit()`, which chooses the command:
+`RainbirdComponent::submit()`:
 
-- `RainbirdSwitch`: valve, sensor bypass, watering day, start-time enabled,
-  global rain-sensor bypass, irrigation enabled
+- `RainbirdSwitch`: valve, watering day, start-time enabled, global
+  rain-sensor bypass, irrigation enabled
 - `RainbirdNumber`: run time, seasonal adjust, cycle days, days until next
   run, rain delay, station delay
 - `RainbirdSetting`: run duration and test duration. These are local numbers the
@@ -920,7 +556,8 @@ binding (`kind`, `zone`, `program`, `index`) and forwards writes to
 - `RainbirdButton`: queue, program start, stop, advance, test all zones, sync
   clock, refresh
 - `RainbirdSelect`: frequency
-- `RainbirdDateTime`: start time (time) and controller clock (datetime)
+- `RainbirdTime`: a start time
+- `RainbirdDateTime`: the controller clock
 
 Read-only entities use the base classes directly: `sensor::Sensor`,
 `binary_sensor::BinarySensor`, `text_sensor::TextSensor`.
@@ -930,35 +567,12 @@ core's `template` number does with `restore_value`. When ESPHome replaces the
 preference-hash helpers (removal is scheduled for 2027.1.0), we follow
 whatever core `template` number moves to.
 
-```cpp
-namespace esphome::rainbird {
-
-class RainbirdComponent final : public PollingComponent {
- public:
-  void setup() override;          // queue identification requests
-  void loop() override;           // run the link; disabled when idle
-  void update() override;         // enqueue a poll cycle if none is pending
-  void dump_config() override;
-
-  // The single write path (5.1 rule 4)
-  bool submit(const EntityBinding &binding, float value);
-
-  // Entity registration: each entity carries its binding; the hub polls for it
-  // and publishes to it.
-  void add_switch(RainbirdSwitch *entity);
-  void add_sensor(sensor::Sensor *entity, uint8_t kind, uint8_t zone, uint8_t program, uint8_t index);
-  /* … one per domain … */
-
- protected:
-  void handle_events_();           // log what the session reports
-  void publish_changed_();         // kind_changed() and *_value() per binding
-
-  EspTm2Model model_;
-  std::unique_ptr<Session> session_;  // owns LinkCore and ControllerState
-};
-
-}  // namespace esphome::rainbird
-```
+`RainbirdComponent` is a `PollingComponent`. `setup()` builds the session's
+config from the registered bindings and starts it; `update()` only enqueues a
+poll cycle; `loop()` runs the link and is disabled when the link is idle;
+after every frame, loop and update it drains the session's events, publishes
+what changed and checks the clock. It owns one `EspTm2Model` and one
+`Session`, which owns `LinkCore` and `ControllerState`.
 
 ---
 
@@ -966,12 +580,13 @@ class RainbirdComponent final : public PollingComponent {
 
 ### 6.1 Wire layer: `remote_transmitter` and `remote_receiver`
 
-**Transmit.** `RainbirdLink` holds a `remote_base::RemoteTransmitterBase *`.
-To send a frame:
+**Transmit.** The hub holds a `remote_base::RemoteTransmitterBase *`. To send
+what `Session::next_transmission()` returns:
 
 1. Call `transmit()` and `get_data()`, then `set_carrier_frequency(0)`.
-2. Append one `mark(208)` / `space(208)` pair per bit, ordered by the bit's
-   value. Adjacent equal levels are merged.
+2. Set the data to `manchester_encode()`'s timings: one 208 µs mark and one
+   208 µs space per bit, ordered by the bit's value, with adjacent equal
+   levels merged.
 3. Call `perform()`.
 
 Both copies of a duplicated 2-byte request go into the same data buffer, so
@@ -1039,23 +654,37 @@ frame never contains a gap as long as `idle`, so a frame can't be split
 across bursts.
 
 1. Classify each duration as 1 or 2 half-bits, allowing ±30 % on the
-   208/416 µs widths. Anything else ends the current frame attempt.
+   208/416 µs widths. Anything else ends the burst, unless it is the idle
+   tail `remote_receiver` appends, which also swallows the last half-bit.
 2. Expand into a stream of half-bit levels. The sign gives the level.
-3. Until polarity is locked, run 4 decoders in parallel: both polarities ×
-   both phase offsets. The phase offset absorbs the "extra half-bit" seen on
-   replies.
-4. Decode high-low = 1 and low-high = 0, MSB first, into a **streaming frame
-   parser**. It hunts for `F5 F5 1C` or `F5 F5 F5 1C`, then reads `len`
-   bytes, the checksum and `1D`.
+3. Until polarity is locked, decode the burst four ways, both polarities ×
+   both phase offsets, and keep the one that yields the most frames. The
+   phase offset absorbs the "extra half-bit" seen on replies.
+4. Decode high-low = 1 and low-high = 0, MSB first, into bits. The frame
+   hunter (`find_frames()`) looks for `F5 F5 1C` at every bit; a reply's
+   extra leading `F5` sits in front of that same sequence. It then reads
+   `len` bytes, the checksum and `1D`: plain first, then with byte-stuffing
+   undone (SPEC 2.4). A frame cut off by the end of the burst is dropped.
 5. **Frames are split by length, not by gaps.** As soon as a frame
-   validates, the parser hunts for the next preamble on the very next bit.
+   validates, the hunter looks for the next preamble on the very next bit.
    The duplicate 2-byte requests arrive in one burst with no gap, and both
    are recovered.
 6. **Polarity locks per receiver**, after 3 consecutive good frames. The two
    directions are known to have opposite polarity at the LNK2's own pins.
    Five bad frames in a row unlock it again.
 
-### 6.3 Transport (`rainbird_link`) and startup
+### 6.3 Transport (`LinkCore`, `Session`) and startup
+
+The link is two pure classes and a thin hub. `LinkCore` is the transport: the
+queue, one request in flight, timeouts, retries, reply matching and duplicate
+counting. `Session` is the conversation: startup, probes, the poll plan, the
+model gate, commands, schedule edits and events. `RainbirdComponent` sends,
+receives and publishes. Both pure classes run against a scripted controller
+in `tests/unit/test_session.cpp`.
+
+Every wait is "elapsed since a start time ≥ a delay" in unsigned arithmetic
+(`elapsed.h`). A signed comparison against a stored deadline refuses to send
+for up to 24.8 days after a long idle spell or the millis() wrap.
 
 - **`update()` only enqueues.** `PollingComponent::update()` adds a poll
   cycle unless one is pending. Only `loop()` transmits, so a poll can never
@@ -1070,17 +699,23 @@ across bursts.
 - **One request in flight at a time.** Each step is: send, then wait up to
   the timeout after the end of the first copy, then match the reply. A reply
   matches if its opcode is the request opcode + `0x80`, or an ACK/NAK whose
-  echo byte is the request opcode.
+  echo byte is the request opcode. Paged requests also check the selector
+  the reply echoes (`reply_matches()`), so a late reply to an earlier page
+  is not taken for this one.
 - **Duplicate replies.** A second identical reply within the window is
   dropped and counted, which answers SPEC question 5.
 - **Errors.** A timeout or bad frame is retried, then counted as a link
   error. Commands and schedule writes go as one copy and are never retried:
   the controller may act on every copy it hears, and a lost reply does not
   mean it did nothing. `send_raw` is never retried either (4.1). Three
-  failures in a row set `connected` off, and polling backs off. While it is
-  off, commands and schedule edits are refused, and any still queued are
-  dropped: a command must not run minutes later, or on a different
-  controller. After five minutes down, the hub starts again at step 1 of the
+  failures in a row set `connected` off, and polling stays at
+  `update_interval`. While it is off, commands and schedule edits are
+  refused, and any still queued are dropped: a command must not run minutes
+  later, or on a different controller. `ControllerState` is emptied at the
+  same moment, keeping only which zones exist: a zone shown running may have
+  stopped since. The hub shows what it can as unknown (6.5), and everything,
+  the schedule included, is read again when the controller answers. After
+  five minutes down, the hub starts again at step 1 of the
   startup below, in case the controller was replaced or reflashed.
 - **Only the answer to the request in flight updates state** in active mode.
   A late or duplicate reply is older than what that request brings.
@@ -1089,7 +724,14 @@ across bursts.
   bytes, never a page kept from an earlier read. Another master or the front
   panel can still change the page between the read and the write; the
   controller has no conditional write, so the confirming read is the check.
-- **A clock set is queued whole**: `11` and `13` together, or neither.
+- **A clock set is time, then date**: `11` goes first, and `13` only once
+  `11` is acknowledged. A new date on a time the controller did not take
+  would be a clock a day out near midnight. One clock set at a time.
+- **Schedule edits run one at a time and wait their turn.** An edit asked
+  for while another runs is held, up to eight of them; a later value for a
+  field already waiting replaces the earlier one. Each reads its page
+  afresh, so two edits to one page do not undo each other, and one that
+  fails does not stop those behind it. A lost link drops them all.
 - **NAKs** are logged and raise `on_nak`. The command is marked unsupported
   for the session when `nak_is_unsupported(code)` is true (bit 0 set). A NAK
   without bit 0 is logged as a likely encoding bug.
@@ -1106,21 +748,35 @@ across bursts.
 
 **Startup**
 
+0. The handshake, when `handshake` is on (SPEC 5.0): `06` with our
+   challenge, then `07` with our answer to the controller's. A controller
+   that refuses `06` has none, and startup carries on.
 1. `02` model and protocol. If the model ID isn't accepted (D12), an error
    is logged, the hub stays read-only, and `model` reports the mismatch.
 2. `0B` firmware, `05` serial, `03 00` available zones.
-3. `04` probes for every optional command the configured entities need
-   (`4C`, `4A`, `42`, `4B`, `3D`, `49`, `3A`). **The probe results are the
+3. `04` probes for the six optional commands (`4C`, `4A`, `42`, `4B`,
+   `49`, `3A`). If `04` itself is refused with a NAK and no probe is
+   answered, every optional command is assumed until its own NAK (bit 0)
+   switches it off. A probe that only times out assumes nothing: the
+   fallback polls run, and it is asked again with a later slow poll.
+   **The probe results are the
    only source of capability information.** The model ID is used for the
    D12 gate and for nothing else, so there are no per-variant feature tables
    in code.
 4. Read the schedule pages that configured entities use.
-5. Clock check and sync if needed. Then the normal poll cycle starts.
+5. The normal poll cycle starts. With `clock_sync`, each clock reading from
+   then on is checked (6.5).
 
 On reaching running, the log shows the model and firmware, what each `04`
 probe answered, and the schedule pages read. Every 10 minutes it shows the
 link counters: replies, duplicate replies (SPEC question 5), unexpected
 frames and timeouts.
+
+**Modes without startup.** `update_interval: never` is manual mode: no
+identification and no polling, only `send_raw`; the bench loopback uses it.
+`listen_only` never transmits: every valid reply updates state (in active
+mode only the matched one does), so status entities work passively alongside
+an LNK2, and `connected` means "a valid frame in the last 60 s".
 
 Zones that the `03` mask reports as missing get a warning when the link
 reaches running, and commands for them are refused. ESPHome has no
@@ -1137,18 +793,18 @@ The hub polls only for fields that a configured entity uses:
 | Fields | Request | When |
 |--------|---------|------|
 | Zones running | `3F 00` | Short poll |
-| Clock, rain delay, rain sensor, irrigation enabled | `4C` if supported, else `10`, `12`, `36`, `3E`, `48` | Short poll |
-| Running zone, program, time left | `3B 00` | Short poll |
-| Queue entries | `3B 01` | While watering, if `queue` or `queued_zones` is configured |
-| Seasonal adjust | `30 00`–`02` | Every 4th poll |
-| Schedule timestamp | `4A 01` | Every 4th poll, if any schedule entity or `schedule_changed` exists |
-| Zone faults | `3D 00` | Every 4th poll, if any `fault_binary_sensor` exists |
-| Schedule pages | `20 00 PP` for the pages that configured entities use | At startup, when `4A 01` changes, and every `refresh_interval` |
+| Clock, rain delay, rain sensor, irrigation enabled | `4C` if supported, else `10`, `12`, `36`, `3E`, `48` for the ones in use | Short poll |
+| Running zone, program, time left, queued count | `3B 00` | Short poll |
+| Queue entries | `3B 01` | Short poll, if the `queue` text, the `advance` button or a queue-mode valve (with `experimental`) is configured |
+| Seasonal adjust | `30 00`–`02` | Slow poll: the first cycle, then every 4th |
+| Schedule timestamp | `4A 01` | Slow poll, if supported and any schedule entity or `schedule_changed` exists |
+| Schedule pages | `20 00 PP` for the pages that configured entities use | At startup, when `4A 01` changes, every `refresh_interval`, on `refresh`, and after the link returns |
 
-The **short poll** is the first three rows. A config with only zone switches
-polls two or three requests per cycle and never reads a schedule page. One
-full idle cycle takes about 3 × 200 ms, so the bus is free more than 95 % of
-the time.
+The **short poll** is the first four rows. A config with only zone switches
+polls one request per cycle and never reads a schedule page. One full idle
+cycle is a handful of requests at about 150–200 ms each, so the bus is free
+more than 95 % of the time. One cycle runs at a time: `update()` does not
+queue another while one is pending.
 
 ### 6.5 Entity behaviour notes
 
@@ -1177,7 +833,8 @@ landed after all.
 
 **Schedule edits.** Every schedule entity is bound to a *page field*: page,
 byte offset, width and bit mask, plus a value encoding from the model. One
-generic routine in the hub handles every schedule write:
+generic routine (`ScheduleEditor`, driven by the session) handles every
+schedule write, one edit at a time (6.3):
 
 1. Re-read the page.
 2. Change only the bits of the edited field. Every other byte is kept from
@@ -1198,6 +855,22 @@ generic routine in the hub handles every schedule write:
 - After a reboot, an off slot's time entity has no value until it is set.
   This keeps the single-source-of-truth rule without exceptions.
 
+**Link loss.** When the link goes down the session forgets what it read
+(6.3), and the hub shows every entity that can as unknown: sensors and
+controller-backed numbers publish NaN, binary sensors lose their state, and
+`ends_at` goes empty. Switches, selects, times and the other text sensors
+have no such state and keep their last value; `connected` says how far to
+trust them. Local settings and the link diagnostics are left alone. The first
+reading after the link returns is published even when it equals the old one.
+
+**`remaining_time` and `ends_at`.** `remaining_time` counts down locally every
+second between readings (`Countdown`), re-anchored on each one because a
+paused controller repeats its value. `ends_at` is the same thing as one
+timestamp, now plus the time left, which Home Assistant counts down to by
+itself. It is republished only when it moves by more than two seconds
+(`EndTime`): the controller paused, or another zone started. It needs
+`time_id`.
+
 **`active_program`** shows the program name, `Manual` (`FF` with a zone
 running) or `Idle`.
 
@@ -1205,7 +878,7 @@ running) or `Idle`.
 *controller local time* (SPEC 5.3). It is converted to a UTC timestamp with
 `ESPTime` and the timezone of `time_id`, so the sensor needs `time_id`, and
 config validation fails without it. Whether the controller really stores
-local time is still an open question (SPEC 8.11); phase 3 checks it.
+local time is still an open question (SPEC 8.11).
 
 **Clock sync** stays built in, because only C++ can compare the controller
 clock against `time_id` before writing. Each new reading is compared once,
@@ -1222,65 +895,49 @@ default is fixed once confirmed.
 
 ---
 
-## 7. Model abstraction and stubs
+## 7. The model
 
-### 7.1 Python registry (`models.py`): where the stubs live
+There is one model, the ESP-TM2, and the code says so directly rather than
+through an interface nobody else implements.
 
-```python
-MODELS = {
-    "ESP-TM2":  Model(implemented=True,  zones=12, programs=3, starts=4,
-                      model_ids=[0x0005, 0x000A, 0x010A, 0x0014, 0x0015]),
-    "ESP-ME":   Model(implemented=False, zones=22, programs=4, starts=6,
-                      model_ids=[0x0007, 0x0107]),
-    "ESP-RZXE": Model(implemented=False, zones=8,  programs=0, starts=6,
-                      model_ids=[0x0003, 0x0103]),
-    "ST8X-WF":  Model(implemented=False, zones=8,  programs=0, starts=6,
-                      model_ids=[0x0006, 0x0008]),
-    "ESP-ME3":  Model(implemented=False, zones=22, programs=4, starts=6,
-                      model_ids=[0x0009]),
-}
-```
+### 7.1 Python (`models.py`)
 
-The registry is used to:
+`ESP_TM2` is a `Model`: its name, 12 zones, 4 start slots, program letters
+`ABC`, and the value ranges from the manual (seasonal adjust 5–200 %, rain
+delay up to 14 days, runs up to 255 minutes). It is used to:
 
-- reject models that aren't implemented, with a link to the issue tracker;
-- check zone numbers, program letters and other ranges against the model's
-  limits;
-- pick the C++ model to create;
-- give the runtime model-ID check (D12) its list of accepted IDs.
+- reject any other `model:` value, with a link to the issue tracker;
+- check zone numbers, program letters and number ranges at validation;
+- give the C++ side the same limits, through the generated `model_limits.h`.
 
-The other models are stubbed here and only here. Empty C++ classes would be
-dead code, and they would encode guesses about models nobody has tested.
+The model IDs a TM2 can report (`0005`, `000A`, `010A`, `0014`, `0015`) are in
+`model_esp_tm2.cpp`, which checks the `02` reply for the D12 gate.
 
-### 7.2 C++ `Model` interface
+### 7.2 C++ (`EspTm2Model`)
 
-```cpp
-class Model {
- public:
-  virtual ~Model() = default;
-  virtual const ModelLimits &limits() const = 0;
-  virtual bool accepts(uint16_t model_id) const = 0;              // D12 gate
-  virtual void short_poll(const Capabilities &caps, FieldSet used, RequestList &out) const = 0;
-  virtual void slow_poll(const Capabilities &caps, FieldSet used, RequestList &out) const = 0;
-  virtual std::optional<PageField> locate(Field field, uint8_t zone, uint8_t program, uint8_t index) const = 0;
-  virtual const ValueCodec &codec(Field field) const = 0;         // e.g. minutes ↔ time, FFFF = off
-  virtual const std::vector<const char *> &frequency_options() const = 0;
-  virtual void apply_reply(const sip::Reply &reply, ControllerState &state) const = 0;
-};
-```
+`EspTm2Model` is a concrete class with no virtuals. `Session`,
+`ScheduleEditor` and `entity_values` take it by reference. It owns meaning:
 
-There is one implementation, `EspTm2Model`.
+- `limits()` and `accepts(model_id)`;
+- `short_poll()` and `slow_poll()`: the requests for the fields in use (6.4);
+- `locate(field, zone, program, index)`: the page map. Reading a page and
+  editing one both use it and nothing else, so the two cannot disagree;
+- `codec(field)` with `read_codec()` / `write_codec()`: the value encodings,
+  such as minutes ↔ start slot with `FFFF` for off;
+- `apply_reply()`: maps an already-parsed `Reply` onto `ControllerState`.
+  Parsing happens only in `sip_commands` (5.1 rule 1);
+- `note_support()`: records a `04` probe answer in `Capabilities`;
+- `patch()`: copies a page and changes one field, for the schedule editor.
 
-- **The model receives typed replies.** `apply_reply` maps an already-parsed
-  `sip::Reply` onto `ControllerState` fields; parsing happens only in
-  `sip_commands` (5.1 rule 1).
-- **Schedule writes have no per-model code.** `locate()` gives the page and
-  bits for a field, and the hub's generic read-modify-write does the rest.
-- **Encodings come from the model.** These include the frequency option
-  order, start-time conversion and the "slot off" value. The LCR family
-  differs on all three (custom/odd/even/cyclic order, 10-minute start
-  resolution, `0x90` for off). A future LCR model supplies its own, and the
-  entity layer needs no changes.
+`ControllerState` is sized for the TM2 (`STATE_ZONES`, `STATE_PROGRAMS`,
+`STATE_STARTS`, from `model_limits.h`).
+
+**A second model.** The other Rain Bird families differ in zone and program
+counts, and the LCR family in encodings too (custom/odd/even/cyclic order,
+10-minute start resolution, `0x90` for off). Adding one means a second model
+class and, at that point, an interface over the methods above; `model.h`
+already holds the types they share. No stub exists for a model nobody has
+tested, in Python or C++: it would encode guesses.
 
 ---
 
@@ -1289,37 +946,38 @@ There is one implementation, `EspTm2Model`.
 | Layer | How it's tested |
 |-------|-----------------|
 | Frame codec, checksum | Host unit tests with doctest. Vectors are every frame in SPEC.md, plus corrupted copies with bad length, checksum or end byte. Also two frames back to back in one burst with no gap. |
-| Manchester codec | Host tests. Synthesise raw timings (+mark / −space) from bytes, add ±20 % jitter, invert them, add the leading half-bit, then decode. Also round-trip with the encoder. |
-| Replay | `test_replay.cpp` feeds every file in `tests/captures/` (real `Received Raw:` bursts from `dump: raw`) through the full pipeline. Expected payloads are stored beside each capture. |
-| SIP parsers and model | Host tests using every `[test]` and `[wire]` example in SPEC.md. Also tests that a schedule edit changes only the bits of its field, and that every quirk helper (5.1 rule 5) is right. Vectors taken from pyrainbird's raw `decode_schedule` output have 1 added to the zone numbers (SPEC 5.6). |
-| Expansion and IDs | pytest on `entity_kinds.py` and the hub expansion: defaults merge, `false`, string shorthand, placeholders. A **snapshot of every generated ID** for `examples/full.yaml` guards D9. |
-| Schema and codegen | `esphome compile` on every `tests/components/rainbird/test.*.yaml`, and `esphome config` on `validate.*.yaml` and `examples/*.yaml`. Negative tests check that each final-validation rule (6.1) fires, and that `send_raw` without `experimental`, an unimplemented model, and S2/C2 targets are rejected. |
+| Manchester codec | Host tests. Synthesise raw timings (+mark / −space) from bytes, add jitter, invert them, add the leading half-bit, then decode. Also round-trip with the encoder. |
+| Replay | `test_replay.cpp` feeds every file in `tests/captures/` (`Received Raw:` bursts from `dump: raw`, converted by `tools/raw_to_fixture.py`) through the full pipeline. Expected payloads are stored beside each capture. |
+| SIP parsers and model | Host tests using the `[test]` and `[wire]` examples in SPEC.md. Also tests that a schedule edit changes only the bits of its field, and that every quirk helper (5.1 rule 5) is right. |
+| Link and session | `test_link.cpp`, `test_session.cpp`, `test_handshake.cpp`: the pure classes against a scripted controller (`fake_controller.h`), with time passed in. |
+| Entity reads and writes | `test_entity_values.cpp` and `test_entity_writes.cpp`: what each kind shows, and what each write becomes, including every refusal. |
+| Untrusted input | `test_fuzz.cpp`: random and damaged timings, bits and payloads through every decode path, the session and the entity layer, with fixed seeds. |
+| Expansion and IDs | pytest on `entity_kinds.py` and the hub expansion: defaults merge, `false`, string shorthand, placeholders, generated IDs (D9). |
+| Generated files | pytest fails when `entity_kind.h`, `model_limits.h` or the README tables are out of date (5.3). |
+| Schema and codegen | `esphome compile` on every `tests/components/rainbird/test.*.yaml`, and `esphome config` on `validate.*.yaml` and the examples. `test_config.py` checks that each final-validation rule (6.1) fires, and that `send_raw` without `experimental`, an unknown model, and S2/C2 targets are rejected. It is skipped where `esphome` is not installed. |
 | Lint | ruff, clang-format check, yamllint |
-| Hardware | Phases 1–2 below, on the real controller |
+| Hardware | On the real controller; HISTORY.md has the phases |
 
-**Host test build:** `tests/unit/Makefile` compiles the pure C++ sources with
-the tests:
-
-```
-g++ -std=gnu++17 -Wall -Wextra -Werror -I components/rainbird
-```
-
-Because no ESPHome include path is given, this also enforces 5.1 rule 2. Run
-it with:
+**Host test build.** `tests/unit/Makefile` compiles the pure C++ sources and
+the tests to object files, so only what changed is rebuilt:
 
 ```bash
-make -C tests/unit test
+make -C tests/unit -j test          # g++ -std=gnu++17 -Wall -Wextra -Werror
+make -C tests/unit -j test SAN=1    # the same under AddressSanitizer and UBSan
 ```
 
-CI runs the same command, plus `pytest tests/python`.
+Because no ESPHome include path is given, this also enforces 5.1 rule 2. The
+sanitizer build is what gives the fuzz test its teeth: a fault there is
+usually silent in the plain build.
 
-GitHub Actions runs every row except hardware on each push and PR.
+GitHub Actions runs every row except hardware on each push and PR: both host
+builds, pytest, the linters, and the compile matrix.
 
 **ESPHome version matrix:**
-- `min_version` (currently 2026.9.0) and the latest stable release. Both must
+- `min_version` (currently 2026.9.0) and the stable releases since. All must
   pass.
-- A weekly scheduled build against ESPHome `dev`. It may fail, but each
-  failure is an early warning of upcoming API changes.
+- A weekly scheduled build against ESPHome `dev`. It fails the scheduled run
+  when it breaks, which is the early warning of an upcoming API change.
 
 The ESPHome version is installed with `pip install esphome==<version>`.
 
@@ -1329,23 +987,10 @@ Release tags (`v0.x.y`) are created only when CI passes.
 
 ## 9. Delivery phases
 
-Each phase ends with something usable and settles specific open questions
-from SPEC.md section 8. A question counts as **settled once the answer is
-known**, whether the controller accepts the command or not.
-
-| Phase | Deliverable | Exit criteria | Settles |
-|-------|-------------|---------------|---------|
-| **0. Scaffold** | Repo layout, `entity_kinds.py` skeleton, empty hub that compiles against `remote_transmitter` / `remote_receiver`, CI green (host tests, pytest, compile), `examples/minimal.yaml` | All CI jobs pass for both frameworks | – |
-| **1. Sniffer** | Receive adapter, decoder with per-receiver polarity lock, `listen_only` + `monitor_receiver_id`, `on_frame`, `examples/sniffer.yaml`, first `tests/captures/` from `dump: raw` | With the LNK2 still connected, both directions decode for 1 h, duplicates included, with 100 % valid checksums and no receiver overflow warnings | 13 (polarity and timing on both receivers), 5 (whether duplicates get two replies), 4 (`3D` layout) if a fault is set up |
-| **2. Link** | Transmit through `remote_transmitter`, transport, identification and model gate, `04` probing, `connected`, `response_time`, `link_errors`, model/firmware/serial | LNK2 removed. 24 h of polling with fewer than 0.1 % retries and no unrecovered errors. Measured turnaround fixes the internal timeout constant. | 12 (model ID), 5 again (A/B test of duplicate requests) |
-| **3. Status** | All read-only controller and zone entities, publish-on-change, `remaining_time` countdown, `queue` and `active_program` text, `schedule_changed` | Values match the controller display through a full program run | 1 (rain sensor, by opening the sensor input), 2 (`48` vs OFF), 10 (queue high bits), 11 (`4A` changes on a front-panel edit, and whether it is local time) |
-| **4. Control** | Zone switches, run durations, queue, stop, run program, rain delay, seasonal adjust, clock sync and `controller_clock`, `rainbird.zone.*` actions, `packages/ha-actions.yaml` | `39`, `4B`, `38`, `40`, `37`, `31`, `11`, `13` acknowledged and confirmed by a follow-up read. `49`, `3A` and `42` each tried behind `experimental` until it is known whether and how they work. `42` follows the probe order in SPEC 5.4. Seasonal adjust probed at 5 % and 0 % on a program with no start times. Every NAK seen while probing is recorded with its code. | 3 (`49`), 6 (`3A`), 7 (`42`), 14 (seasonal adjust minimum), 15 (NAK code bits) |
-| **5. Schedule read** | Page fields, program and zone schedule entities (read-only) | Entities match the front panel for all 3 programs. A distinctive run time set at the front panel on one odd and one even zone shows up in the expected page and slot. | 9 (program page byte 4), page-to-zone mapping |
-| **6. Schedule write** | `allow_writes`, generic read-modify-write with hex logging | Each page type written and verified on hardware, including the inferred `8N` and `20` layouts. Untouched bytes confirmed unchanged. | 8 |
-| **7. Release** | README (wiring, YAML, entity list generated from `entity_kinds.py`), `examples/full.yaml`, v1.0.0 tag | A fresh user can build from the README alone | – |
-
-As each question is settled, SPEC.md is updated, the matching `[inferred]`
-tag becomes `[wire]`, and the default or `experimental` gate is adjusted.
+The hardware phases, their exit criteria and the SPEC questions each one
+settles are in [HISTORY.md](HISTORY.md). As a question is settled, SPEC.md is
+updated, the matching `[inferred]` tag becomes `[wire]`, and the default or
+`experimental` gate is adjusted.
 
 ---
 
@@ -1442,208 +1087,7 @@ can be adopted once `min_version` reaches the release that ships it.
 
 ## 12. Schedule of work
 
-Section 9's phases are the hardware gates. This section is the working order.
-
-**Principles**
-
-- All hardware-independent code is finished and tested on the host first.
-- Each visit to the controller tests exactly one new layer.
-- The code for the next step is written while hardware waits run: the
-  1-hour sniff, the 24-hour soak and the program run.
-
-There are three kinds of session:
-
-- **Desk:** code and CI. No hardware needed.
-- **Bench:** a dev board, or the interface board on the bench.
-- **On-site:** something physical at the controller: wiring, the rain-sensor
-  jumper, the OFF position, front-panel edits. Once the board is installed
-  and on WiFi, firmware updates (OTA) and logs (`esphome logs`) work over the
-  network. So on-site sessions are only for physical actions, and decoding
-  and analysis happen at the desk.
-
-### 12.1 Steps
-
-| Step | Kind | Work | Exit | Phase |
-|------|------|------|------|-------|
-| **S0 Foundation** | desk | First commit of the docs, GitHub repo, CI (host tests, pytest, `esphome compile` for both frameworks and the version matrix). Empty hub, final validation of `transmitter_id` / `receiver_id` against 6.1, `entity_kinds.py` rows for the default entities, `models.py`, `examples/minimal.yaml`. No protocol code. | CI green | 0 |
-| **S1 Codecs** | desk | `manchester`, `sip_frame`, `sip_commands` and the quirk helpers. Every SPEC frame and reply is a vector, plus a burst with two frames and no gap, a reply with the extra leading half-bit, and both polarities. | `make -C tests/unit test` passes | 0 |
-| **S2 Model and state** | desk | `ControllerState`, `EspTm2Model` (`apply_reply`, `locate`, codecs, short and slow poll from the set of fields in use). Tests cover the `CC`, `BB` and `A0` captures, `FF` = manual, big-endian seconds, zone-to-page offsets, a `1P` edit that leaves bytes 3 and 4 alone, and the no-`4C` fallback poll for `0005`. | Host tests pass | 0 |
-| **H1 Hardware** (alongside S0–S2) | bench | Order the parts (12.3). Build the **receive path first**: 24 V AC supply, optocoupler 1 to the receiver pin, and a tap lead so J2 and J4 can be heard with the LNK2 still fitted. The transmit path (optocoupler 2) is only needed from S5. | Both receive paths checked with a meter or logic analyser | – |
-| **S3 Bench loopback** | desk + bench | Receive adapter, per-receiver polarity lock, `listen_only`, `monitor_receiver_id`, `on_frame`, `examples/sniffer.yaml`. On one dev board, wire the transmitter pin to the receiver pin and send frames from `send_raw`. Then repeat through the optocouplers once they're built, to see the real inversion. | Looped-back frames decode with valid checksums | 1 |
-| **S4 Sniffer** | on-site, then desk | **Passive only.** The LNK2 stays connected. (a) Listen for 1 hour. (b) **App-driven capture:** in the Rain Bird app, run a zone, queue a zone, stop, run a program, advance, test all zones, set the rain delay, set seasonal adjust (including the lowest value the app allows), turn irrigation off and on, and edit one of each schedule field. Note the time of each action. Commit the `Received Raw:` bursts to `tests/captures/` and decode them at the desk. A checksum miss here is a codec bug; go back to S1 rather than starting the transmitter. | 100 % valid checksums in both directions. SPEC.md updated with every answer the captures give. | 1 |
-| **S5 Link** | desk, then on-site | `rainbird_link`: one request in flight, duplicate short requests in one transmit buffer, retries, model gate, `04` probes, diagnostics. Swap the LNK2 out. The TM2 keeps watering on its own programs, and the LNK2 can go back in at any time. Start the 24-hour soak, and write S6's publishers while it runs. | Soak passes. Timeout constant set from the measured turnaround. | 2 |
-| **S6 Status** | desk, then one on-site visit | Publish-on-change, `remaining_time` countdown, `queue`, `active_program`, `schedule_changed`. **Visit checklist:** run a program with zone times turned down; open the rain-sensor input; switch the controller to OFF; edit the schedule at the front panel at a noted time. That settles SPEC questions 1, 2, 10 and 11 in one visit. | Entities match the panel. SPEC.md updated before any control code is written. **v0.1.0** | 3 |
-| **S7 Control** | desk, then on-site | `submit()`, the five entity classes, the three actions, `packages/ha-actions.yaml`. Prove `39`, `4B`, `38`, `40`, `37`, `31`, `11` and `13` with follow-up reads. One experimental session covers only what S4's captures **didn't** settle about `49`, `3A`, `42` and the seasonal-adjust floor. Use the SPEC 5.4 order, a program with no start times, and record every NAK. | Every control confirmed by read-back. **v0.2.0** | 4 |
-| **S8 Schedule read** (can overlap S7) | desk, then on-site | The opt-in schedule rows in `entity_kinds.py`; the poll plan picks up their pages. Check all three programs against the panel. Set one odd and one even zone to a run time you'll recognise, and confirm the page and slot. No `21` writes. | Matches the panel; page-to-zone mapping confirmed. **v0.3.0** | 5 |
-| **S9 Schedule write** | desk, then on-site | `allow_writes` and the generic read-modify-write, with the encodings checked against the app writes captured in S4. **One page type per session, in this order:** `00` (station delay, rain-sensor bypass), `6P` (a start time), `1P` (one watering day), `8N` (one run time), `20` (one zone bypass). Read the hex log back before moving to the next page type. Stop if a confirming read differs. | Every page type written and confirmed; untouched bytes unchanged | 6 |
-| **S10 Release** | desk | README entity tables generated from `entity_kinds.py`, `examples/full.yaml`, wiring guide. | CI green → **v1.0.0** | 7 |
-
-S1 and S2 land as separate changes. S8 can overlap S7, because both sit on
-the same state layer. S4, S5, S6, S7 and S9 each need the controller, and
-each starts only after the previous step's exit line is true.
-
-### 12.2 Effort and calendar
-
-| Kind | Sessions |
-|------|----------|
-| Desk | about 17–20 |
-| Bench | about 3–4, including H1 |
-| On-site | about 8–11. S9 is the longest at one page type per session. |
-| Unattended waits | 1 h sniff, 24 h soak, parts shipping (3–10 days) |
-
-At a hobby pace of about three sessions a week, plan for **8–10 weeks** to
-v1.0.0. Parts shipping overlaps S0–S2, so it costs nothing. The calendar is
-set by on-site availability, not by coding: v0.1.0 (read-only status) is
-about 4 weeks in.
-
-### 12.3 Before starting
-
-- **Repository:** `sjwright/rainbird-esphome` created on GitHub, and an OK
-  for the first commit.
-- **Board:** an **ESP32-S3** dev board is recommended. It has RX ping-pong
-  and 4 receive channels, so the two-receiver sniffer setup has room to
-  spare. A C3 or C6 also works. The original ESP32 is tight for sniffing.
-  The S2 is unsupported (6.1). Pick a board with an external-antenna
-  connector if WiFi is weak where the controller is; the WIRE.md author
-  mentions LNK2 WiFi reception problems.
-- **Parts:**
-  - 2× VO617A optocouplers and resistors;
-  - a small 24 V AC → 5 V supply module;
-  - two 5-pin JST-compatible leads (one for the tap);
-  - strongly recommended: an inexpensive 8-channel USB logic analyser.
-- **Rain Bird app** working through the existing LNK2, for S4.
-- **Safety for S7 and S9:** work at a time when watering does no harm, or
-  disconnect the valve common wire. Before S9's first write, save the full
-  schedule dump from the log as a backup.
-
-### 12.4 Build notes (S0–S6 code)
-
-The code for S0 to S6 is built and host-tested; nothing has run on a
-controller yet. Where the build changed the design above:
-
-- **The link is two pure classes plus a thin hub.**
-  - `LinkCore` (`link_core.h`) is the transport: queue, one request in
-    flight, timeouts from the end of the first copy, retries, reply matching
-    with selector checks, and duplicate counting.
-  - `Session` (`session.h`) is startup, probes, the poll plan, the model
-    gate and diagnostics.
-  - `RainbirdComponent` only sends, receives and publishes.
-
-  Both pure classes run against a scripted controller in
-  `tests/unit/test_session.cpp`.
-- **All waits are "elapsed since a start time ≥ a delay" in unsigned
-  arithmetic.** A signed comparison against a stored deadline refuses to
-  send for up to 24.8 days after a long idle spell or the millis() wrap; the
-  host tests caught that.
-- **Startup probes all seven optional commands** (`4C 4A 42 4B 3D 49 3A`).
-  If `04` itself is refused with a NAK, every optional command is tried, and
-  a NAK with bit 0 switches that one off. Probes that only time out assume
-  nothing, so the fallback polls run.
-- **`update_interval: never` puts the hub in manual mode**: no
-  identification and no polling, only `send_raw`. The bench loopback uses
-  this.
-- **In `listen_only` mode every valid reply updates state** (in active mode
-  only the matched one does), so status
-  entities work passively alongside an LNK2. `connected` there means "a
-  valid frame in the last 60 s".
-- **`schedule_changed` is a `text_sensor`** with ISO 8601 text and device
-  class `timestamp`. A float sensor only holds an epoch to about two
-  minutes.
-- **All six entity platforms are generated from `entity_kinds.py`**
-  (`platform.py`). A key resolves to a zone, program or controller kind by
-  the entry's `zone:` / `program:`.
-- **The duplicate-entity check covers controls only**; a second read-only
-  sensor for the same value is harmless.
-- **Replay tooling:**
-  - `tools/raw_to_fixture.py` converts `dump: raw` logs.
-  - `tests/unit/decode_fixture` fills in the expected frames.
-  - `tests/unit/test_replay.cpp` runs every file in `tests/captures/`.
-  - `synthetic-replies.txt` is generated; S4's real captures replace it.
-
----
-
-## Appendix: review notes
-
-The plan has been through three rounds of external review. Some suggestions
-were changed or declined, and the reasons are recorded here. Rows marked
-*superseded* were adopted at the time and later replaced.
-
-### Round 1: plan review
-
-| Suggestion | Outcome |
-|------------|---------|
-| Separate polarity lock per receive pin | Adopted. Now per receiver (6.2). |
-| Split frames by length; keep receive running during transmit | Adopted (6.2). The transmitter and receiver are now separate ESPHome components, so receive is never paused. |
-| Refuse transmits on a model-ID mismatch | **Changed.** Status polling continues, because reads can't hurt the controller and they give a mismatched user something to report. Control and writes are refused, and `accept_model_ids` is the escape hatch (D12). |
-| Four time entities for start times | **Changed.** Time entities can't show "off" (`FFFF`), so each slot also gets an enabled switch (D7). |
-| Replace free-text watering days | Adopted as 7 switches. The `text` platform is not used. |
-| Program-page writes must keep bytes 3 and 4 | Adopted. Now built into the generic read-modify-write (6.5). |
-| `request_timeout` 400 ms, measured from the first copy | Adopted, as an internal constant (4.1) |
-| IRAM-safe timestamps, overflow counting | *Superseded* by D10: `remote_receiver` owns the interrupt and reports overflows. |
-| `update()` only enqueues; use `set_update_interval()` | Adopted (6.3) |
-| Phase 4 exit for `49` / `3A` / `42` | Adopted. A question is settled once the answer is known. |
-| `send_raw` bypasses the gates | Adopted. It needs `experimental` and lives only in the sniffer example. |
-| Say what happens when `programs:` is omitted | Adopted, and the same rule now applies to `zones:` |
-| Make "off stops everything" prominent | Adopted (sections 2 and 4.2, and the YAML comment) |
-| Log the page in hex before every write | Adopted (6.5) |
-| Don't derive `EspMeModel` from `EspTm2Model` | *Superseded*: there are no C++ stub classes now (7.1). |
-| Host test build command | Adopted (section 8) |
-| `run_time_numbers` breaks the naming convention | **Changed.** Kept, and plural keys became an explicit rule (D5). Moving run times under programs was declined: zones are where users think about durations. |
-| Test the NAK code as a bitmask | Adopted, as `nak_is_unsupported()` (5.1 rule 5) |
-| Time zone of the `schedule_changed` timestamp | Adopted. Converted with `ESPTime` and `time_id`; verified in phase 3. The 6-hour gap in the SPEC capture is the event being earlier in the day, not a time-zone offset. |
-| `queue`-mode "off" sends `42` | Adopted behind `experimental` (6.5) |
-| Replay harness of real captures | Adopted, now from `remote_receiver`'s `dump: raw` |
-
-### Round 2: pyrainbird cross-check
-
-| Suggestion | Outcome |
-|------------|---------|
-| Seasonal adjust minimum | **Kept 10 %** although it is only a docstring: 0 % might be accepted and quietly stop a program. Phase 4 probes lower values (SPEC 8.14). |
-| Don't copy pyrainbird's program-page write template | Adopted. SPEC 5.6 warns that it hard-codes byte 4. |
-| `42` should send a real zone number, not `00` | Adopted. The probe order is in SPEC 5.4. |
-| Zone off-by-one in pyrainbird's schedule decoder | **Partly adopted.** pyrainbird's decoder is 0-based and its `Schedule` adds 1, so it's not an upstream bug. Test vectors from the raw decoder still need the +1 (SPEC 5.6, section 8). |
-| Schedule encodings belong to the model | Adopted (7.2) |
-| NAK bit meanings are docs-only | Adopted (SPEC 8.15) |
-
-### Round 3: simplification and reuse
-
-| Suggestion | Outcome |
-|------------|---------|
-| Use `remote_transmitter` / `remote_receiver` instead of our own physical layer | **Adopted** (D10). Agent 1 argued that `remote_receiver` can't hold a 42-byte reply on a C3. The ESP-IDF 5.5.4 driver shows RX ping-pong on the C3, S3, C6 and others, and an original ESP32 has room for 384 receive symbols. Agent 2 argued that `remote_receiver` splits on gaps. Our decoder splits by length inside each burst, so that doesn't matter. The **ESP32-S2** really can't fit a worst-case reply and is rejected. |
-| Create a `remote_transmitter` internally to keep `tx_pin` on the hub | Declined. It drives another component's internals and hides the wire setup. Bus-style references (`transmitter_id`, like `uart_id`) are the native pattern. |
-| Keep our own GPIO interrupt for receive | Declined. Shown unnecessary by the RX ping-pong check above. |
-| Don't use core `sprinkler` | Agreed: it would be a second scheduler on top of the controller's |
-| One class per domain, bound by kind and index | Adopted (5.4) |
-| Parsing only in `sip_commands`; the model maps typed replies | Adopted (5.1 rule 1, 7.2) |
-| Follow-up reads from the model's short poll (`0005` has no `4C`) | Adopted (6.3, 6.4) |
-| No C++ stub classes until a second model is built | Adopted. Stubs live in the registry (7.1). |
-| One Python table drives the hub expander and the platforms | Adopted (5.3) |
-| Ship the HA actions as a package | Adopted (`packages/ha-actions.yaml`) |
-| Persist an off slot's time with `TimeEntityRestoreState` | Declined. RAM-only is simpler and keeps `ControllerState` the single source of truth (6.5). |
-| Layer ownership and include direction | Adopted (5.1 rules 1–2) |
-| Protocol quirks as named functions | Adopted (5.1 rule 5) |
-| Single zone-reference resolver | Adopted (4.5) |
-| Publish only on change | Adopted, through changed-field tracking (5.1 rule 3) |
-| `on_time_sync` as an optional clock-sync trigger | Adopted as a documented option; the built-in drift check stays (6.5) |
-| Make `switch` vs `valve` final | Adopted (D6) |
-| No statics or globals | Adopted (5.1 rule 6) |
-| Generated IDs are API | Adopted (D9), with a snapshot test |
-| Replace custom actions and conditions with entity ones | Adopted (D13, 4.5): 3 custom actions remain, down from 11, and there are no custom conditions |
-| Derive the poll plan from configured entities; `04` as the only capability source | Adopted (6.3, 6.4) |
-| Option count | Reduced: timeouts, retries, duplicates, fast poll and polarity are internal constants (4.1) |
-
-### Round 4: schedule of work
-
-| Suggestion | Outcome |
-|------------|---------|
-| Split the host work into scaffold, codecs, and model/state, each a separate change (Agent 1) | Adopted (S0–S2) |
-| Write the next step's code during the hardware waits (both agents) | Adopted (12, principles) |
-| "A checksum miss in the sniffer is a codec bug, not a reason to start the transmitter" (Agent 1) | Adopted (S4) |
-| One status visit settles questions 1, 2, 10 and 11, with a short program run (Agent 1) | Adopted (S6 checklist) |
-| Schedule writes one page type per session, in the order `00`, `6P`, `1P`, `8N`, `20` (Agent 1) | Adopted (S9) |
-| Build the receive path first; transmit can wait until the link step (Agent 2) | Adopted (H1) |
-| Hobby-pace estimate of 8–9 weeks (Agent 2) | Adopted as 8–10 weeks. My earlier 5–6 weeks assumed near-daily sessions. |
-| The controller must be within reach of the bench (Agent 2) | **Changed.** Once installed and on WiFi, OTA and network logs make most work remote. Only physical actions need a visit. |
-| Removing the LNK2 removes the household's irrigation control (Agent 2) | **Corrected.** Only app control is lost: the TM2 keeps running its own programs, and the LNK2 can be refitted at any time. |
-| Probe `49`, `3A`, `42` and the seasonal floor on the controller (Agent 1) | **Changed.** S4's app-driven capture records the official app sending these, so S7's experimental session only covers what that didn't settle. |
-| Bench loopback before the first controller visit (mine) | Kept (S3): RMT round trips are cheaper to debug on the bench. |
+The working order (steps S0 to S10), the effort estimate, the parts list and
+the build notes are in [HISTORY.md](HISTORY.md), with the notes from the four
+design reviews. What the build notes recorded about the design is now in the
+sections above.

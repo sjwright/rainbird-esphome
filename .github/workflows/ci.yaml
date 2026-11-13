@@ -24,7 +24,9 @@ jobs:
           find components/rainbird \( -name '*.h' -o -name '*.cpp' \) -print0 \
             | xargs -0 clang-format --dry-run --Werror
       - name: Host tests
-        run: make -C tests/unit test
+        run: make -C tests/unit -j4 test
+      - name: Host tests under ASan and UBSan
+        run: make -C tests/unit -j4 test SAN=1
       - name: Python tests
         run: pytest
 
@@ -64,8 +66,9 @@ jobs:
         run: esphome compile ${{ matrix.config }}
 
   dev:
+    # Not continue-on-error: a break against ESPHome dev has to fail the scheduled run,
+    # so GitHub reports it. Push and pull-request runs skip this job.
     if: github.event_name == 'schedule'
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

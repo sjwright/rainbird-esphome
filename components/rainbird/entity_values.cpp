@@ -6,53 +6,11 @@ namespace esphome::rainbird {
 
 namespace {
 
-// One row per EntityKind, in enum order. tests/python/test_entity_kinds.py reads the
-// WritePath column, so keep one row per line in this shape.
-constexpr KindInfo KINDS[] = {
-    {EntityKind::VALVE, Field::ZONES_RUNNING, WritePath::COMMAND},
-    {EntityKind::RUN_DURATION, NO_FIELD, WritePath::LOCAL},
-    {EntityKind::PROGRAM_START, NO_FIELD, WritePath::COMMAND},
-    {EntityKind::SEASONAL_ADJUST, Field::SEASONAL_ADJUST, WritePath::COMMAND},
-    {EntityKind::ZONE_RUNNING, Field::ZONES_RUNNING, WritePath::NONE},
-    // "Manual" depends on the zone as well as the program byte. 3B 00 carries both.
-    {EntityKind::PROGRAM_RUNNING, Field::ACTIVE_PROGRAM, WritePath::NONE},
-    {EntityKind::REMAINING_TIME, Field::REMAINING_TIME, WritePath::NONE},
-    {EntityKind::ACTIVE_ZONE, Field::ACTIVE_ZONE, WritePath::NONE},
-    {EntityKind::QUEUED_ZONES, Field::QUEUED_COUNT, WritePath::NONE},
-    {EntityKind::RESPONSE_TIME, NO_FIELD, WritePath::NONE},
-    {EntityKind::LINK_ERRORS, NO_FIELD, WritePath::NONE},
-    // Any zone running, or an active zone when another entity polls it.
-    {EntityKind::WATERING, Field::ZONES_RUNNING, WritePath::NONE},
-    {EntityKind::RAIN_SENSOR, Field::RAIN_SENSOR, WritePath::NONE},
-    {EntityKind::IRRIGATION_ENABLED, Field::IRRIGATION_ENABLED, WritePath::NONE},
-    {EntityKind::CONNECTED, NO_FIELD, WritePath::NONE},
-    {EntityKind::ACTIVE_PROGRAM, Field::ACTIVE_PROGRAM, WritePath::NONE},
-    {EntityKind::QUEUE, Field::QUEUE, WritePath::NONE},
-    {EntityKind::MODEL, NO_FIELD, WritePath::NONE},
-    {EntityKind::FIRMWARE_VERSION, NO_FIELD, WritePath::NONE},
-    {EntityKind::SERIAL_NUMBER, NO_FIELD, WritePath::NONE},
-    {EntityKind::SCHEDULE_CHANGED, Field::SCHEDULE_CHANGED, WritePath::NONE},
-    {EntityKind::QUEUE_ZONE, NO_FIELD, WritePath::COMMAND},
-    {EntityKind::STOP, NO_FIELD, WritePath::COMMAND},
-    // The zone to advance to comes from the queue list (3B 01).
-    {EntityKind::ADVANCE, Field::QUEUE, WritePath::COMMAND},
-    {EntityKind::TEST_ALL, NO_FIELD, WritePath::COMMAND},
-    {EntityKind::SYNC_CLOCK, NO_FIELD, WritePath::COMMAND},
-    {EntityKind::REFRESH, NO_FIELD, WritePath::COMMAND},
-    {EntityKind::RAIN_DELAY, Field::RAIN_DELAY, WritePath::COMMAND},
-    {EntityKind::STATION_DELAY, Field::STATION_DELAY, WritePath::SCHEDULE_PAGE},
-    {EntityKind::TEST_DURATION, NO_FIELD, WritePath::LOCAL},
-    {EntityKind::CYCLE_DAYS, Field::CYCLE_DAYS, WritePath::SCHEDULE_PAGE},
-    {EntityKind::DAYS_UNTIL_NEXT, Field::DAYS_UNTIL_NEXT, WritePath::SCHEDULE_PAGE},
-    {EntityKind::RUN_TIME, Field::RUN_TIME, WritePath::SCHEDULE_PAGE},
-    {EntityKind::IRRIGATION_SET, Field::IRRIGATION_ENABLED, WritePath::COMMAND},
-    {EntityKind::GLOBAL_BYPASS, Field::GLOBAL_SENSOR_BYPASS, WritePath::SCHEDULE_PAGE},
-    {EntityKind::WATERING_DAY, Field::WATERING_DAY, WritePath::SCHEDULE_PAGE},
-    {EntityKind::START_ENABLED, Field::START_ENABLED, WritePath::SCHEDULE_PAGE},
-    {EntityKind::FREQUENCY, Field::FREQUENCY, WritePath::SCHEDULE_PAGE},
-    {EntityKind::START_TIME, Field::START_TIME, WritePath::SCHEDULE_PAGE},
-    {EntityKind::CONTROLLER_CLOCK, Field::CLOCK, WritePath::COMMAND},
-};
+// One row per EntityKind, in enum order. The rows are generated from entity_kinds.py
+// (tools/gen_kinds.py), so the YAML side and this table cannot disagree.
+#define RAINBIRD_KIND_ROW(kind, field, write) {kind, field, write},
+constexpr KindInfo KINDS[] = {RAINBIRD_ENTITY_KINDS(RAINBIRD_KIND_ROW)};
+#undef RAINBIRD_KIND_ROW
 
 constexpr size_t KIND_COUNT = sizeof(KINDS) / sizeof(KINDS[0]);
 

@@ -285,3 +285,40 @@ TEST_CASE("the countdown re-anchors on every reading and shows a steady 0 once")
   CHECK(countdown.reading(0, 20000));
   CHECK_FALSE(countdown.reading(0, 23000));
 }
+
+TEST_CASE("the end time holds steady through a countdown and moves when the controller's does") {
+  EndTime ends;
+  const int64_t noon = 1794571200;
+  // Ten minutes left at noon.
+  REQUIRE(ends.reading(600, noon));
+  CHECK(ends.end() == noon + 600);
+  // Later readings of the same countdown land within a second or two: nothing new to show.
+  CHECK_FALSE(ends.reading(597, noon + 3));
+  CHECK_FALSE(ends.reading(585, noon + 16));
+  CHECK_FALSE(ends.reading(1, noon + 601));
+  CHECK(ends.end() == noon + 600);
+  // A paused controller repeats its value, so the end moves on with the clock.
+  REQUIRE(ends.reading(585, noon + 60));
+  CHECK(ends.end() == noon + 645);
+  // The next zone starts.
+  REQUIRE(ends.reading(1200, noon + 650));
+  CHECK(ends.end() == noon + 1850);
+  // Finished: no end, shown once.
+  REQUIRE(ends.reading(0, noon + 1850));
+  CHECK(ends.end() == 0);
+  CHECK_FALSE(ends.reading(0, noon + 1865));
+}
+
+TEST_CASE("idle is shown once at startup, and a lost link clears a running end") {
+  EndTime idle;
+  CHECK(idle.reading(0, 1794571200));
+  CHECK_FALSE(idle.clear());
+
+  EndTime running;
+  CHECK(running.reading(300, 1794571200));
+  CHECK(running.clear());
+  CHECK(running.end() == 0);
+  CHECK_FALSE(running.clear());
+  // The same end again after the link returns is shown again.
+  CHECK(running.reading(290, 1794571210));
+}

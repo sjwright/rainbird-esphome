@@ -8,6 +8,7 @@
 #include "countdown.h"
 #include "entity_kind.h"
 #include "entity_values.h"
+#include "entity_writes.h"
 #include "model_esp_tm2.h"
 #include "session.h"
 #include "sip_frame.h"
@@ -193,13 +194,17 @@ class RainbirdComponent final : public PollingComponent {
   void publish_();
   void publish_remaining_();
   void publish_remaining_sensors_(uint32_t seconds);
+  void publish_ends_at_(uint16_t seconds);
+  void show_ends_at_();
+  void show_unknown_();
   void tick_countdown_();
   void check_clock_();
   bool submitted_(ControlResult result);
   bool sync_clock_();
   bool queue_clock_(uint8_t hour, uint8_t minute, uint8_t second, uint8_t day, uint8_t month, uint16_t year);
-  bool run_minutes_(uint8_t zone, uint8_t *minutes) const;
-  bool test_minutes_(uint8_t *minutes) const;
+  // What the local settings show, for WriteContext. False when there is no such entity.
+  bool run_minutes_(uint8_t zone, float *minutes) const;
+  bool test_minutes_(float *minutes) const;
   bool slot_minutes_(uint8_t program, uint8_t index, uint16_t *minutes) const;
   std::string zone_name_(uint8_t zone) const;
   std::string program_name_(uint8_t program) const;
@@ -247,6 +252,7 @@ class RainbirdComponent final : public PollingComponent {
 #endif
 #ifdef USE_TEXT_SENSOR
   std::vector<Bound<text_sensor::TextSensor, std::string>> text_sensors_{};
+  std::vector<text_sensor::TextSensor *> ends_at_sensors_{};
 #endif
   bool listen_only_{false};
   bool allow_writes_{false};
@@ -269,7 +275,9 @@ class RainbirdComponent final : public PollingComponent {
   EspTm2Model model_{};
   std::unique_ptr<Session> session_{};
   TextContext text_{};
+  WriteContext writes_{};
   Countdown countdown_{};
+  EndTime ends_at_{};
   uint32_t published_revision_{0};  // Session::revision() when the entities were last published
   uint32_t remaining_readings_{0};  // ControllerState::remaining_readings the countdown last took
   uint32_t base_interval_{0};

@@ -4,14 +4,15 @@
 #include <cstdint>
 #include <optional>
 
+#include "model_limits.h"
 #include "sip_commands.h"
 
 namespace esphome::rainbird {
 
 // Sized for the ESP-TM2. There is one C++ model, so the store matches its limits.
-static constexpr uint8_t STATE_ZONES = 12;
-static constexpr uint8_t STATE_PROGRAMS = 3;
-static constexpr uint8_t STATE_STARTS = 4;
+static constexpr uint8_t STATE_ZONES = TM2_ZONES;
+static constexpr uint8_t STATE_PROGRAMS = TM2_PROGRAMS;
+static constexpr uint8_t STATE_STARTS = TM2_STARTS;
 
 // What the controller reports, one entry per kind of value. The poll plan polls by field,
 // the page map (EspTm2Model::locate) places schedule fields, and each entity kind shows one.

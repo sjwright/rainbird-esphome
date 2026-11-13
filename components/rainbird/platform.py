@@ -21,21 +21,14 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_NAME
 
+from .bindings import entry_bindings
+from .bindings import uses_program as needs_program
 from .classes import RainbirdComponent
 from .codegen import build_entity
 from .const import CONF_DAY, CONF_PROGRAM, CONF_RAINBIRD_ID, CONF_SLOT, CONF_ZONE
-from .entity_kinds import (
-    DAYS,
-    KINDS,
-    NO_PROGRAM,
-    NO_ZONE,
-    FanOut,
-    Scope,
-    platform_keys,
-    resolve_kind,
-)
+from .entity_kinds import DAYS, KINDS, FanOut, Scope, platform_keys, resolve_kind
 from .hub_schema import program_letter
-from .models import ESP_TM2, program_index
+from .models import ESP_TM2
 from .schemas import entity_schema
 
 
@@ -67,7 +60,7 @@ def _check_scopes(domain: str):
                 raise cv.Invalid(f"{key} needs {need}")
             uses_zone |= kind.scope is Scope.ZONE
             # Run times are zone entities, one per program, so program: belongs on the entry.
-            uses_program |= kind.scope is Scope.PROGRAM or kind.fan_out is FanOut.PROGRAM
+            uses_program |= needs_program(kind)
             needs_day |= kind.fan_out is FanOut.DAY
             needs_slot |= kind.fan_out is FanOut.SLOT
         # Reject a selector nothing uses rather than ignore it silently.
@@ -107,19 +100,7 @@ def platform_schema(domain: str):
 
 async def platform_to_code(domain: str, config: dict) -> None:
     parent = await cg.get_variable(config[CONF_RAINBIRD_ID])
-    for key in platform_keys(domain):
-        if key not in config:
-            continue
-        kind = _resolve(domain, key, config)
-        zone = config[CONF_ZONE] if kind.scope is Scope.ZONE else NO_ZONE
-        if kind.scope is Scope.PROGRAM or kind.fan_out is FanOut.PROGRAM:
-            program = program_index(config[CONF_PROGRAM])
-        else:
-            program = NO_PROGRAM
-        if kind.fan_out is FanOut.DAY:
-            index = config[CONF_DAY]
-        elif kind.fan_out is FanOut.SLOT:
-            index = config[CONF_SLOT] - 1
-        else:
-            index = 0
-        await build_entity(parent, kind, config[key], zone, program, index)
+    for key, binding in entry_bindings(domain, config, ESP_TM2):
+        await build_entity(
+            parent, binding.kind, config[key], binding.zone, binding.program, binding.index
+        )

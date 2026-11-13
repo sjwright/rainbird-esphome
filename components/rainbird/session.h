@@ -130,12 +130,14 @@ enum class ControlResult : uint8_t {
   REFUSED_NO_ZONE,      // 03 00 says the controller does not have that zone
   REFUSED_NOT_RUNNING,  // valve off, and this zone is not the one running
   REFUSED_QUEUED_ONLY,  // queued, and there is no "remove one zone" command
-  REFUSED_BUSY,         // a schedule edit is already in flight, or the queue is full
+  REFUSED_BUSY,         // a clock set is already in flight, or a queue is full
 };
 
 const char *control_result_text(ControlResult result);
 
 // Something for the hub to report. take_event() hands each over once, in order.
+// After LINK_DOWN, state() is empty until the controller is read again, and the hub shows its
+// entities as unknown.
 enum class SessionEventKind : uint8_t {
   STAGE,        // stage() changed; `stage` is the new one
   LINK_UP,      // the first reply, or the first after the link was down
@@ -176,7 +178,9 @@ class Session {
   ControlResult send_raw(const uint8_t *payload, size_t size, uint32_t now_ms);
   // One control command, sent once. A lost reply must not run it again.
   ControlResult control(const Control &command, uint32_t now_ms);
-  // Read the page, change one field, write it back, read it again. One at a time.
+  // Read the page, change one field, write it back, read it again. One at a time on the wire:
+  // an edit asked for while another runs waits its turn, up to EDIT_CAP of them. A later
+  // value for a field already waiting replaces the earlier one. A lost link drops them all.
   ControlResult edit_schedule(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value,
                               uint32_t now_ms);
 
@@ -224,6 +228,7 @@ class Session {
   void send_identify_();
   void handle_handshake_(const Completion &done);
   void restart_();
+  void forget_state_(bool keep_zones);
   void handle_(const Completion &done, uint32_t now_ms);
   void finish_probes_(uint32_t now_ms);
   void begin_running_(uint32_t now_ms);
@@ -243,6 +248,15 @@ class Session {
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
   bool queued_(uint8_t zone) const;
   bool zone_missing_(uint8_t zone) const;
+  struct PendingEdit {
+    Field field{Field::RUN_TIME};
+    uint8_t zone{0};
+    uint8_t program{0};
+    uint8_t index{0};
+    int32_t value{0};
+  };
+  bool start_edit_(const PendingEdit &edit);
+  void start_next_edit_();
   void fail_edit_(const char *reason);
   void handle_page_(const Completion &done);
 
@@ -291,6 +305,10 @@ class Session {
   size_t event_count_{0};
 
   ScheduleEditor editor_;
+  // Edits waiting for the one in flight, oldest first.
+  static constexpr size_t EDIT_CAP = 8;
+  PendingEdit edits_[EDIT_CAP]{};
+  size_t edit_count_{0};
 };
 
 }  // namespace esphome::rainbird

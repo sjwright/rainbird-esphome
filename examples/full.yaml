@@ -180,6 +180,10 @@ text_sensor:
       name: Controller serial
     schedule_changed:
       name: Schedule last changed
+    # When the time remaining runs out, as a timestamp Home Assistant counts down to itself.
+    # It changes once per zone; remaining_time above changes every second while watering.
+    ends_at:
+      name: Watering ends
 
 button:
   - platform: rainbird

@@ -65,7 +65,7 @@ button:
           id: rainbird_controller
           data: [0x02]
 
-# Every read-only status entity (PLAN step S6).
+# Every read-only status entity.
 sensor:
   - platform: rainbird
     remaining_time:
@@ -110,3 +110,5 @@ text_sensor:
       name: Controller serial
     schedule_changed:
       name: Schedule last changed
+    ends_at:
+      name: Watering ends
