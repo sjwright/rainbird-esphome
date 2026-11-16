@@ -29,16 +29,14 @@
 namespace esphome::rainbird {
 
 // The binding every Rainbird control carries: its kind, and the zone, program and day or slot.
-// Codegen sets it; the hub reads it to poll and publish, and the entity passes it to submit().
+// Codegen sets it, then adds the entity to the hub, which polls and publishes by it (entity_board.h).
+// The entity passes it to submit().
 class BoundEntity {
  public:
   void set_binding(uint8_t kind, uint8_t zone, uint8_t program, uint8_t index) {
     this->binding_ = EntityBinding{static_cast<EntityKind>(kind), zone, program, index};
   }
   const EntityBinding &binding() const { return this->binding_; }
-
-  // The value the hub last published to this entity, so an unchanged one is not sent again.
-  std::optional<double> shown{};
 
  protected:
   EntityBinding binding_{};

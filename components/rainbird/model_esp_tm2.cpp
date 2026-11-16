@@ -185,34 +185,6 @@ bool EspTm2Model::accepts(uint16_t model_id) const {
   return false;
 }
 
-void EspTm2Model::note_support(const CommandSupport &support, Capabilities *caps) const {
-  if (caps == nullptr) {
-    return;
-  }
-  switch (support.command) {
-    case 0x4C:
-      caps->combined = support.supported;
-      break;
-    case 0x4A:
-      caps->event_timestamp = support.supported;
-      break;
-    case 0x42:
-      caps->advance = support.supported;
-      break;
-    case 0x4B:
-      caps->queue_run = support.supported;
-      break;
-    case 0x49:
-      caps->controller_state = support.supported;
-      break;
-    case 0x3A:
-      caps->test_stations = support.supported;
-      break;
-    default:
-      break;
-  }
-}
-
 void EspTm2Model::short_poll(const Capabilities &caps, FieldSet used, RequestList *out) const {
   if (out == nullptr) {
     return;
@@ -223,7 +195,7 @@ void EspTm2Model::short_poll(const Capabilities &caps, FieldSet used, RequestLis
     out->add(request_active_stations(0));
   }
   if (status_group(used)) {
-    if (caps.combined) {
+    if (caps.has(Capability::COMBINED)) {
       out->add(request_combined_state());
     } else {
       // 0005 has no 4C. The probe result is what selects this list, not the model id.
@@ -263,7 +235,7 @@ void EspTm2Model::slow_poll(const Capabilities &caps, FieldSet used, RequestList
       out->add(request_water_budget(program));
     }
   }
-  if (caps.event_timestamp && schedule_interest(used)) {
+  if (caps.has(Capability::EVENT_TIMESTAMP) && schedule_interest(used)) {
     out->add(request_event_timestamp(1));
   }
 }

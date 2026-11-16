@@ -9,6 +9,7 @@ namespace esphome::rainbird {
 
 // Trigger variable names match the YAML lambdas: command, code, payload.
 class NakTrigger : public Trigger<uint8_t, uint8_t> {};
+class NoReplyTrigger : public Trigger<uint8_t> {};
 class FrameTrigger : public Trigger<std::vector<uint8_t>> {};
 
 }  // namespace esphome::rainbird

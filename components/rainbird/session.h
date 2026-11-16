@@ -141,11 +141,12 @@ const char *control_result_text(ControlResult result);
 enum class SessionEventKind : uint8_t {
   STAGE,        // stage() changed; `stage` is the new one
   LINK_UP,      // the first reply, or the first after the link was down
-  LINK_DOWN,    // three requests in a row failed, or listen-only heard nothing for silence_ms
+  LINK_DOWN,    // the first request ever got no answer, three in a row failed, or listen-only heard nothing
   NAK,          // the controller refused `opcode` with `code`
   PAGE_WRITE,   // a schedule page write is queued and page_write() has its bytes. Log it before it goes.
   EDIT_FAILED,  // a schedule edit stopped; `reason` says why
   HANDSHAKE,    // the handshake finished or went wrong; `reason` says which, `code` is 1 when it went wrong
+  NO_REPLY,     // a command or send_raw, `opcode`, got no reply. It went once and is not sent again.
 };
 
 struct SessionEvent {
@@ -178,9 +179,11 @@ class Session {
   ControlResult send_raw(const uint8_t *payload, size_t size, uint32_t now_ms);
   // One control command, sent once. A lost reply must not run it again.
   ControlResult control(const Control &command, uint32_t now_ms);
-  // Read the page, change one field, write it back, read it again. One at a time on the wire:
-  // an edit asked for while another runs waits its turn, up to EDIT_CAP of them. A later
-  // value for a field already waiting replaces the earlier one. A lost link drops them all.
+  // Read the page, change the field, write it back, read it again. One page at a time on the
+  // wire. Edits to one page that arrive together share its read and go out as one write; a page
+  // that already holds the value is not written. Any other edit waits its turn, and there is
+  // room for every field at once. A later value for a field already waiting replaces the
+  // earlier one. A lost link drops them all.
   ControlResult edit_schedule(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value,
                               uint32_t now_ms);
 
@@ -202,7 +205,7 @@ class Session {
   // True when 04 was refused, so every optional command is assumed until a NAK says otherwise.
   bool capabilities_assumed() const { return this->caps_assumed_; }
   // False while the 04 probe for this command has had no answer. Its capability is then unknown, not "no".
-  bool capability_known(uint8_t opcode) const { return (this->probes_answered_ & probe_bit_(opcode)) != 0; }
+  bool capability_known(uint8_t opcode) const { return this->caps_.known(opcode); }
   // The schedule pages read, for the log.
   const PageSet &pages() const { return this->config_.pages; }
   // D12: control and write commands are allowed only for an accepted model id.
@@ -234,28 +237,20 @@ class Session {
   void begin_running_(uint32_t now_ms);
   bool schedule_due_(uint32_t now_ms) const;
   void read_schedule_(uint32_t now_ms, Priority priority, size_t *count);
-  void note_unsupported_(uint8_t opcode);
-  static uint8_t probe_bit_(uint8_t opcode);
+  void no_reply_(uint8_t opcode);
   void retry_probes_();
   void settle_refused_probes_();
   void note_clock_reading_(uint32_t at_ms);
   bool watering_() const;
   bool ready_for_command_() const;
   bool link_down_() const;
-  ControlResult unsupported_(uint8_t opcode) const;
+  ControlResult unsupported_(Capability capability) const;
   bool enqueue_command_(const ByteBuf &request, uint32_t now_ms, uint8_t program = 0);
   void follow_up_(uint32_t now_ms);
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
   bool queued_(uint8_t zone) const;
   bool zone_missing_(uint8_t zone) const;
-  struct PendingEdit {
-    Field field{Field::RUN_TIME};
-    uint8_t zone{0};
-    uint8_t program{0};
-    uint8_t index{0};
-    int32_t value{0};
-  };
-  bool start_edit_(const PendingEdit &edit);
+  void remove_edit_(size_t index);
   void start_next_edit_();
   void fail_edit_(const char *reason);
   void handle_page_(const Completion &done);
@@ -274,8 +269,7 @@ class Session {
   bool probe_answered_{false};  // some 04 got an 84 reply
   bool probe_refused_{false};   // some 04 got a NAK
   bool caps_assumed_{false};
-  uint8_t probes_answered_{0};  // one bit per probed command: an 84 reply or a NAK came back
-  uint8_t probes_refused_{0};   // probes NAKed and not yet settled (settle_refused_probes_)
+  uint8_t probes_refused_{0};  // one bit per capability: probes NAKed and not yet settled
   uint32_t handshake_challenge_{0};
   uint32_t handshake_count_{0};  // challenges made without config_.random
   bool probe_retry_{false};      // the next slow-group cycle asks the unanswered probes again
@@ -305,9 +299,10 @@ class Session {
   size_t event_count_{0};
 
   ScheduleEditor editor_;
-  // Edits waiting for the one in flight, oldest first.
-  static constexpr size_t EDIT_CAP = 8;
-  PendingEdit edits_[EDIT_CAP]{};
+  // Edits waiting for the page in flight, oldest first, one entry per field. A TM2 has 92
+  // schedule fields (2 global, 10 and 8 per program, 36 run times), so this never fills.
+  static constexpr size_t EDIT_CAP = 96;
+  PageChange edits_[EDIT_CAP]{};
   size_t edit_count_{0};
 };
 

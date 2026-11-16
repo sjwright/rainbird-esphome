@@ -8,11 +8,23 @@ namespace esphome::rainbird {
 
 namespace {
 
-// Optional commands probed with 04 at startup (PLAN 6.3). The probe answers are
-// the only capability source; the model id is used for the D12 gate alone.
-constexpr uint8_t PROBED[] = {0x4C, 0x4A, 0x42, 0x4B, 0x49, 0x3A};
+// The optional commands are probed with 04 at startup, in CAPABILITY_OPCODES order (model.h,
+// PLAN 6.3). The probe answers are the only capability source; the model id is used for the
+// D12 gate alone.
 
-// Three requests in a row failing after their retries means the link is down.
+// One bit per capability, for probes NAKed and not yet settled.
+constexpr uint8_t probe_bit(uint8_t opcode) {
+  for (uint8_t i = 0; i < CAPABILITY_COUNT; i++) {
+    if (CAPABILITY_OPCODES[i] == opcode) {
+      return static_cast<uint8_t>(1u << i);
+    }
+  }
+  return 0;
+}
+
+static_assert(CAPABILITY_COUNT <= 8, "probes_refused_ holds one bit per capability");
+
+// Three requests in a row failing after their retries means a link that was up is down.
 constexpr uint8_t FAILURES_FOR_DOWN = 3;
 
 // The slow group runs on the first cycle and then every fourth (PLAN 6.4).
@@ -195,7 +207,6 @@ void Session::restart_() {
   this->link_.drop_queued(Priority::POLL);
   this->link_.drop_queued(Priority::FOLLOW_UP);
   this->caps_ = Capabilities{};
-  this->probes_answered_ = 0;
   this->probe_retry_ = false;
   this->date_after_time_ = false;
   this->writes_permitted_ = false;
@@ -412,27 +423,10 @@ ControlResult Session::send_raw(const uint8_t *payload, size_t size, uint32_t no
   return ControlResult::QUEUED;
 }
 
-void Session::note_unsupported_(uint8_t opcode) {
-  CommandSupport support;
-  support.command = opcode;
-  support.supported = false;
-  this->model_.note_support(support, &this->caps_);
-  this->probes_answered_ |= probe_bit_(opcode);
-}
-
-uint8_t Session::probe_bit_(uint8_t opcode) {
-  for (size_t i = 0; i < sizeof(PROBED); i++) {
-    if (PROBED[i] == opcode) {
-      return static_cast<uint8_t>(1u << i);
-    }
-  }
-  return 0;
-}
-
 void Session::retry_probes_() {
   // A probe that timed out says nothing about the command, so it is asked again, once.
-  for (uint8_t command : PROBED) {
-    if (!this->capability_known(command)) {
+  for (uint8_t command : CAPABILITY_OPCODES) {
+    if (!this->caps_.known(command)) {
       this->enqueue_(request_support(command), Priority::POLL, TagKind::PROBE, command);
     }
   }
@@ -480,7 +474,10 @@ void Session::forget_state_(bool keep_zones) {
 
 void Session::handle_(const Completion &done, uint32_t now_ms) {
   if (done.outcome == Outcome::FAILED) {
-    if (this->link_.consecutive_failures() >= FAILURES_FOR_DOWN) {
+    // A controller that has never answered is down at the first request that fails, retries
+    // included: that is a wiring fault to report now, not three polls later. One that has
+    // answered gets three in a row, so a single lost reply does not drop what was read.
+    if (!this->link_status_.connected_known || this->link_.consecutive_failures() >= FAILURES_FOR_DOWN) {
       this->set_connected_(false, now_ms);
     }
   } else {
@@ -499,7 +496,7 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
     this->push_event_(event);
     // NAK bit 0 is "command not supported" (SPEC 3.3). Drop that capability.
     if (nak_is_unsupported(done.reply.nak.code)) {
-      this->note_unsupported_(done.opcode);
+      this->caps_.set(done.opcode, false);
     }
   }
 
@@ -526,7 +523,7 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
       this->probe_answered_ = false;
       this->probe_refused_ = false;
       this->probes_refused_ = 0;
-      for (uint8_t command : PROBED) {
+      for (uint8_t command : CAPABILITY_OPCODES) {
         // Only a queued probe completes. One the queue refused counts as unanswered.
         if (this->enqueue_(request_support(command), Priority::FOLLOW_UP, TagKind::PROBE, command)) {
           this->probes_pending_++;
@@ -538,12 +535,12 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
       return;
     case TagKind::PROBE:
       if (done.outcome == Outcome::REPLY && done.reply.kind == ReplyKind::SUPPORT) {
-        this->model_.note_support(done.reply.support, &this->caps_);
+        // reply_matches() has checked that the 84 names the command this probe asked about.
+        this->caps_.set(done.reply.support.command, done.reply.support.supported);
         this->probe_answered_ = true;
-        this->probes_answered_ |= probe_bit_(tag_detail(done.tag));
       } else if (done.outcome == Outcome::NAK) {
         this->probe_refused_ = true;
-        this->probes_refused_ |= probe_bit_(tag_detail(done.tag));
+        this->probes_refused_ |= probe_bit(tag_detail(done.tag));
         if (this->probes_pending_ == 0) {
           this->settle_refused_probes_();  // a retry, after startup has decided
         }
@@ -563,9 +560,17 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
       return;
     case TagKind::INFO:
     case TagKind::POLL:
+      return;
     case TagKind::RAW:
+      if (done.outcome == Outcome::FAILED) {
+        this->no_reply_(done.opcode);
+      }
       return;
     case TagKind::CONTROL:
+      // Reported, because nothing else says so: the command went once and nobody answered.
+      if (done.outcome == Outcome::FAILED) {
+        this->no_reply_(done.opcode);
+      }
       if (done.opcode == OPCODE_SET_TIME && this->date_after_time_) {
         // A time the controller did not take, or may not have, is not followed by its date:
         // a new date on the old time is a clock a day out near midnight.
@@ -589,21 +594,23 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
   }
 }
 
+void Session::no_reply_(uint8_t opcode) {
+  SessionEvent event;
+  event.kind = SessionEventKind::NO_REPLY;
+  event.opcode = opcode;
+  this->push_event_(event);
+}
+
 void Session::settle_refused_probes_() {
   // A NAK refuses 04 itself, not the command it asked about. With no 84 reply at all, this is a
   // controller without 04: try the command, and its own NAK clears it. Alongside 84 replies, a
   // NAK is taken as "no". Probes that only timed out say nothing: they stay unknown, the
   // fallback polls (10, 12, 36, 3E, 48) work on every model, and retry_probes_() asks again.
   this->caps_assumed_ = !this->probe_answered_ && this->probe_refused_;
-  for (uint8_t command : PROBED) {
-    if ((this->probes_refused_ & probe_bit_(command)) == 0) {
-      continue;
+  for (uint8_t command : CAPABILITY_OPCODES) {
+    if ((this->probes_refused_ & probe_bit(command)) != 0) {
+      this->caps_.set(command, this->caps_assumed_);
     }
-    CommandSupport support;
-    support.command = command;
-    support.supported = this->caps_assumed_;
-    this->model_.note_support(support, &this->caps_);
-    this->probes_answered_ |= probe_bit_(command);
   }
   this->probes_refused_ = 0;
 }
@@ -640,9 +647,9 @@ bool Session::watering_() const {
   return this->state_.active_zone.value_or(0) != 0 || this->state_.remaining_seconds.value_or(0) != 0;
 }
 
-ControlResult Session::unsupported_(uint8_t opcode) const {
+ControlResult Session::unsupported_(Capability capability) const {
   // Until the probe has an answer, "not supported" would be a guess.
-  return this->capability_known(opcode) ? ControlResult::REFUSED_UNSUPPORTED : ControlResult::REFUSED_NOT_READY;
+  return this->caps_.known(capability) ? ControlResult::REFUSED_UNSUPPORTED : ControlResult::REFUSED_NOT_READY;
 }
 
 bool Session::link_down_() const { return this->link_status_.connected_known && !this->link_status_.connected; }
@@ -731,8 +738,8 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       if (this->zone_missing_(command.zone)) {
         return ControlResult::REFUSED_NO_ZONE;
       }
-      if (queue && !this->caps_.queue_run) {
-        return this->unsupported_(0x4B);
+      if (queue && !this->caps_.has(Capability::QUEUE_RUN)) {
+        return this->unsupported_(Capability::QUEUE_RUN);
       }
       uint8_t minutes = static_cast<uint8_t>(command.value);
       request = queue ? request_queue_station(0, command.zone, minutes) : request_run_station(command.zone, minutes);
@@ -745,10 +752,10 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       uint8_t next = 0;
       bool advance = this->config_.valve_queue && this->config_.experimental;
       // Until the 42 probe is answered, 40 could cancel zones a supported 42 would keep.
-      if (advance && !this->capability_known(0x42)) {
+      if (advance && !this->caps_.known(Capability::ADVANCE)) {
         return ControlResult::REFUSED_NOT_READY;
       }
-      if (advance && this->caps_.advance) {
+      if (advance && this->caps_.has(Capability::ADVANCE)) {
         // Until the queue has been read, 40 could cancel zones queued behind this one.
         if (!this->state_.queue.has_value()) {
           return ControlResult::REFUSED_NOT_READY;
@@ -773,8 +780,8 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       if (!this->config_.experimental) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
-      if (!this->caps_.advance) {
-        return this->unsupported_(0x42);
+      if (!this->caps_.has(Capability::ADVANCE)) {
+        return this->unsupported_(Capability::ADVANCE);
       }
       uint8_t next = 0;
       if (!this->next_queued_zone_(0, &next)) {
@@ -801,8 +808,8 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       if (!this->config_.experimental) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
-      if (!this->caps_.controller_state) {
-        return this->unsupported_(0x49);
+      if (!this->caps_.has(Capability::CONTROLLER_STATE)) {
+        return this->unsupported_(Capability::CONTROLLER_STATE);
       }
       request = request_set_controller_state(command.value == 0 ? 0 : 1);
       break;
@@ -810,8 +817,8 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       if (!this->config_.experimental) {
         return ControlResult::REFUSED_EXPERIMENTAL;
       }
-      if (!this->caps_.test_stations) {
-        return this->unsupported_(0x3A);
+      if (!this->caps_.has(Capability::TEST_STATIONS)) {
+        return this->unsupported_(Capability::TEST_STATIONS);
       }
       if (command.value < 1 || command.value > limits.run_max_minutes) {
         return ControlResult::REFUSED_RANGE;
@@ -856,31 +863,40 @@ void Session::fail_edit_(const char *reason) {
   this->start_next_edit_();
 }
 
-bool Session::start_edit_(const PendingEdit &edit) {
-  ByteBuf read;
-  if (!this->editor_.start(edit.field, edit.zone, edit.program, edit.index, edit.value, &read)) {
-    return false;
+void Session::remove_edit_(size_t index) {
+  for (size_t i = index; i + 1 < this->edit_count_; i++) {
+    this->edits_[i] = this->edits_[i + 1];
   }
-  if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
-    this->editor_.cancel();
-    return false;
-  }
-  return true;
+  this->edit_count_--;
 }
 
 void Session::start_next_edit_() {
   while (!this->editor_.active() && this->edit_count_ > 0) {
-    PendingEdit next = this->edits_[0];
-    for (size_t i = 0; i + 1 < this->edit_count_; i++) {
-      this->edits_[i] = this->edits_[i + 1];
+    // The oldest edit picks the page.
+    ByteBuf read;
+    if (!this->editor_.start(this->edits_[0], &read)) {
+      this->remove_edit_(0);  // edit_schedule() located it, so this does not happen
+      continue;
     }
-    this->edit_count_--;
-    if (!this->start_edit_(next)) {
-      // Reported, because the caller was told this edit was queued. Then the one after it is tried.
+    if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
+      // Reported, because each caller was told its edit was queued. Nothing would start the
+      // rest later either, so they go too.
+      this->editor_.cancel();
+      this->edit_count_ = 0;
       SessionEvent event;
       event.kind = SessionEventKind::EDIT_FAILED;
-      event.reason = "a waiting edit could not be started";
+      event.reason = "the link could not take a page read, and the edits waiting were dropped";
       this->push_event_(event);
+      return;
+    }
+    this->remove_edit_(0);
+    // Every other edit waiting for that page shares the read and the write, in the order asked.
+    for (size_t i = 0; i < this->edit_count_;) {
+      if (this->editor_.add(this->edits_[i])) {
+        this->remove_edit_(i);
+      } else {
+        i++;
+      }
     }
   }
 }
@@ -899,22 +915,29 @@ ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program,
   if (!this->model_.locate(field, zone, program, index).has_value()) {
     return ControlResult::REFUSED_RANGE;
   }
-  PendingEdit edit;
-  edit.field = field;
-  edit.zone = zone;
-  edit.program = program;
-  edit.index = index;
-  edit.value = value;
+  PageChange edit{field, zone, program, index, value};
   if (!this->editor_.active()) {
-    return this->start_edit_(edit) ? ControlResult::QUEUED : ControlResult::REFUSED_BUSY;
+    ByteBuf read;
+    if (!this->editor_.start(edit, &read)) {
+      return ControlResult::REFUSED_RANGE;
+    }
+    if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
+      this->editor_.cancel();
+      return ControlResult::REFUSED_BUSY;
+    }
+    return ControlResult::QUEUED;
   }
-  // One edit at a time on the wire. This one waits; each edit reads its page afresh, so two
-  // edits to one page do not undo each other.
+  // Its page is being read right now: it joins that read and that write.
+  if (this->editor_.add(edit)) {
+    return ControlResult::QUEUED;
+  }
+  // One page at a time on the wire, so this one waits. Each page is read afresh, so two edits
+  // to one page do not undo each other. The same field again takes the later value and goes to
+  // the back: it is the latest thing asked for.
   for (size_t i = 0; i < this->edit_count_; i++) {
-    PendingEdit &waiting = this->edits_[i];
-    if (waiting.field == field && waiting.zone == zone && waiting.program == program && waiting.index == index) {
-      waiting.value = value;  // the same field again: the later value is the one wanted
-      return ControlResult::QUEUED;
+    if (this->edits_[i].same_field(edit)) {
+      this->remove_edit_(i);
+      break;
     }
   }
   if (this->edit_count_ >= EDIT_CAP) {
@@ -929,7 +952,15 @@ void Session::handle_page_(const Completion &done) {
     return;
   }
   ByteBuf next;
-  switch (this->editor_.on_reply(done, &next)) {
+  ScheduleEditor::Step step = this->editor_.on_reply(done, &next);
+  if ((step == ScheduleEditor::Step::WRITE || step == ScheduleEditor::Step::UNCHANGED) && this->editor_.refused() > 0) {
+    // The rest of the page still goes ahead; whoever asked for this one was told it was queued.
+    SessionEvent event;
+    event.kind = SessionEventKind::EDIT_FAILED;
+    event.reason = "a field could not be changed on its page; the other changes to that page were kept";
+    this->push_event_(event);
+  }
+  switch (step) {
     case ScheduleEditor::Step::WRITE: {
       if (!this->enqueue_(next, Priority::USER, TagKind::PAGE, this->editor_.page(), Delivery::ONCE)) {
         this->fail_edit_("the page write could not be queued");
@@ -950,6 +981,7 @@ void Session::handle_page_(const Completion &done) {
       }
       return;
     case ScheduleEditor::Step::DONE:
+    case ScheduleEditor::Step::UNCHANGED:
       this->start_next_edit_();
       return;
     case ScheduleEditor::Step::FAILED:

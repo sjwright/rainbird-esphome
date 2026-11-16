@@ -16,7 +16,6 @@ class EspTm2Model {
   std::optional<PageField> locate(Field field, uint8_t zone, uint8_t program, uint8_t index) const;
   CodecKind codec(Field field) const;
   void apply_reply(const Reply &reply, ControllerState *state) const;
-  void note_support(const CommandSupport &support, Capabilities *caps) const;
   // Copy the page, then change one field. Every other byte stays, including program-page bytes 3 and 4.
   bool patch(uint8_t page, const uint8_t *data, size_t size, Field field, uint8_t zone, uint8_t program, uint8_t index,
              int32_t value, uint8_t *out, size_t *out_size) const;

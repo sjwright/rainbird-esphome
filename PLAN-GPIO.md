@@ -1,8 +1,9 @@
 # Plan: our own GPIO receiver, and what to do about the transmitter
 
-Status: **proposal for discussion. Nothing here is built.**
+Status: **proposal for discussion. Phase 0 is built (16 November 2026); nothing in the firmware uses it.**
 Written 25 October 2026, against ESPHome 2026.9.1 and ESP-IDF 5.5.4.
 Updated 26 October 2026: single-core chips (8.1).
+Updated 16 November 2026: phase 0 results (10.1).
 
 This plan replaces `remote_receiver` with a small receiver of our own, built on
 a GPIO edge interrupt. It weighs four ways to transmit and recommends keeping
@@ -727,6 +728,41 @@ Bench and field time is extra and depends on hardware access.
 
 Phase 1 is the only time both receivers coexist in the code. They should not
 coexist in a release: two receive paths means two sets of bugs and docs.
+
+### 10.1 Phase 0 results (16 November 2026)
+
+`BurstAssembler` (`burst_assembler.h/.cpp`) and `tests/unit/test_burst_assembler.cpp`
+are in the tree. The firmware does not use the assembler: `remote_receiver`
+still receives.
+
+- **Real edges decode.** `tests/captures/saleae/capture.csv` goes through the
+  assembler and the existing `ReceiverDecoder` unchanged: 135 request bursts
+  give 209 frames (74 are a doubled 2-byte request), 135 reply bursts give 135
+  frames, and every reply answers the request before it. No burst fails, and
+  nothing in the capture is short enough to count as a glitch.
+- **Every SPEC frame round-trips** through encode, edges, assembler and
+  decoder at both polarities and both phases, with and without a loop
+  checking for idle.
+- **Jitter tolerance is ±25 µs per edge.** With every edge of the capture
+  moved by a uniform random amount, all 270 bursts decode over 20 rounds at
+  ±25 µs and failures start at ±30 µs. That matches the arithmetic in 8.1: a
+  one-half pulse has about 62 µs of room and its width takes the error of two
+  edges. This is with the decoder as it is, classifying pulse widths.
+- **What that means for 9.4.** The criterion is a host tolerance at least 3×
+  the worst latency spread on the bench, so the bench has to show a spread of
+  about 8 µs or less under WiFi load. The capture was taken at the LNK2's own
+  pins, so it carries the LNK2's optocoupler asymmetry (its reply pulses are
+  200 and 210 µs, not 208); an interface with slower edges leaves less room.
+  On a single-core chip that is a tight target. The latency histogram
+  (9.2 item 3, C3 first) is the next thing to measure, and if it is over,
+  phase 4 (the time-slot decoder) is needed before phase 1 is worth building.
+- **Missed edges.** With one or two edges removed from each burst, 2,700
+  damaged bursts gave 533 frames, each one a frame the burst really held (the
+  intact copy of a doubled request). None was wrong.
+- **Seen in the capture.** The LNK2 asks for pages the TM2 does not have
+  (`3F 01`, `3D 02`), and the controller answers those with page `FF`. The
+  hub only asks for page 0, so nothing changes, but `reply_matches()` would
+  not pair such a reply with its request.
 
 ---
 

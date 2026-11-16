@@ -127,6 +127,7 @@ entity actions (4.5).
 | `zone_defaults`, `zones` | see 4.2 | all 12 zones | `zones: []` creates none |
 | `program_defaults`, `programs` | see 4.3 | all programs | `programs: []` creates none |
 | `on_nak` | automation | | Variables `command`, `code` |
+| `on_no_reply` | automation | | A command got no answer and is not sent again. Variable `command` |
 | `on_frame` | automation | | Variable `payload` (`std::vector<uint8_t>`) for every valid reply. The monitor receiver's requests are only logged. |
 
 **Internal constants, not options.** Only one that turns out to need tuning per
@@ -276,8 +277,8 @@ water for over four hours (`plan_zone_run()` in `entity_writes.cpp`).
 
 An entity can be `internal: true` if it's only wanted for automations.
 
-**Custom triggers:** `on_nak` and `on_frame` (4.1). They report protocol
-events that no entity represents.
+**Custom triggers:** `on_nak`, `on_no_reply` and `on_frame` (4.1). They report
+protocol events that no entity represents.
 
 ---
 
@@ -302,21 +303,23 @@ rainbird-esphome/
 │   ├── platform.py, schemas.py  # the platform modules and entity schemas, from the kind table
 │   ├── wire.py                  # final validation: transmitter, receivers, RMT memory
 │   ├── entity_checks.py         # final validation: duplicate controls, dependencies
-│   ├── automation.h             # on_nak / on_frame triggers
+│   ├── automation.h             # on_nak / on_no_reply / on_frame triggers
 │   ├── rainbird.h/.cpp          # hub: ESPHome glue, publishing, logging, clock sync, actions
 │   ├── rainbird_entities.h/.cpp # one class per writeable domain (5.4)
 │   ├── entity_kind.h            # generated: the EntityKind enum and the kind table rows
 │   ├── model_limits.h           # generated: zone, program and value limits
 │   ├── entity_values.h/.cpp     # pure: the kind table, poll plan per binding, values to show
 │   ├── entity_writes.h/.cpp     # pure: what a write from an entity or action becomes
+│   ├── entity_board.h/.cpp      # pure: every entity on the hub, what to publish, what a lost link does
 │   ├── session.h/.cpp           # pure: startup, probes, polls, commands, edits, events
-│   ├── schedule_editor.h/.cpp   # pure: one schedule edit: read, patch, write, confirm
+│   ├── schedule_editor.h/.cpp   # pure: one schedule page edit: read, patch, write, confirm
 │   ├── link_core.h/.cpp         # pure: transport queue, timeouts, retries, reply matching
 │   ├── controller_state.h/.cpp  # pure: field IDs and one optional cell per value
 │   ├── clock_sync.h/.cpp        # pure: when the controller clock needs setting
 │   ├── countdown.h              # pure: the remaining-time countdown and the end time
 │   ├── elapsed.h                # pure: wrap-safe elapsed-time check
 │   ├── manchester.h/.cpp        # pure: raw timings ↔ bits, polarity/phase lock
+│   ├── burst_assembler.h/.cpp   # pure: line edges → bursts (PLAN-GPIO phase 0; not yet used on the device)
 │   ├── sip_frame.h/.cpp         # pure: frame encoder, frame hunter, checksum, escapes
 │   ├── sip_commands.h/.cpp      # pure: request builders, typed reply parsers, quirk helpers
 │   ├── model.h                  # pure: limits, capabilities, page fields and codecs
@@ -374,9 +377,12 @@ manchester ──► sip_frame ──► sip_commands      (pure C++: wire forma
                                    │ changed fields
                                    ▼
 link_core ◄── session ──► entity_values/_writes  (pure C++: behaviour)
-                 ▲  │ events, readout
-                 │  ▼
-          RainbirdComponent ──► entities          (ESPHome)
+                 ▲  │ events, readout     │
+                 │  ▼                     ▼
+          RainbirdComponent ◄──── entity_board    (pure C++: what to show)
+                 │ publishes
+                 ▼
+              entities                            (ESPHome)
 ```
 
 1. **One owner per job.**
@@ -388,8 +394,10 @@ link_core ◄── session ──► entity_values/_writes  (pure C++: behaviou
    - `LinkCore` owns scheduling: queue, timeouts and retries.
    - `entity_values` owns the kind table and what each entity shows and
      polls; `entity_writes` owns what each write becomes. The table itself is
-     generated from `entity_kinds.py` (5.3). `RainbirdComponent` only
-     publishes, logs and carries a write plan out.
+     generated from `entity_kinds.py` (5.3). `entity_board` owns the list of
+     entities on a hub: which values go out after a reading, and what a lost
+     link does to each. `RainbirdComponent` only publishes what the board
+     tells it to, logs, and carries a write plan out.
    - Replies are parsed in exactly one place; the model never re-parses
      bytes.
 2. **Includes only point down the stack.** The pure layers (everything in
@@ -399,9 +407,9 @@ link_core ◄── session ──► entity_values/_writes  (pure C++: behaviou
 3. **`ControllerState` is the only copy of controller data.** Each value is
    empty until a reply brings it, and is emptied again when the link goes
    down. `Session::revision()` moves on whenever anything may have changed;
-   the hub then walks its entities and publishes only a value that differs
-   from the one it last published, so nothing is republished when a poll
-   changes nothing. The only values outside it are local settings that the
+   the hub then has `EntityBoard::publish()` walk the entities, and only a
+   value that differs from the one last published goes out, so nothing is
+   republished when a poll changes nothing. The only values outside it are local settings that the
    controller doesn't hold (run durations, test duration).
 4. **Every write from an entity goes through one function**,
    `RainbirdComponent::submit()`. What the write means is decided by the pure
@@ -571,8 +579,11 @@ whatever core `template` number moves to.
 config from the registered bindings and starts it; `update()` only enqueues a
 poll cycle; `loop()` runs the link and is disabled when the link is idle;
 after every frame, loop and update it drains the session's events, publishes
-what changed and checks the clock. It owns one `EspTm2Model` and one
-`Session`, which owns `LinkCore` and `ControllerState`.
+what changed and checks the clock. It owns one `EspTm2Model`, one
+`EntityBoard` and one `Session`, which owns `LinkCore` and `ControllerState`.
+Every entity is added to the board with its binding and its pointer. The hub
+is the board's `BoardSink`: the board decides what to show, and the hub's
+`show_` methods cast the pointer back and call `publish_state()`.
 
 ---
 
@@ -707,9 +718,13 @@ for up to 24.8 days after a long idle spell or the millis() wrap.
 - **Errors.** A timeout or bad frame is retried, then counted as a link
   error. Commands and schedule writes go as one copy and are never retried:
   the controller may act on every copy it hears, and a lost reply does not
-  mean it did nothing. `send_raw` is never retried either (4.1). Three
+  mean it did nothing. `send_raw` is never retried either (4.1). A command or
+  `send_raw` that gets no reply is logged and raises `on_no_reply`. Three
   failures in a row set `connected` off, and polling stays at
-  `update_interval`. While it is off, commands and schedule edits are
+  `update_interval`. A controller that has never answered is down at the
+  first request that fails, so a wiring fault shows within a second or two
+  of boot; the log then says whether the receiver heard nothing or heard
+  bursts with no valid frame. While it is off, commands and schedule edits are
   refused, and any still queued are dropped: a command must not run minutes
   later, or on a different controller. `ControllerState` is emptied at the
   same moment, keeping only which zones exist: a zone shown running may have
@@ -727,11 +742,16 @@ for up to 24.8 days after a long idle spell or the millis() wrap.
 - **A clock set is time, then date**: `11` goes first, and `13` only once
   `11` is acknowledged. A new date on a time the controller did not take
   would be a clock a day out near midnight. One clock set at a time.
-- **Schedule edits run one at a time and wait their turn.** An edit asked
-  for while another runs is held, up to eight of them; a later value for a
-  field already waiting replaces the earlier one. Each reads its page
-  afresh, so two edits to one page do not undo each other, and one that
-  fails does not stop those behind it. A lost link drops them all.
+- **Schedule edits run a page at a time and wait their turn.** Edits to one
+  page that arrive while its read is still out share that read and go out
+  as one write, in the order asked. A page that already holds every value
+  is not written. An edit for another page, or one that arrives after the
+  read was answered, is held: there is room for every schedule field at
+  once (92 on a TM2), so none is refused for want of room. A later value for
+  a field already waiting replaces the earlier one. Each page is read
+  afresh, so two edits to one page do not undo each other, and a page that
+  fails does not stop those behind it. A change its field cannot hold is
+  reported and the rest of its page still goes. A lost link drops them all.
 - **NAKs** are logged and raise `on_nak`. The command is marked unsupported
   for the session when `nak_is_unsupported(code)` is true (bit 0 set). A NAK
   without bit 0 is logged as a likely encoding bug.
@@ -926,11 +946,15 @@ The model IDs a TM2 can report (`0005`, `000A`, `010A`, `0014`, `0015`) are in
   such as minutes ↔ start slot with `FFFF` for off;
 - `apply_reply()`: maps an already-parsed `Reply` onto `ControllerState`.
   Parsing happens only in `sip_commands` (5.1 rule 1);
-- `note_support()`: records a `04` probe answer in `Capabilities`;
 - `patch()`: copies a page and changes one field, for the schedule editor.
 
 `ControllerState` is sized for the TM2 (`STATE_ZONES`, `STATE_PROGRAMS`,
 `STATE_STARTS`, from `model_limits.h`).
+
+The optional commands are one list in `model.h`: the `Capability` enum and
+`CAPABILITY_OPCODES`. `Capabilities` holds yes, no or unknown for each. The
+session probes them in that order, and the log line and every "is it
+supported" check read the same table.
 
 **A second model.** The other Rain Bird families differ in zone and program
 counts, and the LCR family in encodings too (custom/odd/even/cyclic order,
@@ -950,7 +974,8 @@ tested, in Python or C++: it would encode guesses.
 | Replay | `test_replay.cpp` feeds every file in `tests/captures/` (`Received Raw:` bursts from `dump: raw`, converted by `tools/raw_to_fixture.py`) through the full pipeline. Expected payloads are stored beside each capture. |
 | SIP parsers and model | Host tests using the `[test]` and `[wire]` examples in SPEC.md. Also tests that a schedule edit changes only the bits of its field, and that every quirk helper (5.1 rule 5) is right. |
 | Link and session | `test_link.cpp`, `test_session.cpp`, `test_handshake.cpp`: the pure classes against a scripted controller (`fake_controller.h`), with time passed in. |
-| Entity reads and writes | `test_entity_values.cpp` and `test_entity_writes.cpp`: what each kind shows, and what each write becomes, including every refusal. |
+| Entity reads and writes | `test_entity_values.cpp` and `test_entity_writes.cpp`: what each kind shows, and what each write becomes, including every refusal. `test_entity_board.cpp`: which values are published after a reading, and what a lost link does to each kind of entity. |
+| Edges to bursts | `test_burst_assembler.cpp` (PLAN-GPIO phase 0): the assembler's rules, every SPEC frame round the loop, the Saleae capture in `tests/captures/saleae/` decoded from its raw edges, and how much per-edge jitter that capture survives. |
 | Untrusted input | `test_fuzz.cpp`: random and damaged timings, bits and payloads through every decode path, the session and the entity layer, with fixed seeds. |
 | Expansion and IDs | pytest on `entity_kinds.py` and the hub expansion: defaults merge, `false`, string shorthand, placeholders, generated IDs (D9). |
 | Generated files | pytest fails when `entity_kind.h`, `model_limits.h` or the README tables are out of date (5.3). |

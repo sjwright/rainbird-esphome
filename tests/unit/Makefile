@@ -19,7 +19,7 @@ endif
 
 # The pure layers, by name. A file that needs ESPHome does not belong in this list.
 SRCS = manchester sip_frame sip_commands controller_state model_esp_tm2 link_core session \
-	schedule_editor clock_sync entity_values entity_writes
+	schedule_editor clock_sync entity_values entity_writes entity_board burst_assembler
 
 TESTS = $(basename $(wildcard test_*.cpp))
 

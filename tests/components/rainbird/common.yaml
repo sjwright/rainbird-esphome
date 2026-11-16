@@ -47,6 +47,10 @@ rainbird:
       name: Back lawn
   on_nak:
     - logger.log: "Controller NAK"
+  on_no_reply:
+    - logger.log:
+        format: "No reply to 0x%02X"
+        args: [command]
 
 number:
   - platform: rainbird

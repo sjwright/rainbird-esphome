@@ -246,10 +246,7 @@ TEST_CASE("short poll uses 4C only when the probe said it is supported") {
   used.add(Field::REMAINING_TIME);
 
   Capabilities upgraded;
-  CommandSupport supported;
-  supported.command = 0x4C;
-  supported.supported = true;
-  model.note_support(supported, &upgraded);
+  upgraded.set(0x4C, true);
   RequestList with_combined;
   model.short_poll(upgraded, used, &with_combined);
   expect_requests(with_combined, {"3F 00", "4C", "3B 00"});
@@ -257,8 +254,7 @@ TEST_CASE("short poll uses 4C only when the probe said it is supported") {
   // 0005 does not implement 4C. The probe is the only reason this list changes.
   CHECK(model.accepts(0x0005));
   Capabilities original;
-  supported.supported = false;
-  model.note_support(supported, &original);
+  original.set(0x4C, false);
   RequestList fallback;
   model.short_poll(original, used, &fallback);
   expect_requests(fallback, {"3F 00", "10", "12", "36", "3E", "48", "3B 00"});
@@ -278,16 +274,13 @@ TEST_CASE("slow poll and schedule pages follow the fields in use") {
   used.add(Field::SCHEDULE_CHANGED);
 
   Capabilities caps;
-  CommandSupport event;
-  event.command = 0x4A;
-  event.supported = true;
-  model.note_support(event, &caps);
+  caps.set(0x4A, true);
 
   RequestList slow;
   model.slow_poll(caps, used, &slow);
   expect_requests(slow, {"30 00", "30 01", "30 02", "4A 01"});
 
-  caps.event_timestamp = false;
+  caps.set(Capability::EVENT_TIMESTAMP, false);
   RequestList quiet;
   model.slow_poll(caps, used, &quiet);
   expect_requests(quiet, {"30 00", "30 01", "30 02"});
@@ -368,18 +361,27 @@ TEST_CASE("the queue field polls both queue pages") {
   expect_requests(list, {"3B 00", "3B 01"});
 }
 
-TEST_CASE("probes for 49 and 3A are recorded") {
-  EspTm2Model model;
+TEST_CASE("a capability is unknown until it is set, by command or by name") {
   Capabilities caps;
-  CommandSupport support;
-  support.supported = true;
-  support.command = 0x49;
-  model.note_support(support, &caps);
-  support.command = 0x3A;
-  model.note_support(support, &caps);
-  CHECK(caps.controller_state);
-  CHECK(caps.test_stations);
-  support.supported = false;
-  model.note_support(support, &caps);
-  CHECK_FALSE(caps.test_stations);
+  CHECK_FALSE(caps.known(Capability::TEST_STATIONS));
+  CHECK_FALSE(caps.has(Capability::TEST_STATIONS));
+  CHECK_FALSE(caps.known(0x3A));
+
+  caps.set(0x49, true);
+  caps.set(0x3A, true);
+  CHECK(caps.has(Capability::CONTROLLER_STATE));
+  CHECK(caps.has(Capability::TEST_STATIONS));
+  caps.set(0x3A, false);
+  CHECK_FALSE(caps.has(Capability::TEST_STATIONS));
+  CHECK(caps.known(0x3A));  // "no" is an answer
+
+  // A command that is not optional is never known, and setting it changes nothing.
+  caps.set(0x39, true);
+  CHECK_FALSE(caps.known(0x39));
+  Capability found;
+  CHECK_FALSE(Capabilities::find(0x39, &found));
+  for (uint8_t i = 0; i < CAPABILITY_COUNT; i++) {
+    REQUIRE(Capabilities::find(CAPABILITY_OPCODES[i], &found));
+    CHECK(static_cast<uint8_t>(found) == i);
+  }
 }

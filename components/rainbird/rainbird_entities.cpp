@@ -113,7 +113,7 @@ void RainbirdTime::control(const datetime::TimeCall &call) {
   // An off slot has no time on the controller (the page holds FFFF). The time stays here, and
   // the slot's enable switch writes it when it turns the slot on. Whatever time the controller
   // reports next is published, even one this entity showed before.
-  this->shown.reset();
+  this->get_parent()->forget_shown(this);
   this->show(hour, minute);
 }
 

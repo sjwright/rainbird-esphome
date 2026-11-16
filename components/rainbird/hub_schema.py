@@ -18,7 +18,14 @@ from esphome.components.remote_base import (
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_MODEL, CONF_NAME, CONF_TIME_ID, CONF_TRIGGER_ID
 
-from .classes import FrameTrigger, NakTrigger, RainbirdComponent, RainbirdProgram, RainbirdZone
+from .classes import (
+    FrameTrigger,
+    NakTrigger,
+    NoReplyTrigger,
+    RainbirdComponent,
+    RainbirdProgram,
+    RainbirdZone,
+)
 from .const import (
     CONF_ACCEPT_MODEL_IDS,
     CONF_ALLOW_WRITES,
@@ -32,6 +39,7 @@ from .const import (
     CONF_MONITOR_RECEIVER_ID,
     CONF_ON_FRAME,
     CONF_ON_NAK,
+    CONF_ON_NO_REPLY,
     CONF_PROGRAM,
     CONF_PROGRAM_DEFAULTS,
     CONF_PROGRAMS,
@@ -250,6 +258,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_PROGRAMS): _mapping_or_list,
             cv.Optional(CONF_ON_NAK): automation.validate_automation(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(NakTrigger)}
+            ),
+            cv.Optional(CONF_ON_NO_REPLY): automation.validate_automation(
+                {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(NoReplyTrigger)}
             ),
             cv.Optional(CONF_ON_FRAME): automation.validate_automation(
                 {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(FrameTrigger)}

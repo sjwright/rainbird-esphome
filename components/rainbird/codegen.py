@@ -40,6 +40,7 @@ from .const import (
     CONF_MONITOR_RECEIVER_ID,
     CONF_ON_FRAME,
     CONF_ON_NAK,
+    CONF_ON_NO_REPLY,
     CONF_PROGRAM,
     CONF_PROGRAMS,
     CONF_REFRESH_INTERVAL,
@@ -200,6 +201,10 @@ async def hub_to_code(config):
             trigger, [(cg.uint8, "command"), (cg.uint8, "code")], conf
         )
         cg.add(var.add_nak_trigger(trigger))
+    for conf in config.get(CONF_ON_NO_REPLY, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
+        await automation.build_automation(trigger, [(cg.uint8, "command")], conf)
+        cg.add(var.add_no_reply_trigger(trigger))
     for conf in config.get(CONF_ON_FRAME, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID])
         await automation.build_automation(

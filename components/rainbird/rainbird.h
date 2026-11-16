@@ -6,6 +6,7 @@
 
 #include "automation.h"
 #include "countdown.h"
+#include "entity_board.h"
 #include "entity_kind.h"
 #include "entity_values.h"
 #include "entity_writes.h"
@@ -83,7 +84,7 @@ class RainbirdReceiver : public remote_base::RemoteReceiverListener {
   ReceiverDecoder decoder_{};
 };
 
-class RainbirdComponent final : public PollingComponent {
+class RainbirdComponent final : public PollingComponent, private BoardSink {
  public:
   void setup() override;
   void loop() override;
@@ -126,43 +127,49 @@ class RainbirdComponent final : public PollingComponent {
   void add_zone(RainbirdZone *zone) { this->zones_.push_back(zone); }
   void add_program(RainbirdProgram *program) { this->programs_.push_back(program); }
   void add_nak_trigger(NakTrigger *trigger) { this->nak_triggers_.push_back(trigger); }
+  void add_no_reply_trigger(NoReplyTrigger *trigger) { this->no_reply_triggers_.push_back(trigger); }
   void add_frame_trigger(FrameTrigger *trigger) { this->frame_triggers_.push_back(trigger); }
 
   // Every entity registers here with its binding: the hub polls for it and publishes to it.
+  // Codegen sets an entity's binding before it adds the entity. The pointer goes on the board
+  // as the class named here, which is the class the BoardSink methods cast it back to.
 #ifdef USE_SWITCH
-  void add_switch(RainbirdSwitch *entity) { this->switches_.push_back(entity); }
+  void add_switch(RainbirdSwitch *entity);
 #endif
 #ifdef USE_NUMBER
-  void add_number(RainbirdNumber *entity) { this->numbers_.push_back(entity); }
-  // Indexed here, so a command never searches for its duration.
+  void add_number(RainbirdNumber *entity);
+  // A local setting shows nothing from the controller. Indexed here, so a command never searches for its duration.
   void add_setting(RainbirdSetting *setting);
 #endif
 #ifdef USE_BUTTON
-  void add_button(RainbirdButton *entity) { this->buttons_.push_back(entity); }
+  void add_button(RainbirdButton *entity);
 #endif
 #ifdef USE_SELECT
-  void add_select(RainbirdSelect *entity) { this->selects_.push_back(entity); }
+  void add_select(RainbirdSelect *entity);
 #endif
 #ifdef USE_DATETIME_TIME
   void add_time(RainbirdTime *entity);
+  // The time entity shows a time the controller did not report (an off slot's), so whatever
+  // the controller reports next is published.
+  void forget_shown(RainbirdTime *entity) { this->board_.forget(entity); }
 #endif
 #ifdef USE_DATETIME_DATETIME
-  void add_datetime(RainbirdDateTime *entity) { this->datetimes_.push_back(entity); }
+  void add_datetime(RainbirdDateTime *entity);
 #endif
 #ifdef USE_SENSOR
   void add_sensor(sensor::Sensor *entity, uint8_t kind, uint8_t zone, uint8_t program, uint8_t index) {
-    this->sensors_.push_back({entity, {static_cast<EntityKind>(kind), zone, program, index}});
+    this->board_.add(Domain::SENSOR, EntityBinding{static_cast<EntityKind>(kind), zone, program, index}, entity);
   }
 #endif
 #ifdef USE_BINARY_SENSOR
   void add_binary_sensor(binary_sensor::BinarySensor *entity, uint8_t kind, uint8_t zone, uint8_t program,
                          uint8_t index) {
-    this->binary_sensors_.push_back({entity, {static_cast<EntityKind>(kind), zone, program, index}});
+    this->board_.add(Domain::BINARY_SENSOR, EntityBinding{static_cast<EntityKind>(kind), zone, program, index}, entity);
   }
 #endif
 #ifdef USE_TEXT_SENSOR
   void add_text_sensor(text_sensor::TextSensor *entity, uint8_t kind, uint8_t zone, uint8_t program, uint8_t index) {
-    this->text_sensors_.push_back({entity, {static_cast<EntityKind>(kind), zone, program, index}});
+    this->board_.add(Domain::TEXT_SENSOR, EntityBinding{static_cast<EntityKind>(kind), zone, program, index}, entity);
   }
 #endif
 
@@ -173,15 +180,15 @@ class RainbirdComponent final : public PollingComponent {
  protected:
   friend class RainbirdReceiver;
 
-  // A read-only entity is ESPHome's own class, so its binding is kept here, with the value
-  // last published to it.
-  template<typename T, typename V> struct Bound {
-    T *entity;
-    EntityBinding binding;
-    std::optional<V> shown{};
-  };
+  // BoardSink: what the board says to show, carried out on the ESPHome entity.
+  void show_bool(Domain domain, void *entity, bool value) override;
+  void show_number(Domain domain, void *entity, float value) override;
+  void show_option(void *entity, uint8_t index) override;
+  void show_time(void *entity, uint8_t hour, uint8_t minute) override;
+  void show_clock(void *entity, const WallClock &clock) override;
+  void show_text(void *entity, const std::string &text) override;
+  void show_unknown(Domain domain, void *entity) override;
 
-  template<typename F> void for_each_binding_(F &&visit) const;
   void note_escapes_(const ByteBuf &payload, bool sent);
   void note_escapes_(uint8_t escapes, bool sent);
   void deliver_frame_(const Frame &frame, const char *which, bool controller);
@@ -191,6 +198,7 @@ class RainbirdComponent final : public PollingComponent {
   void handle_events_();
   void log_controller_();
   void log_link_stats_();
+  void log_heard_();
   void publish_();
   void publish_remaining_();
   void publish_remaining_sensors_(uint32_t seconds);
@@ -218,40 +226,23 @@ class RainbirdComponent final : public PollingComponent {
   std::vector<RainbirdZone *> zones_{};
   std::vector<RainbirdProgram *> programs_{};
   std::vector<NakTrigger *> nak_triggers_{};
+  std::vector<NoReplyTrigger *> no_reply_triggers_{};
   std::vector<FrameTrigger *> frame_triggers_{};
   std::vector<uint16_t> accept_ids_{};
-#ifdef USE_SWITCH
-  std::vector<RainbirdSwitch *> switches_{};
-#endif
 #ifdef USE_NUMBER
-  std::vector<RainbirdNumber *> numbers_{};
   // Local settings that commands read, by zone.
   RainbirdSetting *run_durations_[STATE_ZONES]{};
   RainbirdSetting *test_duration_{nullptr};
 #endif
-#ifdef USE_BUTTON
-  std::vector<RainbirdButton *> buttons_{};
-#endif
-#ifdef USE_SELECT
-  std::vector<RainbirdSelect *> selects_{};
-#endif
 #ifdef USE_DATETIME_TIME
-  std::vector<RainbirdTime *> times_{};
   // Turning a start slot on writes the time its time entity shows.
   RainbirdTime *start_times_[STATE_PROGRAMS][STATE_STARTS]{};
 #endif
-#ifdef USE_DATETIME_DATETIME
-  std::vector<RainbirdDateTime *> datetimes_{};
-#endif
 #ifdef USE_SENSOR
-  std::vector<Bound<sensor::Sensor, float>> sensors_{};
+  // Counted down by the hub's timer, not published by the board.
   std::vector<sensor::Sensor *> remaining_sensors_{};
 #endif
-#ifdef USE_BINARY_SENSOR
-  std::vector<Bound<binary_sensor::BinarySensor, bool>> binary_sensors_{};
-#endif
 #ifdef USE_TEXT_SENSOR
-  std::vector<Bound<text_sensor::TextSensor, std::string>> text_sensors_{};
   std::vector<text_sensor::TextSensor *> ends_at_sensors_{};
 #endif
   bool listen_only_{false};
@@ -260,6 +251,10 @@ class RainbirdComponent final : public PollingComponent {
   bool handshake_{true};
   uint8_t escapes_sent_logged_{0};
   uint8_t escapes_received_logged_{0};
+  // What the controller's receiver has heard since boot: every burst, and those with a valid frame.
+  // Bursts with no frames is a signal that does not decode; no bursts is nothing on the wire.
+  uint32_t bursts_heard_{0};
+  uint32_t bursts_decoded_{0};
   bool valve_queue_{false};
   bool clock_sync_{false};
   uint32_t max_drift_ms_{30000};
@@ -273,6 +268,7 @@ class RainbirdComponent final : public PollingComponent {
 #endif
 
   EspTm2Model model_{};
+  EntityBoard board_{};
   std::unique_ptr<Session> session_{};
   TextContext text_{};
   WriteContext writes_{};

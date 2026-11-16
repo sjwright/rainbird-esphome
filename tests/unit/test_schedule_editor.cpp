@@ -57,3 +57,67 @@ TEST_CASE("an edit fails on any answer that is not the step's own") {
   ScheduleEditor nowhere(model);
   CHECK_FALSE(nowhere.start(Field::RUN_TIME, 13, 0, 0, 10, &request));
 }
+
+TEST_CASE("changes to one page share its read and its write, in the order asked") {
+  EspTm2Model model;
+  ScheduleEditor editor(model);
+  ByteBuf request;
+  // 6A is Monday, Wednesday, Friday and Saturday.
+  REQUIRE(editor.start(Field::WATERING_DAY, 0, 0, 0, 0, &request));
+  CHECK(editor.add(PageChange{Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM}));
+  CHECK(editor.add(PageChange{Field::CYCLE_DAYS, 0, 0, 0, 3}));
+  // The frequency again: the later value wins.
+  CHECK(editor.add(PageChange{Field::FREQUENCY, 0, 0, 0, FREQ_EVEN}));
+  // Another program's page, and a field that is on no page, wait for their own edit.
+  CHECK_FALSE(editor.add(PageChange{Field::FREQUENCY, 0, 1, 0, FREQ_EVEN}));
+  CHECK_FALSE(editor.add(PageChange{Field::RUN_TIME, 13, 0, 0, 10}));
+
+  REQUIRE(editor.on_reply(answer("A0 00 10 6A 06 01 00 64 01"), &request) == ScheduleEditor::Step::WRITE);
+  CHECK(to_hex(request.data, request.size) == "21 00 10 68 03 01 00 64 03");
+  CHECK(editor.refused() == 0);
+  // The page is patched. A change now would miss the write.
+  CHECK_FALSE(editor.add(PageChange{Field::WATERING_DAY, 0, 0, 2, 0}));
+}
+
+TEST_CASE("a start slot is turned off then given a time, or the other way round, as asked") {
+  EspTm2Model model;
+  ByteBuf request;
+  ScheduleEditor on(model);
+  REQUIRE(on.start(Field::START_ENABLED, 0, 0, 0, 0, &request));
+  REQUIRE(on.add(PageChange{Field::START_TIME, 0, 0, 0, 400}));
+  REQUIRE(on.on_reply(answer("A0 00 60 01 68 FF FF FF FF FF FF"), &request) == ScheduleEditor::Step::WRITE);
+  CHECK(to_hex(request.data, request.size) == "21 00 60 01 90 FF FF FF FF FF FF");
+
+  ScheduleEditor off(model);
+  REQUIRE(off.start(Field::START_TIME, 0, 0, 0, 400, &request));
+  REQUIRE(off.add(PageChange{Field::START_ENABLED, 0, 0, 0, 0}));
+  REQUIRE(off.on_reply(answer("A0 00 60 01 68 FF FF FF FF FF FF"), &request) == ScheduleEditor::Step::WRITE);
+  CHECK(to_hex(request.data, request.size) == "21 00 60 FF FF FF FF FF FF FF FF");
+}
+
+TEST_CASE("a page that already holds every value is not written") {
+  EspTm2Model model;
+  ScheduleEditor editor(model);
+  ByteBuf request;
+  REQUIRE(editor.start(Field::FREQUENCY, 0, 0, 0, FREQ_CYCLIC, &request));
+  REQUIRE(editor.add(PageChange{Field::WATERING_DAY, 0, 0, 0, 1}));
+  CHECK(editor.on_reply(answer("A0 00 10 6A 06 01 00 64 01"), &request) == ScheduleEditor::Step::UNCHANGED);
+  CHECK_FALSE(editor.active());
+}
+
+TEST_CASE("a change the page will not take is counted, and the others still go") {
+  EspTm2Model model;
+  ByteBuf request;
+  ScheduleEditor editor(model);
+  REQUIRE(editor.start(Field::CYCLE_DAYS, 0, 0, 0, 300, &request));  // one byte cannot hold 300
+  REQUIRE(editor.add(PageChange{Field::FREQUENCY, 0, 0, 0, FREQ_ODD}));
+  REQUIRE(editor.on_reply(answer("A0 00 10 6A 06 01 00 64 01"), &request) == ScheduleEditor::Step::WRITE);
+  CHECK(to_hex(request.data, request.size) == "21 00 10 6A 06 01 00 64 02");
+  CHECK(editor.refused() == 1);
+
+  // With nothing left to change, the edit fails and writes nothing.
+  ScheduleEditor alone(model);
+  REQUIRE(alone.start(Field::CYCLE_DAYS, 0, 0, 0, 300, &request));
+  CHECK(alone.on_reply(answer("A0 00 10 6A 06 01 00 64 01"), &request) == ScheduleEditor::Step::FAILED);
+  CHECK(alone.refused() == 1);
+}

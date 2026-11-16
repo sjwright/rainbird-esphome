@@ -40,14 +40,6 @@ constexpr time_t SECONDS_1970_TO_2000 = 946684800;
 // Room for a whole page as "AA.BB.CC…".
 constexpr size_t PAGE_HEX_SIZE = format_hex_pretty_size(MAX_PAGE_BYTES);
 
-// True when `value` differs from what was last published, and records it as published.
-template<typename V> bool is_new(std::optional<V> &shown, const V &value) {
-  if (shown == value)
-    return false;
-  shown = value;
-  return true;
-}
-
 const char *stage_text(SessionStage stage) {
   switch (stage) {
     case SessionStage::PASSIVE:
@@ -72,46 +64,6 @@ const char *stage_text(SessionStage stage) {
 
 }  // namespace
 
-// Every registered entity's binding, writable and read-only alike.
-template<typename F> void RainbirdComponent::for_each_binding_(F &&visit) const {
-#ifdef USE_SWITCH
-  for (auto *entity : this->switches_)
-    visit(entity->binding());
-#endif
-#ifdef USE_NUMBER
-  for (auto *entity : this->numbers_)
-    visit(entity->binding());
-#endif
-#ifdef USE_BUTTON
-  for (auto *entity : this->buttons_)
-    visit(entity->binding());
-#endif
-#ifdef USE_SELECT
-  for (auto *entity : this->selects_)
-    visit(entity->binding());
-#endif
-#ifdef USE_DATETIME_TIME
-  for (auto *entity : this->times_)
-    visit(entity->binding());
-#endif
-#ifdef USE_DATETIME_DATETIME
-  for (auto *entity : this->datetimes_)
-    visit(entity->binding());
-#endif
-#ifdef USE_SENSOR
-  for (const auto &bound : this->sensors_)
-    visit(bound.binding);
-#endif
-#ifdef USE_BINARY_SENSOR
-  for (const auto &bound : this->binary_sensors_)
-    visit(bound.binding);
-#endif
-#ifdef USE_TEXT_SENSOR
-  for (const auto &bound : this->text_sensors_)
-    visit(bound.binding);
-#endif
-}
-
 void RainbirdComponent::setup() {
   SessionConfig config;
   config.listen_only = this->listen_only_;
@@ -126,21 +78,18 @@ void RainbirdComponent::setup() {
   config.valve_queue = this->valve_queue_;
   config.accept_ids = this->accept_ids_;
   // What the configured entities show decides what is polled and which schedule pages are read (PLAN 6.4).
-  this->for_each_binding_([&](const EntityBinding &binding) { note_binding(this->model_, binding, &config); });
+  this->board_.for_each_binding([&](const EntityBinding &binding) { note_binding(this->model_, binding, &config); });
   if (this->clock_sync_)
     config.used.add(Field::CLOCK);
 #ifdef USE_SENSOR
-  for (const auto &bound : this->sensors_) {
-    if (bound.binding.kind == EntityKind::REMAINING_TIME)
-      this->remaining_sensors_.push_back(bound.entity);
-  }
+  this->board_.for_each(Domain::SENSOR, EntityKind::REMAINING_TIME, [this](void *entity) {
+    this->remaining_sensors_.push_back(static_cast<sensor::Sensor *>(entity));
+  });
 #endif
-
 #ifdef USE_TEXT_SENSOR
-  for (const auto &bound : this->text_sensors_) {
-    if (bound.binding.kind == EntityKind::ENDS_AT)
-      this->ends_at_sensors_.push_back(bound.entity);
-  }
+  this->board_.for_each(Domain::TEXT_SENSOR, EntityKind::ENDS_AT, [this](void *entity) {
+    this->ends_at_sensors_.push_back(static_cast<text_sensor::TextSensor *>(entity));
+  });
 #endif
 
   this->text_.zone = [this](uint8_t zone) { return this->zone_name_(zone); };
@@ -170,7 +119,17 @@ void RainbirdComponent::setup() {
   this->after_activity_();
 }
 
+#ifdef USE_SWITCH
+void RainbirdComponent::add_switch(RainbirdSwitch *entity) {
+  this->board_.add(Domain::SWITCH, entity->binding(), entity);
+}
+#endif
+
 #ifdef USE_NUMBER
+void RainbirdComponent::add_number(RainbirdNumber *entity) {
+  this->board_.add(Domain::NUMBER, entity->binding(), entity);
+}
+
 void RainbirdComponent::add_setting(RainbirdSetting *setting) {
   const EntityBinding &binding = setting->binding();
   if (binding.kind == EntityKind::RUN_DURATION && binding.zone >= 1 && binding.zone <= STATE_ZONES)
@@ -180,12 +139,30 @@ void RainbirdComponent::add_setting(RainbirdSetting *setting) {
 }
 #endif
 
+#ifdef USE_BUTTON
+void RainbirdComponent::add_button(RainbirdButton *entity) {
+  this->board_.add(Domain::BUTTON, entity->binding(), entity);
+}
+#endif
+
+#ifdef USE_SELECT
+void RainbirdComponent::add_select(RainbirdSelect *entity) {
+  this->board_.add(Domain::SELECT, entity->binding(), entity);
+}
+#endif
+
 #ifdef USE_DATETIME_TIME
 void RainbirdComponent::add_time(RainbirdTime *entity) {
-  this->times_.push_back(entity);
   const EntityBinding &binding = entity->binding();
+  this->board_.add(Domain::TIME, binding, entity);
   if (binding.program < STATE_PROGRAMS && binding.index < STATE_STARTS)
     this->start_times_[binding.program][binding.index] = entity;
+}
+#endif
+
+#ifdef USE_DATETIME_DATETIME
+void RainbirdComponent::add_datetime(RainbirdDateTime *entity) {
+  this->board_.add(Domain::DATETIME, entity->binding(), entity);
 }
 #endif
 
@@ -267,6 +244,7 @@ void RainbirdComponent::handle_events_() {
         break;
       case SessionEventKind::LINK_DOWN:
         ESP_LOGW(TAG, "Controller link down");
+        this->log_heard_();
         this->status_set_warning();
         this->show_unknown_();
         break;
@@ -290,6 +268,15 @@ void RainbirdComponent::handle_events_() {
       case SessionEventKind::EDIT_FAILED:
         ESP_LOGE(TAG, "Schedule edit failed: %s", event.reason);
         break;
+      case SessionEventKind::NO_REPLY:
+        ESP_LOGW(TAG,
+                 "No reply to %02X. It was sent once and is not sent again: the controller may have acted on it. "
+                 "The next poll shows what it did.",
+                 event.opcode);
+        for (NoReplyTrigger *trigger : this->no_reply_triggers_) {
+          trigger->trigger(event.opcode);
+        }
+        break;
       case SessionEventKind::HANDSHAKE:
         if (event.code != 0) {
           ESP_LOGW(TAG, "Handshake: %s", event.reason);
@@ -310,12 +297,15 @@ void RainbirdComponent::log_controller_() {
   }
   // The 04 answers decide the poll plan and which commands are offered (PLAN 6.3).
   const Capabilities &caps = this->session_->capabilities();
-  auto answer = [this](uint8_t opcode, bool supported) {
-    return !this->session_->capability_known(opcode) ? "unknown" : YESNO(supported);
-  };
-  ESP_LOGI(TAG, "Controller supports: 4C %s, 4A %s, 42 %s, 4B %s, 49 %s, 3A %s%s", answer(0x4C, caps.combined),
-           answer(0x4A, caps.event_timestamp), answer(0x42, caps.advance), answer(0x4B, caps.queue_run),
-           answer(0x49, caps.controller_state), answer(0x3A, caps.test_stations),
+  // "4C unknown, " is the longest entry.
+  char supports[CAPABILITY_COUNT * 12 + 1] = "";
+  size_t length = 0;
+  for (uint8_t i = 0; i < CAPABILITY_COUNT && length < sizeof(supports); i++) {
+    auto capability = static_cast<Capability>(i);
+    length += std::snprintf(supports + length, sizeof(supports) - length, "%s%02X %s", i == 0 ? "" : ", ",
+                            CAPABILITY_OPCODES[i], !caps.known(capability) ? "unknown" : YESNO(caps.has(capability)));
+  }
+  ESP_LOGI(TAG, "Controller supports: %s%s", supports,
            this->session_->capabilities_assumed() ? " (04 refused: assumed until a NAK says otherwise)" : "");
   // "00 10 60 80" fits the most a TM2 reads: 14 pages.
   char pages[3 * 16 + 1] = "";
@@ -335,12 +325,27 @@ void RainbirdComponent::log_controller_() {
   }
 }
 
+void RainbirdComponent::log_heard_() {
+  // Tells a dead wire from a signal that does not decode, which are different faults to chase.
+  if (this->bursts_heard_ == 0) {
+    ESP_LOGW(TAG, "  The receiver has heard nothing since boot. Check the wiring and the receiver pin.");
+  } else if (this->bursts_decoded_ == 0) {
+    ESP_LOGW(TAG, "  The receiver has heard %u bursts and none held a valid frame. Check idle, filter and the pin.",
+             static_cast<unsigned>(this->bursts_heard_));
+  } else {
+    ESP_LOGW(TAG, "  The receiver has heard %u bursts since boot, %u with a valid frame.",
+             static_cast<unsigned>(this->bursts_heard_), static_cast<unsigned>(this->bursts_decoded_));
+  }
+}
+
 void RainbirdComponent::log_link_stats_() {
   // Duplicates answer SPEC question 5: does the controller answer both copies of a 2-byte request?
   const LinkStatus &link = this->session_->link();
   ESP_LOGI(TAG, "Link since boot: %u replies, %u duplicate replies, %u unexpected, %u timeouts",
            static_cast<unsigned>(link.replies), static_cast<unsigned>(link.duplicates),
            static_cast<unsigned>(link.unexpected), static_cast<unsigned>(link.errors));
+  ESP_LOGI(TAG, "Receiver since boot: %u bursts, %u with a valid frame", static_cast<unsigned>(this->bursts_heard_),
+           static_cast<unsigned>(this->bursts_decoded_));
 }
 
 void RainbirdComponent::transmit_(const Transmission &tx) {
@@ -373,6 +378,11 @@ bool RainbirdReceiver::on_receive(remote_base::RemoteReceiveData data) {
              lock.phase() == Phase::EXTRA_HALF ? "extra half-bit" : "aligned");
   } else if (was_locked && !lock.locked()) {
     ESP_LOGD(TAG, "%s polarity unlocked", this->name_);
+  }
+  if (this->controller_) {
+    this->parent_->bursts_heard_++;
+    if (!decoded.frames.empty())
+      this->parent_->bursts_decoded_++;
   }
   if (decoded.frames.empty()) {
     return false;
@@ -682,68 +692,93 @@ void RainbirdComponent::publish_() {
   if (this->session_->revision() == this->published_revision_)
     return;
   this->published_revision_ = this->session_->revision();
-  const Readout values = readout(*this->session_);
+  // Which values go out is decided in entity_board.cpp. The show_ methods below carry it out.
+  this->board_.publish(readout(*this->session_), this->text_, *this);
+  this->publish_remaining_();
+}
+
+// Each pointer comes back as the class its add_ method put on the board.
+void RainbirdComponent::show_bool(Domain domain, void *entity, bool value) {
 #ifdef USE_SWITCH
-  for (auto *entity : this->switches_) {
-    bool value = false;
-    if (bool_value(entity->binding(), values, &value) && is_new(entity->shown, static_cast<double>(value)))
-      entity->publish_state(value);
-  }
-#endif
-#ifdef USE_NUMBER
-  for (auto *entity : this->numbers_) {
-    float value = 0;
-    if (number_value(entity->binding(), values, &value) && is_new(entity->shown, static_cast<double>(value)))
-      entity->publish_state(value);
-  }
+  if (domain == Domain::SWITCH)
+    static_cast<RainbirdSwitch *>(entity)->publish_state(value);
 #endif
 #ifdef USE_BINARY_SENSOR
-  for (auto &bound : this->binary_sensors_) {
-    bool value = false;
-    if (bool_value(bound.binding, values, &value) && is_new(bound.shown, value))
-      bound.entity->publish_state(value);
-  }
+  if (domain == Domain::BINARY_SENSOR)
+    static_cast<binary_sensor::BinarySensor *>(entity)->publish_state(value);
+#endif
+  (void) domain;
+  (void) entity;
+  (void) value;
+}
+
+void RainbirdComponent::show_number(Domain domain, void *entity, float value) {
+#ifdef USE_NUMBER
+  if (domain == Domain::NUMBER)
+    static_cast<RainbirdNumber *>(entity)->publish_state(value);
 #endif
 #ifdef USE_SENSOR
-  for (auto &bound : this->sensors_) {
-    float value = 0;
-    // Remaining time has its own countdown rules (publish_remaining_).
-    if (bound.binding.kind != EntityKind::REMAINING_TIME && number_value(bound.binding, values, &value) &&
-        is_new(bound.shown, value))
-      bound.entity->publish_state(value);
-  }
+  if (domain == Domain::SENSOR)
+    static_cast<sensor::Sensor *>(entity)->publish_state(value);
 #endif
-#ifdef USE_TEXT_SENSOR
-  for (auto &bound : this->text_sensors_) {
-    std::string text;
-    if (text_value(bound.binding, values, this->text_, &text) && is_new(bound.shown, text))
-      bound.entity->publish_state(text);
-  }
-#endif
+  (void) domain;
+  (void) entity;
+  (void) value;
+}
+
+void RainbirdComponent::show_option(void *entity, uint8_t index) {
 #ifdef USE_SELECT
-  for (auto *entity : this->selects_) {
-    uint8_t index = 0;
-    if (select_index(entity->binding(), values, &index) && is_new(entity->shown, static_cast<double>(index)))
-      entity->publish_state(index);
-  }
+  static_cast<RainbirdSelect *>(entity)->publish_state(index);
+#else
+  (void) entity;
+  (void) index;
 #endif
+}
+
+void RainbirdComponent::show_time(void *entity, uint8_t hour, uint8_t minute) {
 #ifdef USE_DATETIME_TIME
-  for (auto *entity : this->times_) {
-    uint8_t hour = 0;
-    uint8_t minute = 0;
-    if (start_time(entity->binding(), values, &hour, &minute) &&
-        is_new(entity->shown, static_cast<double>(hour * 60 + minute)))
-      entity->show(hour, minute);
-  }
+  static_cast<RainbirdTime *>(entity)->show(hour, minute);
+#else
+  (void) entity;
+  (void) hour;
+  (void) minute;
 #endif
+}
+
+void RainbirdComponent::show_clock(void *entity, const WallClock &clock) {
 #ifdef USE_DATETIME_DATETIME
-  for (auto *entity : this->datetimes_) {
-    WallClock clock;
-    if (controller_clock(values, &clock) && is_new(entity->shown, static_cast<double>(wall_seconds(clock))))
-      entity->show(clock.year, clock.month, clock.day, clock.hour, clock.minute, clock.second);
-  }
+  static_cast<RainbirdDateTime *>(entity)->show(clock.year, clock.month, clock.day, clock.hour, clock.minute,
+                                                clock.second);
+#else
+  (void) entity;
+  (void) clock;
 #endif
-  this->publish_remaining_();
+}
+
+void RainbirdComponent::show_text(void *entity, const std::string &text) {
+#ifdef USE_TEXT_SENSOR
+  static_cast<text_sensor::TextSensor *>(entity)->publish_state(text);
+#else
+  (void) entity;
+  (void) text;
+#endif
+}
+
+void RainbirdComponent::show_unknown(Domain domain, void *entity) {
+#ifdef USE_NUMBER
+  if (domain == Domain::NUMBER)
+    static_cast<RainbirdNumber *>(entity)->publish_state(NAN);
+#endif
+#ifdef USE_SENSOR
+  if (domain == Domain::SENSOR)
+    static_cast<sensor::Sensor *>(entity)->publish_state(NAN);
+#endif
+#ifdef USE_BINARY_SENSOR
+  if (domain == Domain::BINARY_SENSOR)
+    static_cast<binary_sensor::BinarySensor *>(entity)->invalidate_state();
+#endif
+  (void) domain;
+  (void) entity;
 }
 
 void RainbirdComponent::publish_remaining_() {
@@ -811,64 +846,18 @@ void RainbirdComponent::show_ends_at_() {
 #endif
 }
 
-// The link is down and the session has dropped what it read (SessionEventKind::LINK_DOWN), so
-// nothing here is known to be true any more. Every entity that can show "unknown" does: a
-// sensor or number as NaN, a binary sensor with no state. Switches, selects, times and most
-// text sensors have no such state and keep their last value; `connected` says how far to trust
-// them. `shown` is cleared on all of them, so the first reading after the link returns is
-// published even when it equals the old one.
+// The link is down and the session has dropped what it read (SessionEventKind::LINK_DOWN).
+// Which entities go to unknown is decided in entity_board.cpp.
 void RainbirdComponent::show_unknown_() {
-  auto from_controller = [](const EntityBinding &binding) { return kind_info(binding.kind).field != NO_FIELD; };
-#ifdef USE_SWITCH
-  for (auto *entity : this->switches_)
-    entity->shown.reset();
-#endif
-#ifdef USE_NUMBER
-  for (auto *entity : this->numbers_) {
-    if (!from_controller(entity->binding()))
-      continue;
-    entity->shown.reset();
-    entity->publish_state(NAN);
-  }
-#endif
-#ifdef USE_BINARY_SENSOR
-  for (auto &bound : this->binary_sensors_) {
-    if (!from_controller(bound.binding))
-      continue;
-    bound.shown.reset();
-    bound.entity->invalidate_state();
-  }
-#endif
+  this->board_.link_lost(*this);
 #ifdef USE_SENSOR
-  for (auto &bound : this->sensors_) {
-    if (!from_controller(bound.binding))
-      continue;
-    bound.shown.reset();
-    bound.entity->publish_state(NAN);
-  }
   // The local countdown would otherwise run on to zero by itself.
   this->cancel_interval(COUNTDOWN_INTERVAL_ID);
   this->countdown_ = Countdown{};
 #endif
 #ifdef USE_TEXT_SENSOR
-  for (auto &bound : this->text_sensors_) {
-    if (from_controller(bound.binding))
-      bound.shown.reset();
-  }
   if (this->ends_at_.clear())
     this->show_ends_at_();
-#endif
-#ifdef USE_SELECT
-  for (auto *entity : this->selects_)
-    entity->shown.reset();
-#endif
-#ifdef USE_DATETIME_TIME
-  for (auto *entity : this->times_)
-    entity->shown.reset();
-#endif
-#ifdef USE_DATETIME_DATETIME
-  for (auto *entity : this->datetimes_)
-    entity->shown.reset();
 #endif
 }
 

@@ -4,21 +4,45 @@
 
 namespace esphome::rainbird {
 
-bool ScheduleEditor::start(Field field, uint8_t zone, uint8_t program, uint8_t index, int32_t value, ByteBuf *read) {
-  std::optional<PageField> located = this->model_.locate(field, zone, program, index);
+bool ScheduleEditor::start(const PageChange &change, ByteBuf *read) {
+  std::optional<PageField> located = this->model_.locate(change.field, change.zone, change.program, change.index);
   if (!located.has_value() || read == nullptr) {
     return false;
   }
   this->active_ = true;
   this->phase_ = Phase::READING;
-  this->field_ = field;
-  this->zone_ = zone;
-  this->program_ = program;
-  this->index_ = index;
-  this->value_ = value;
+  this->changes_[0] = change;
+  this->count_ = 1;
+  this->refused_ = 0;
   this->page_ = located->page;
   this->reason_ = nullptr;
   *read = request_read_page(this->page_);
+  return true;
+}
+
+bool ScheduleEditor::add(const PageChange &change) {
+  // Once the read is answered the page is patched and on its way; a later change needs its own read.
+  if (!this->active_ || this->phase_ != Phase::READING) {
+    return false;
+  }
+  std::optional<PageField> located = this->model_.locate(change.field, change.zone, change.program, change.index);
+  if (!located.has_value() || located->page != this->page_) {
+    return false;
+  }
+  // The same field again: the later value is the one wanted, and it is the latest thing asked.
+  for (size_t i = 0; i < this->count_; i++) {
+    if (this->changes_[i].same_field(change)) {
+      for (size_t j = i; j + 1 < this->count_; j++) {
+        this->changes_[j] = this->changes_[j + 1];
+      }
+      this->count_--;
+      break;
+    }
+  }
+  if (this->count_ >= MAX_CHANGES) {
+    return false;
+  }
+  this->changes_[this->count_++] = change;
   return true;
 }
 
@@ -56,11 +80,31 @@ ScheduleEditor::Step ScheduleEditor::on_reply(const Completion &done, ByteBuf *n
     this->active_ = false;
     return Step::DONE;
   }
+  // Each change is tried on a copy, so one the page will not take leaves the others' bytes alone.
   uint8_t patched[MAX_PAGE_BYTES];
+  std::memcpy(patched, page.data, page.size);
   size_t out_size = page.size;
-  if (!this->model_.patch(this->page_, page.data, page.size, this->field_, this->zone_, this->program_, this->index_,
-                          this->value_, patched, &out_size) ||
-      !request_write_page(this->page_, patched, out_size, next)) {
+  size_t applied = 0;
+  for (size_t i = 0; i < this->count_; i++) {
+    const PageChange &change = this->changes_[i];
+    uint8_t tried[MAX_PAGE_BYTES];
+    size_t tried_size = sizeof(tried);
+    if (this->model_.patch(this->page_, patched, page.size, change.field, change.zone, change.program, change.index,
+                           change.value, tried, &tried_size)) {
+      std::memcpy(patched, tried, tried_size);
+      applied++;
+    }
+  }
+  this->refused_ = this->count_ - applied;
+  if (applied == 0) {
+    return this->fail_("that field could not be changed on the page");
+  }
+  // Nothing to write. The read that just came back is already what the entities show.
+  if (std::memcmp(patched, page.data, page.size) == 0) {
+    this->active_ = false;
+    return Step::UNCHANGED;
+  }
+  if (!request_write_page(this->page_, patched, out_size, next)) {
     return this->fail_("that field could not be changed on the page");
   }
   this->log_.page = this->page_;

@@ -140,6 +140,13 @@ rainbird:
         level: WARN
         format: "Controller refused 0x%02X, code 0x%02X"
         args: [command, code]
+  # A command that got no answer at all. It is sent once and never repeated, so this is
+  # the place to raise a notification.
+  on_no_reply:
+    - logger.log:
+        level: WARN
+        format: "No reply to command 0x%02X"
+        args: [command]
 
 # Controller-wide entities. These are only ever written by hand.
 sensor:

@@ -96,6 +96,11 @@ rainbird:
         args:
           - !lambda static_cast<unsigned>(command)
           - !lambda static_cast<unsigned>(code)
+  on_no_reply:
+    - logger.log:
+        format: "No reply to %u"
+        args:
+          - !lambda static_cast<unsigned>(command)
   on_frame:
     - lambda: |-
         ESP_LOGD("rainbird", "frame %u", static_cast<unsigned>(payload.size()));

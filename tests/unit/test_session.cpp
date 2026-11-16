@@ -5,6 +5,7 @@
 #include "session.h"
 
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -62,10 +63,10 @@ TEST_CASE("startup identifies, probes, reads the schedule in use, then polls") {
   CHECK(std::vector<std::string>(fake.requests.begin(), fake.requests.begin() + expect.size()) == expect);
   CHECK(session.stage() == SessionStage::RUNNING);
   CHECK(session.writes_permitted());
-  CHECK(session.capabilities().combined);
-  CHECK(session.capabilities().advance);
-  CHECK_FALSE(session.capabilities().controller_state);
-  CHECK(session.capabilities().test_stations);
+  CHECK(session.capabilities().has(Capability::COMBINED));
+  CHECK(session.capabilities().has(Capability::ADVANCE));
+  CHECK_FALSE(session.capabilities().has(Capability::CONTROLLER_STATE));
+  CHECK(session.capabilities().has(Capability::TEST_STATIONS));
 
   REQUIRE(session.identity().model_known);
   CHECK(session.identity().model.model_id == 0x000A);
@@ -145,8 +146,8 @@ TEST_CASE("without 04 every optional command is tried; a NAK then switches it of
   Session session(model, config_with({Field::CLOCK, Field::RAIN_DELAY}));
   session.start(0);
   uint32_t now = run_session(session, fake, 0, 10000);
-  CHECK_FALSE(session.capabilities().combined);  // the 4C NAK cleared it
-  CHECK(session.capabilities().event_timestamp);
+  CHECK_FALSE(session.capabilities().has(Capability::COMBINED));  // the 4C NAK cleared it
+  CHECK(session.capabilities().has(Capability::EVENT_TIMESTAMP));
 
   fake.requests.clear();
   session.poll(now);
@@ -326,7 +327,7 @@ TEST_CASE("queue mode advances to the next queued zone when that is allowed") {
     config.valve_queue = true;
     config.experimental = experimental;
     Running live(config);
-    REQUIRE(live.session.capabilities().advance);
+    REQUIRE(live.session.capabilities().has(Capability::ADVANCE));
     Session &session = live.session;
     uint32_t &now = live.now;
     // The script has zone 1 running and zones 1 to 5 in the queue.
@@ -346,7 +347,7 @@ TEST_CASE("queue mode refuses a valve off until the queue has been read") {
   config.valve_queue = true;
   config.experimental = true;
   Running live(config);
-  REQUIRE(live.session.capabilities().advance);
+  REQUIRE(live.session.capabilities().has(Capability::ADVANCE));
   REQUIRE_FALSE(live.session.state().queue.has_value());
   Control off;
   off.op = ControlOp::VALVE_OFF;
@@ -414,9 +415,9 @@ TEST_CASE("without 04, a probe that timed out is not assumed with the refused on
   uint32_t now = run_session(session, fake, 0, 30000);
   REQUIRE(session.stage() == SessionStage::RUNNING);
   CHECK(session.capabilities_assumed());
-  CHECK(session.capabilities().queue_run);
+  CHECK(session.capabilities().has(Capability::QUEUE_RUN));
   CHECK(session.capability_known(0x4B));
-  CHECK_FALSE(session.capabilities().event_timestamp);
+  CHECK_FALSE(session.capabilities().has(Capability::EVENT_TIMESTAMP));
   CHECK_FALSE(session.capability_known(0x4A));
 
   // Its retry is refused like the others, so it is assumed too.
@@ -424,7 +425,7 @@ TEST_CASE("without 04, a probe that timed out is not assumed with the refused on
   REQUIRE(session.refresh(now) == ControlResult::QUEUED);
   run_session(session, fake, now, 5000);
   CHECK(session.capability_known(0x4A));
-  CHECK(session.capabilities().event_timestamp);
+  CHECK(session.capabilities().has(Capability::EVENT_TIMESTAMP));
 }
 
 TEST_CASE("a probe that timed out is unknown, not unsupported, and is asked again") {
@@ -479,8 +480,8 @@ TEST_CASE("experimental commands stay off until the config and the probe allow t
   Running live(config);
   Session &session = live.session;
   uint32_t &now = live.now;
-  CHECK_FALSE(session.capabilities().controller_state);
-  REQUIRE(session.capabilities().test_stations);
+  CHECK_FALSE(session.capabilities().has(Capability::CONTROLLER_STATE));
+  REQUIRE(session.capabilities().has(Capability::TEST_STATIONS));
   CHECK(session.control(irrigation, now) == ControlResult::REFUSED_UNSUPPORTED);
   FakeController fake;
   REQUIRE(session.control(test_all, now) == ControlResult::QUEUED);
@@ -700,7 +701,7 @@ TEST_CASE("after five minutes down, the session starts again at identification")
   session.poll(now + 300000);
   CHECK(session.stage() == SessionStage::IDENTIFY);
   CHECK_FALSE(session.writes_permitted());
-  CHECK_FALSE(session.capabilities().combined);
+  CHECK_FALSE(session.capabilities().has(Capability::COMBINED));
   // The old controller's state and identity go too, so nothing is decided on them.
   CHECK_FALSE(session.state().running[0].has_value());
   CHECK_FALSE(session.identity().model_known);
@@ -709,7 +710,7 @@ TEST_CASE("after five minutes down, the session starts again at identification")
   run_session(session, fake, now + 300000, 20000);
   CHECK(session.stage() == SessionStage::RUNNING);
   CHECK(session.writes_permitted());
-  CHECK(session.capabilities().combined);
+  CHECK(session.capabilities().has(Capability::COMBINED));
 }
 
 TEST_CASE("events report each stage, the link going up and refusals, once each") {
@@ -755,7 +756,7 @@ TEST_CASE("probes the queue refuses do not leave the session waiting for them") 
   session.on_frame(model_reply.data(), model_reply.size(), 100);
   CHECK(session.stage() == SessionStage::RUNNING);
   // No probe was answered or refused, so nothing optional is assumed.
-  CHECK_FALSE(session.capabilities().combined);
+  CHECK_FALSE(session.capabilities().has(Capability::COMBINED));
 }
 
 TEST_CASE("probes that only time out assume nothing; the fallback polls run") {
@@ -768,8 +769,8 @@ TEST_CASE("probes that only time out assume nothing; the fallback polls run") {
   session.start(0);
   uint32_t now = run_session(session, fake, 0, 30000);
   REQUIRE(session.stage() == SessionStage::RUNNING);
-  CHECK_FALSE(session.capabilities().combined);
-  CHECK_FALSE(session.capabilities().advance);
+  CHECK_FALSE(session.capabilities().has(Capability::COMBINED));
+  CHECK_FALSE(session.capabilities().has(Capability::ADVANCE));
   fake.requests.clear();
   session.poll(now);
   run_session(session, fake, now, 5000);
@@ -1072,10 +1073,11 @@ TEST_CASE("the revision moves on when there is something to publish, and only th
   CHECK(session.revision() != revision);
 }
 
-// A controller that keeps page 10 and takes writes to it, so edits in a row see each other.
+// A controller that keeps schedule pages and takes writes to them, so edits in a row see each other.
 struct PageController {
-  std::vector<uint8_t> page = from_hex("6A 06 01 00 64 01");
-  std::vector<std::string> writes;
+  std::map<uint8_t, std::vector<uint8_t>> pages{{0x10, from_hex("6A 06 01 00 64 01")}};
+  std::vector<std::string> writes;    // the bytes of each page written, in order
+  std::vector<std::string> requests;  // every request, as hex
 
   uint32_t run(Session &session, uint32_t now, uint32_t limit_ms) {
     uint32_t end = now + limit_ms;
@@ -1090,13 +1092,16 @@ struct PageController {
         continue;
       }
       std::vector<uint8_t> request = first_payload(tx);
+      this->requests.push_back(to_hex(request.data(), request.size()));
       std::vector<uint8_t> reply;
-      if (request.size() == 3 && request[0] == 0x20 && request[2] == 0x10) {
-        reply = from_hex("A0 00 10");
-        reply.insert(reply.end(), this->page.begin(), this->page.end());
-      } else if (request.size() > 3 && request[0] == 0x21 && request[2] == 0x10) {
-        this->page.assign(request.begin() + 3, request.end());
-        this->writes.push_back(to_hex(this->page.data(), this->page.size()));
+      if (request.size() == 3 && request[0] == 0x20 && this->pages.count(request[2]) != 0) {
+        reply = {0xA0, 0x00, request[2]};
+        const std::vector<uint8_t> &page = this->pages[request[2]];
+        reply.insert(reply.end(), page.begin(), page.end());
+      } else if (request.size() > 3 && request[0] == 0x21 && this->pages.count(request[2]) != 0) {
+        std::vector<uint8_t> &page = this->pages[request[2]];
+        page.assign(request.begin() + 3, request.end());
+        this->writes.push_back(to_hex(page.data(), page.size()));
         reply = from_hex("01 21");
       } else {
         continue;  // anything else goes unanswered
@@ -1106,9 +1111,13 @@ struct PageController {
     }
     return now;
   }
+
+  size_t count(const std::string &request) const {
+    return static_cast<size_t>(std::count(this->requests.begin(), this->requests.end(), request));
+  }
 };
 
-TEST_CASE("schedule edits asked for while one runs wait their turn, and each sees the last one's write") {
+TEST_CASE("schedule edits to one page that arrive together go out as one write") {
   SessionConfig config = config_with({Field::WATERING_DAY, Field::FREQUENCY});
   config.allow_writes = true;
   config.pages.add(0x10);
@@ -1116,7 +1125,7 @@ TEST_CASE("schedule edits asked for while one runs wait their turn, and each see
   Session &session = live.session;
   uint32_t &now = live.now;
   // 6A is Monday, Wednesday, Friday and Saturday. Monday off, Wednesday off, then the frequency
-  // twice: the second value replaces the first while both wait.
+  // twice: the second value replaces the first.
   REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 0, 0, now) == ControlResult::QUEUED);
   REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 2, 0, now) == ControlResult::QUEUED);
   REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM, now) == ControlResult::QUEUED);
@@ -1126,12 +1135,101 @@ TEST_CASE("schedule edits asked for while one runs wait their turn, and each see
 
   PageController controller;
   now = controller.run(session, now, 20000);
-  CHECK(controller.writes ==
-        std::vector<std::string>{"68 06 01 00 64 01", "60 06 01 00 64 01", "60 06 01 00 64 02"});
+  CHECK(controller.writes == std::vector<std::string>{"60 06 01 00 64 02"});
+  CHECK(controller.count("20 00 10") == 2);  // one read, one confirming read
   CHECK_FALSE(take_event_of(session, SessionEventKind::EDIT_FAILED));
   CHECK(session.state().watering_day[0][0] == std::optional<bool>(false));
   CHECK(session.state().watering_day[0][2] == std::optional<bool>(false));
   CHECK(session.state().frequency[0] == std::optional<uint8_t>(FREQ_ODD));
+}
+
+TEST_CASE("an edit that arrives after its page was read waits its turn, and sees that write") {
+  SessionConfig config = config_with({Field::WATERING_DAY});
+  config.allow_writes = true;
+  config.pages.add(0x10);
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 0, 0, now) == ControlResult::QUEUED);
+  Transmission tx = next_after_gap(session, &now);
+  REQUIRE(to_hex(first_payload(tx).data(), first_payload(tx).size()) == "20 00 10");
+  now += tx.first_copy_ms + 30;
+  auto page = from_hex("A0 00 10 6A 06 01 00 64 01");
+  session.on_frame(page.data(), page.size(), now);
+
+  // The page is patched and its write is queued. Wednesday cannot join it now.
+  REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 2, 0, now) == ControlResult::QUEUED);
+  PageController controller;
+  now = controller.run(session, now, 20000);
+  CHECK(controller.writes == std::vector<std::string>{"68 06 01 00 64 01", "60 06 01 00 64 01"});
+  CHECK_FALSE(take_event_of(session, SessionEventKind::EDIT_FAILED));
+}
+
+TEST_CASE("an edit that changes nothing reads the page and writes nothing") {
+  SessionConfig config = config_with({Field::WATERING_DAY, Field::FREQUENCY});
+  config.allow_writes = true;
+  config.pages.add(0x10);
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  // Monday is already on and the frequency is already cyclic.
+  REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 0, 1, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_CYCLIC, now) == ControlResult::QUEUED);
+  PageController controller;
+  now = controller.run(session, now, 20000);
+  CHECK(controller.requests == std::vector<std::string>{"20 00 10"});
+  CHECK(controller.writes.empty());
+  CHECK_FALSE(take_event_of(session, SessionEventKind::PAGE_WRITE));
+  CHECK_FALSE(take_event_of(session, SessionEventKind::EDIT_FAILED));
+  CHECK_FALSE(session.busy());
+
+  // The next edit starts as usual.
+  REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 0, 0, now) == ControlResult::QUEUED);
+  controller.run(session, now, 20000);
+  CHECK(controller.writes == std::vector<std::string>{"68 06 01 00 64 01"});
+}
+
+TEST_CASE("a change its field cannot hold is reported, and the rest of the page is still written") {
+  SessionConfig config = config_with({Field::CYCLE_DAYS, Field::FREQUENCY});
+  config.allow_writes = true;
+  config.pages.add(0x10);
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  REQUIRE(session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_EVEN, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::CYCLE_DAYS, 0, 0, 0, 300, now) == ControlResult::QUEUED);  // one byte
+  PageController controller;
+  controller.run(session, now, 20000);
+  CHECK(controller.writes == std::vector<std::string>{"6A 06 01 00 64 03"});
+  SessionEvent failed;
+  REQUIRE(take_event_of(session, SessionEventKind::EDIT_FAILED, &failed));
+  CHECK(std::string(failed.reason).find("could not be changed") != std::string::npos);
+}
+
+TEST_CASE("edits to different pages go one page at a time, oldest first") {
+  SessionConfig config = config_with({Field::RUN_TIME, Field::WATERING_DAY});
+  config.allow_writes = true;
+  Running live(config);
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  // Zones 1 and 2 share page 80; zone 3 is on page 81. Asked for in this order.
+  REQUIRE(session.edit_schedule(Field::RUN_TIME, 1, 0, 0, 10, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::RUN_TIME, 3, 1, 0, 7, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::WATERING_DAY, 0, 0, 0, 0, now) == ControlResult::QUEUED);
+  REQUIRE(session.edit_schedule(Field::RUN_TIME, 2, 2, 0, 5, now) == ControlResult::QUEUED);
+  // Zone 3 again while it waits: the later value is the one written.
+  REQUIRE(session.edit_schedule(Field::RUN_TIME, 3, 1, 0, 9, now) == ControlResult::QUEUED);
+
+  PageController controller;
+  controller.pages[0x80] = from_hex("00 19 00 01 00 00 00 14 00 02 00 00");
+  controller.pages[0x81] = from_hex("00 00 00 00 00 00 00 00 00 00 00 00");
+  controller.run(session, now, 30000);
+  CHECK(controller.writes == std::vector<std::string>{
+                                 "00 0A 00 01 00 00 00 14 00 02 00 05",  // page 80: zone 1 A and zone 2 C together
+                                 "68 06 01 00 64 01",                    // page 10
+                                 "00 00 00 09 00 00 00 00 00 00 00 00",  // page 81, moved to the back by the repeat
+                             });
+  CHECK_FALSE(take_event_of(session, SessionEventKind::EDIT_FAILED));
 }
 
 TEST_CASE("an edit that fails does not stop the ones waiting behind it") {
@@ -1150,35 +1248,89 @@ TEST_CASE("an edit that fails does not stop the ones waiting behind it") {
   CHECK(controller.writes == std::vector<std::string>{"68 06 01 00 64 01"});
 }
 
-TEST_CASE("only so many edits wait, and a lost link drops them with the one in flight") {
+TEST_CASE("every schedule field can wait at once, and a lost link drops them with the page in flight") {
   SessionConfig config = config_with({Field::RUN_TIME});
   config.allow_writes = true;
   Running live(config);
   Session &session = live.session;
   uint32_t &now = live.now;
-  // One in flight and eight waiting, each a different field. The tenth has nowhere to go.
+  // All 92 fields a TM2 has. None is refused for want of room.
   int queued = 0;
-  ControlResult last = ControlResult::QUEUED;
-  for (uint8_t zone = 1; zone <= 12 && last == ControlResult::QUEUED; zone++) {
-    last = session.edit_schedule(Field::RUN_TIME, zone, 0, 0, 10, now);
-    queued += last == ControlResult::QUEUED ? 1 : 0;
+  auto edit = [&](Field field, uint8_t zone, uint8_t program, uint8_t index) {
+    queued += session.edit_schedule(field, zone, program, index, 1, now) == ControlResult::QUEUED ? 1 : 0;
+  };
+  for (uint8_t zone = 1; zone <= 12; zone++) {
+    for (uint8_t program = 0; program < 3; program++) {
+      edit(Field::RUN_TIME, zone, program, 0);
+    }
   }
-  CHECK(queued == 9);
-  CHECK(last == ControlResult::REFUSED_BUSY);
+  for (uint8_t program = 0; program < 3; program++) {
+    for (uint8_t day = 0; day < 7; day++) {
+      edit(Field::WATERING_DAY, 0, program, day);
+    }
+    edit(Field::CYCLE_DAYS, 0, program, 0);
+    edit(Field::DAYS_UNTIL_NEXT, 0, program, 0);
+    edit(Field::FREQUENCY, 0, program, 0);
+    for (uint8_t slot = 0; slot < 4; slot++) {
+      edit(Field::START_TIME, 0, program, slot);
+      edit(Field::START_ENABLED, 0, program, slot);
+    }
+  }
+  edit(Field::STATION_DELAY, 0, 0, 0);
+  edit(Field::GLOBAL_SENSOR_BYPASS, 0, 0, 0);
+  CHECK(queued == 92);
 
-  // Nothing answers. The first read fails after its retries; with the link still up, each
-  // waiting edit then tries its own read. Three failed requests in a row mark the link down,
-  // and what is still waiting goes with it: nothing more is sent.
+  // Nothing answers. The first page read fails after its retries; with the link still up, the
+  // next page waiting then tries its own read. Three failed requests in a row mark the link
+  // down, and what is still waiting goes with it: nothing more is sent.
   FakeController silent;
   now = run_session(session, silent, now, 60000);
   CHECK(session.link().connected == false);
   size_t reads = 0;
   for (const std::string &request : silent.requests) {
-    reads += request.rfind("20 00 8", 0) == 0 ? 1 : 0;
+    reads += request.rfind("20 00 ", 0) == 0 ? 1 : 0;
   }
-  CHECK(reads == 9);  // three edits, three attempts each
+  CHECK(reads == 9);  // three pages, three attempts each
   CHECK(session.edit_schedule(Field::RUN_TIME, 1, 0, 0, 10, now) == ControlResult::REFUSED_LINK_DOWN);
   CHECK_FALSE(session.busy());
+}
+
+TEST_CASE("a command nobody answers is reported, and is not sent again") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Session &session = live.session;
+  uint32_t &now = live.now;
+  SessionEvent event;
+  while (session.take_event(&event)) {
+  }
+  Control run;
+  run.op = ControlOp::RUN_PROGRAM;
+  run.program = 1;
+  REQUIRE(session.control(run, now) == ControlResult::QUEUED);
+  FakeController silent;
+  now = run_session(session, silent, now, 5000);
+  CHECK(silent.requests == std::vector<std::string>{"38 01"});
+  REQUIRE(take_event_of(session, SessionEventKind::NO_REPLY, &event));
+  CHECK(event.opcode == 0x38);
+  // One lost reply is not a lost link.
+  CHECK(session.link().connected);
+
+  // A poll that nobody answers is counted, not reported.
+  session.poll(now);
+  run_session(session, silent, now, 5000);
+  CHECK_FALSE(take_event_of(session, SessionEventKind::NO_REPLY));
+}
+
+TEST_CASE("a controller that has never answered is down at the first failed request") {
+  EspTm2Model model;
+  Session session(model, config_with({Field::ZONES_RUNNING}));
+  FakeController silent;
+  session.start(0);
+  CHECK_FALSE(session.link().connected_known);
+  run_session(session, silent, 0, 5000);
+  CHECK(silent.requests.size() == 3);  // one request and its two retries
+  CHECK(session.link().connected_known);
+  CHECK_FALSE(session.link().connected);
+  CHECK(take_event_of(session, SessionEventKind::LINK_DOWN));
 }
 
 TEST_CASE("a lost link forgets what was read, keeps which zones exist, and reads it all again") {

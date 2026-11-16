@@ -86,6 +86,7 @@ still has its LNK2 fitted.
 | `zone_defaults`, `zones` | all 12 zones | See below. `zones: []` creates none. |
 | `program_defaults`, `programs` | all 3 programs | See below. `programs: []` creates none. |
 | `on_nak` | | Runs when the controller refuses a request. Variables `command` and `code`. |
+| `on_no_reply` | | Runs when a command got no answer at all. It is not sent again. Variable `command`. |
 | `on_frame` | | Runs for every valid reply. Variable `payload`, a `std::vector<uint8_t>`. |
 
 ## Zones and programs
@@ -254,16 +255,22 @@ these. Include it as a package; `examples/full.yaml` shows how.
   controller reports the zone running, not when you press it. A refused command
   logs a warning and the entity stays as it was.
 - **Commands are sent once.** A command whose reply is lost is not sent again,
-  because the controller may already have acted on it. The next poll shows what
-  happened.
+  because the controller may already have acted on it. The log says so and
+  `on_no_reply` runs; the next poll shows what happened.
 - **When the controller stops answering**, sensors and numbers go to unknown,
   binary sensors lose their state, and waiting commands are dropped. Switches,
   selects, times and most text sensors cannot show unknown and keep their last
   value; the `connected` sensor says whether to trust them. Everything is read
   again when the controller answers.
-- **Schedule edits happen one at a time.** Each one reads the page, changes one
-  field, writes the page back and reads it again. Edits made while one is in
-  progress wait their turn, up to eight of them.
+- **Schedule edits go a page at a time.** Each one reads the page, changes the
+  field, writes the page back and reads it again. Edits to the same page made
+  together, such as a script setting several watering days, share one read and
+  one write. Setting a field to the value it already has writes nothing. Any
+  other edit waits its turn, and none is dropped for want of room.
+- **A controller that never answers is reported at once.** The first request
+  that gets no reply marks the link down, and the log says whether the receiver
+  heard nothing or heard a signal it could not decode. Once the controller has
+  answered, it takes three failed requests in a row.
 - **An unknown controller is read-only.** If the controller reports a model id
   the component does not recognise, status still works and every command is
   refused, until `accept_model_ids` lists the id.

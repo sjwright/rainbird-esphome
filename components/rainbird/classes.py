@@ -48,6 +48,7 @@ RainbirdSendRawAction = rainbird_ns.class_(
     "RainbirdSendRawAction", automation.Action, cg.Parented.template(RainbirdComponent)
 )
 NakTrigger = rainbird_ns.class_("NakTrigger", automation.Trigger.template(cg.uint8, cg.uint8))
+NoReplyTrigger = rainbird_ns.class_("NoReplyTrigger", automation.Trigger.template(cg.uint8))
 FrameTrigger = rainbird_ns.class_(
     "FrameTrigger", automation.Trigger.template(cg.std_vector.template(cg.uint8))
 )
