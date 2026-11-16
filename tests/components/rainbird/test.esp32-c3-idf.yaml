@@ -1,5 +1,5 @@
 # C3 receive uses ping-pong, so rmt_symbols stays in the 192-symbol pool.
-# receive_symbols is RAM and still has to hold 384. GPIO26 does not exist on C3.
+# receive_symbols is RAM and still has to hold 448. GPIO26 does not exist on C3.
 
 substitutions:
   tx_pin: GPIO4

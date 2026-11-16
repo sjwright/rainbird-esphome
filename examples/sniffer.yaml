@@ -83,8 +83,8 @@ remote_receiver:
   pin: GPIO27
   idle: 4ms
   filter: 50us
-  receive_symbols: 384
-  rmt_symbols: 384
+  receive_symbols: 448
+  rmt_symbols: 448
   dump: raw
 
 rainbird:

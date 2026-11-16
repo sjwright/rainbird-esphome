@@ -1,7 +1,7 @@
 substitutions:
   tx_pin: GPIO26
   rx_pin: GPIO27
-  rmt_symbols: "384"
+  rmt_symbols: "448"
 
 packages:
   common: !include common.yaml

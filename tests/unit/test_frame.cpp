@@ -1,9 +1,11 @@
 #include "doctest.h"
 
 #include "hex.h"
+#include "model_limits.h"
 #include "sip_frame.h"
 #include "vectors.h"
 
+#include <algorithm>
 #include <vector>
 
 using namespace esphome::rainbird;
@@ -22,6 +24,55 @@ static void check_payload(const Frame &frame, const std::vector<uint8_t> &payloa
   REQUIRE(frame.length == payload.size());
   for (size_t i = 0; i < payload.size(); i++) {
     CHECK(frame.payload[i] == payload[i]);
+  }
+}
+
+TEST_CASE("escaped TM2 queue replies fit the configured RMT capacity") {
+  // 7452 seconds is 138 minutes at 90 percent seasonal adjust. Both bytes escape.
+  std::vector<uint8_t> payload{0xBB, 1};
+  for (uint8_t zone = 1; zone <= 11; zone++) {
+    payload.insert(payload.end(), {static_cast<uint8_t>(0x20 | zone), 0x1D, 0x1C});
+  }
+  uint8_t frame[MAX_FRAME_BYTES];
+  size_t size = encode_frame(payload.data(), payload.size(), true, frame, sizeof(frame));
+  REQUIRE(size == 64);
+  auto pulses = manchester_encode(frame, size, Polarity::INVERTED, Phase::EXTRA_HALF);
+  CHECK((pulses.size() + 1) / 2 > 384);
+  CHECK((pulses.size() + 1) / 2 <= TM2_RECEIVE_SYMBOLS);
+  CHECK(decode_burst_unlocked(pulses.data(), 384 * 2).frames.empty());
+  auto decoded = decode_burst_unlocked(pulses.data(), pulses.size());
+  REQUIRE(decoded.frames.size() == 1);
+  check_payload(decoded.frames[0], payload);
+
+  // Bound every valid queue, rather than just this example. Adding pulse counts for
+  // separate segments overestimates their concatenation, where equal levels can merge.
+  auto byte_pulses = [](uint8_t byte) {
+    uint8_t bytes[] = {byte, 0};
+    size_t count = 1;
+    if (frame_needs_escape(byte)) {
+      bytes[0] = FRAME_ESCAPE;
+      bytes[1] = byte - FRAME_ESCAPE_OFFSET;
+      count = 2;
+    }
+    return manchester_encode(bytes, count, Polarity::NORMAL, Phase::ALIGNED).size();
+  };
+  size_t max_time = 0;
+  size_t max_zone = 0;
+  for (unsigned byte = 0; byte < 256; byte++) {
+    max_time = std::max(max_time, byte_pulses(byte));
+    if ((byte & 0x1F) >= 1 && (byte & 0x1F) <= TM2_ZONES) {
+      max_zone = std::max(max_zone, byte_pulses(byte));
+    }
+  }
+  const uint8_t header[] = {0xF5, 0xF5, 0xF5, 0x1C, 35, 0xBB, 1};
+  const uint8_t end[] = {FRAME_END};
+  size_t fixed = manchester_encode(header, sizeof(header), Polarity::NORMAL, Phase::ALIGNED).size() +
+                 manchester_encode(end, sizeof(end), Polarity::NORMAL, Phase::ALIGNED).size();
+  for (size_t occupied = 0; occupied <= 11; occupied++) {
+    // Empty slots are zero-filled; the checksum may escape too. Reserve four extra pulses
+    // for phase and the receiver's leading/trailing idle samples.
+    size_t bound = fixed + occupied * (max_zone + 2 * max_time) + (11 - occupied) * 3 * byte_pulses(0) + max_time + 4;
+    CHECK((bound + 1) / 2 <= TM2_RECEIVE_SYMBOLS);
   }
 }
 

@@ -94,6 +94,12 @@ def render_model_limits() -> str:
         ("uint8_t", "TM2_ZONES", model.zones, ""),
         ("uint8_t", "TM2_PROGRAMS", len(model.letters), "A is wire program 0"),
         ("uint8_t", "TM2_STARTS", model.starts, "start slots per program"),
+        (
+            "uint16_t",
+            "TM2_RECEIVE_SYMBOLS",
+            model.receive_symbols,
+            "RMT capacity for escaped queue replies",
+        ),
         ("uint16_t", "TM2_SEASONAL_MIN_PERCENT", model.seasonal_min_percent, ""),
         ("uint16_t", "TM2_SEASONAL_MAX_PERCENT", model.seasonal_max_percent, ""),
         ("uint16_t", "TM2_RAIN_DELAY_MAX_DAYS", model.rain_delay_max_days, ""),

@@ -1,0 +1,49 @@
+# Keep the numeric sensor domain absent: ends_at must publish independently.
+esphome:
+  name: rainbird-ends-at-only
+  min_version: 2026.9.0
+
+esp32:
+  variant: esp32c3
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../../../components
+    components: [rainbird]
+
+logger:
+
+wifi:
+  ssid: test-ssid
+  password: test-password
+
+time:
+  - platform: sntp
+    id: ha_time
+
+remote_transmitter:
+  pin: GPIO4
+  carrier_duty_percent: 100%
+  non_blocking: true
+
+remote_receiver:
+  pin: GPIO5
+  idle: 4ms
+  filter: 50us
+  receive_symbols: 448
+  rmt_symbols: 96
+
+rainbird:
+  id: rainbird_controller
+  model: ESP-TM2
+  time_id: ha_time
+  zones: []
+  programs: []
+
+text_sensor:
+  - platform: rainbird
+    ends_at:
+      name: Watering ends

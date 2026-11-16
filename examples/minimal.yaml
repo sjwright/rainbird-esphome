@@ -35,10 +35,10 @@ remote_receiver:
   pin: GPIO27
   idle: 4ms
   filter: 50us
-  receive_symbols: 384
+  receive_symbols: 448
   # Original ESP32 only. It cannot refill RMT memory mid-frame, so the hardware
   # block has to hold a whole reply. Ping-pong chips leave rmt_symbols at the default.
-  rmt_symbols: 384
+  rmt_symbols: 448
 
 rainbird:
   model: ESP-TM2

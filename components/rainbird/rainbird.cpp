@@ -782,13 +782,14 @@ void RainbirdComponent::show_unknown(Domain domain, void *entity) {
 }
 
 void RainbirdComponent::publish_remaining_() {
-#ifdef USE_SENSOR
   const ControllerState &state = this->session_->state();
   if (state.remaining_readings == this->remaining_readings_ || !state.remaining_seconds.has_value())
     return;
   this->remaining_readings_ = state.remaining_readings;
   uint16_t seconds = *state.remaining_seconds;
+  // The timestamp also works in firmware with no numeric sensors.
   this->publish_ends_at_(seconds);
+#ifdef USE_SENSOR
   if (this->remaining_sensors_.empty() || !this->countdown_.reading(seconds, millis()))
     return;
   this->publish_remaining_sensors_(seconds);

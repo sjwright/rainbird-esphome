@@ -355,6 +355,11 @@ void Session::on_frame(const uint8_t *payload, size_t size, uint32_t now_ms) {
     this->model_.apply_reply(reply, &this->state_);
     this->revision_++;
     switch (reply.kind) {
+      case ReplyKind::ACTIVE:
+        if (reply.stations.page == 0) {
+          std::fill_n(this->unconfirmed_starts_, STATE_ZONES, false);
+        }
+        break;
       case ReplyKind::MODEL:
         this->identity_.model = reply.model;
         this->identity_.model_known = true;
@@ -470,6 +475,7 @@ void Session::forget_state_(bool keep_zones) {
   }
   this->state_ = fresh;
   this->time_pending_ = false;
+  std::fill_n(this->unconfirmed_starts_, STATE_ZONES, false);
 }
 
 void Session::handle_(const Completion &done, uint32_t now_ms) {
@@ -566,6 +572,11 @@ void Session::handle_(const Completion &done, uint32_t now_ms) {
         this->no_reply_(done.opcode);
       }
       return;
+    case TagKind::ZONE_START:
+      if (done.outcome != Outcome::NAK && !this->link_down_()) {
+        this->unconfirmed_starts_[tag_detail(done.tag) - 1] = true;
+      }
+      [[fallthrough]];
     case TagKind::CONTROL:
       // Reported, because nothing else says so: the command went once and nobody answered.
       if (done.outcome == Outcome::FAILED) {
@@ -662,13 +673,13 @@ bool Session::ready_for_command_() const {
          this->stage_ == SessionStage::RUNNING;
 }
 
-bool Session::enqueue_command_(const ByteBuf &request, uint32_t now_ms, uint8_t program) {
+bool Session::enqueue_command_(const ByteBuf &request, uint32_t now_ms, uint8_t detail, TagKind kind) {
   if (request.size == 0) {
     return false;
   }
   // One copy, never retried: the controller may act on every copy it hears, and a lost reply
   // does not mean it did nothing.
-  if (!this->enqueue_(request, Priority::USER, TagKind::CONTROL, program, Delivery::ONCE)) {
+  if (!this->enqueue_(request, Priority::USER, kind, detail, Delivery::ONCE)) {
     return false;
   }
   this->hold_ = true;
@@ -743,10 +754,28 @@ ControlResult Session::control(const Control &command, uint32_t now_ms) {
       }
       uint8_t minutes = static_cast<uint8_t>(command.value);
       request = queue ? request_queue_station(0, command.zone, minutes) : request_run_station(command.zone, minutes);
+      if (!queue) {
+        return this->enqueue_command_(request, now_ms, command.zone, TagKind::ZONE_START) ? ControlResult::QUEUED
+                                                                                          : ControlResult::REFUSED_BUSY;
+      }
       break;
     }
     case ControlOp::VALVE_OFF: {
+      if (command.zone < 1 || command.zone > zones) {
+        return ControlResult::REFUSED_RANGE;
+      }
+      uint32_t start_tag = tag(TagKind::ZONE_START, command.zone);
+      size_t cancelled = this->link_.cancel_queued(start_tag);
+      // Cancel intent separately from reported state. An unsent start needs no stop; one
+      // already on the wire may be watering before its first status reading arrives.
+      if (this->unconfirmed_starts_[command.zone - 1] || this->link_.in_flight(start_tag)) {
+        request = request_stop();
+        break;
+      }
       if (!at(this->state_.running, command.zone - 1).value_or(false)) {
+        if (cancelled > 0) {
+          return ControlResult::QUEUED;
+        }
         return this->queued_(command.zone) ? ControlResult::REFUSED_QUEUED_ONLY : ControlResult::REFUSED_NOT_RUNNING;
       }
       uint8_t next = 0;

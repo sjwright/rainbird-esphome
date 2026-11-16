@@ -270,3 +270,47 @@ TEST_CASE("schedule pages keep their raw bytes; the page helpers do the zone ari
   REQUIRE(request_write_page(0x10, page.data, page.size, &write));
   CHECK(to_hex(write.data, write.size) == "21 00 10 6A 06 01 00 64 01");
 }
+
+TEST_CASE("parse_reply picks the row by opcode: a wrong length fails, an unknown opcode is raw") {
+  auto parse = [](const char *hex, Reply *out) {
+    auto bytes = from_hex(hex);
+    return parse_reply(bytes.data(), bytes.size(), out);
+  };
+  Reply reply;
+  // BB has a row per page, and the page byte picks between them.
+  REQUIRE(parse("BB 00 00 00 00 00 00 00 00 FF 00 00", &reply));
+  CHECK(reply.kind == ReplyKind::QUEUE_NOW);
+  REQUIRE(parse("BB 01 21 05 D0", &reply));
+  CHECK(reply.kind == ReplyKind::QUEUE_LIST);
+  CHECK(reply.queue_list.count == 1);
+  CHECK_FALSE(parse("BB 02 00 00 00", &reply));
+  // A known opcode at the wrong length is not a reply, and is not passed on as raw either.
+  CHECK_FALSE(parse("82 00 0A 09", &reply));
+  CHECK_FALSE(parse("87 00", &reply));
+  REQUIRE(parse("87", &reply));
+  CHECK(reply.kind == ReplyKind::HANDSHAKE_DONE);
+  REQUIRE(parse("BD 01 02", &reply));
+  CHECK(reply.kind == ReplyKind::RAW);
+  CHECK(reply.raw.opcode == 0xBD);
+  CHECK(reply.raw.size == 3);
+}
+
+TEST_CASE("a reply that echoes a selector answers only the request that named it") {
+  auto matches = [](const char *request, const char *reply) {
+    auto req = from_hex(request);
+    auto rep = from_hex(reply);
+    return reply_matches(req.data(), req.size(), rep.data(), rep.size());
+  };
+  CHECK(matches("3B 01", "BB 01 21 05 D0"));
+  CHECK_FALSE(matches("3B 00", "BB 01 21 05 D0"));
+  CHECK(matches("20 00 61", "A0 00 61 FF FF"));
+  CHECK_FALSE(matches("20 00 60", "A0 00 61 FF FF"));
+  CHECK_FALSE(matches("20 00 61", "A0 00"));
+  CHECK(matches("04 4C", "84 4C 01"));
+  CHECK_FALSE(matches("04 4A", "84 4C 01"));
+  // No selector: the opcode alone, or the echo in an ACK or NAK.
+  CHECK(matches("4C", "CC 00"));
+  CHECK(matches("39 00 01 0A", "01 39"));
+  CHECK(matches("39 00 01 0A", "00 39 02"));
+  CHECK_FALSE(matches("39 00 01 0A", "01 40"));
+}

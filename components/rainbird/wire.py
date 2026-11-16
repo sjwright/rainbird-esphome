@@ -17,6 +17,7 @@ from .const import (
     CONF_MONITOR_RECEIVER_ID,
 )
 from .entity_checks import check_dependencies, declaring
+from .models import ESP_TM2
 
 CONF_RECEIVE_SYMBOLS = "receive_symbols"
 CONF_NON_BLOCKING = "non_blocking"
@@ -24,11 +25,12 @@ CONF_CARRIER_DUTY_PERCENT = "carrier_duty_percent"
 CONF_IDLE = "idle"
 CONF_FILTER = "filter"
 
-# A 42-byte reply is up to 336 RMT symbols. 384 leaves a little spare.
-MIN_RECEIVE_SYMBOLS = 384
+# A queue reply has 35 payload bytes, and escaping can grow its 42-byte frame.
+# test_frame.cpp bounds the encoded pulse count, including phase and idle, below 448 symbols.
+MIN_RECEIVE_SYMBOLS = ESP_TM2.receive_symbols
 # Original ESP32 cannot refill the receiver mid-frame, so the hardware block
 # itself has to hold the reply. Ping-pong chips keep a smaller block.
-ORIGINAL_RX_SYMBOLS = 384
+ORIGINAL_RX_SYMBOLS = MIN_RECEIVE_SYMBOLS
 MIN_IDLE_US = 1_000
 MAX_IDLE_US = 20_000
 MAX_FILTER_US = 100
@@ -52,8 +54,8 @@ CONF_USE_DMA = "use_dma"
 _SUPPORTED = "ESP32, S3, C3, C5, C6, H2 or P4"
 _UNSUPPORTED = {
     esp32.VARIANT_ESP32S2: (
-        "ESP32-S2 has 256 RMT symbols, which cannot hold a 42-byte reply "
-        f"(336 symbols). Use an {_SUPPORTED}."
+        "ESP32-S2 has 256 RMT symbols, which cannot hold the longest escaped queue reply. "
+        f"Use an {_SUPPORTED}."
     ),
     esp32.VARIANT_ESP32C2: (f"ESP32-C2 has no RMT peripheral. Use an {_SUPPORTED}."),
     esp32.VARIANT_ESP32C61: (f"ESP32-C61 has no RMT peripheral. Use an {_SUPPORTED}."),
@@ -79,8 +81,7 @@ def _check_receiver(rx: dict, variant: str | None) -> None:
         if symbols is None or symbols < MIN_RECEIVE_SYMBOLS:
             raise cv.Invalid(
                 f"remote_receiver '{name}' has receive_symbols {symbols}. "
-                f"Set receive_symbols: {MIN_RECEIVE_SYMBOLS} so a 42-byte reply "
-                "(up to 336 symbols) fits."
+                f"Set receive_symbols: {MIN_RECEIVE_SYMBOLS} so escaped queue replies fit."
             )
         if variant == esp32.VARIANT_ESP32:
             block = rx.get(CONF_RMT_SYMBOLS, 0)
@@ -175,7 +176,7 @@ def _check_rmt_memory(variant: str) -> None:
                 f"RMT symbol memory: {name} has rmt_symbols {symbols}, which needs "
                 f"{need(symbols, dma)} blocks of {per_block}. A receiver on this chip can use at "
                 f"most {rx_blocks} blocks ({rx_blocks * per_block} symbols). Lower rmt_symbols; "
-                "receive_symbols is the RAM buffer and can stay at 384."
+                f"receive_symbols is the RAM buffer and can stay at {MIN_RECEIVE_SYMBOLS}."
             )
     used_rx = sum(need(s, d) for _, s, rx, d in users if rx)
     used = sum(need(s, d) for _, s, _, d in users)
@@ -190,7 +191,7 @@ def _check_rmt_memory(variant: str) -> None:
         raise cv.Invalid(
             f"RMT symbol memory on this chip is {blocks} blocks of {per_block} symbols. "
             f"This config needs {used} ({parts}). ESP-IDF rounds rmt_symbols up to whole "
-            "blocks, so lower rmt_symbols. On the original ESP32, receive 384 plus "
+            f"blocks, so lower rmt_symbols. On the original ESP32, receive {ORIGINAL_RX_SYMBOLS} plus "
             "transmit 64 fits."
         )
 
@@ -233,7 +234,7 @@ def validate_hub(config: dict) -> None:
         if variant not in _RMT_LAYOUT:
             raise cv.Invalid(
                 f"{variant} is not supported. Rain Bird needs an ESP32 with RMT "
-                f"and room for a 42-byte reply. Use an {_SUPPORTED}."
+                f"and room for escaped queue replies. Use an {_SUPPORTED}."
             )
 
     seen = set()

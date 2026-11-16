@@ -40,8 +40,8 @@ remote_receiver:
   pin: GPIO27                 # from the controller's TX, through an optocoupler
   idle: 4ms
   filter: 50us
-  receive_symbols: 384
-  rmt_symbols: 384            # original ESP32 only; leave out on an S3, C3 or C6
+  receive_symbols: 448
+  rmt_symbols: 448            # original ESP32 only; leave out on an S3, C3 or C6
 
 rainbird:
   model: ESP-TM2
@@ -254,6 +254,8 @@ these. Include it as a package; `examples/full.yaml` shows how.
 - **Nothing is shown until the controller says it.** A switch turns on when the
   controller reports the zone running, not when you press it. A refused command
   logs a warning and the entity stays as it was.
+- **Off also cancels a pending immediate start.** If the start has not been sent,
+  it is removed. If it has gone out and status has not caught up, off sends a stop.
 - **Commands are sent once.** A command whose reply is lost is not sent again,
   because the controller may already have acted on it. The log says so and
   `on_no_reply` runs; the next poll shows what happened.

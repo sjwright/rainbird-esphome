@@ -62,9 +62,9 @@ remote_receiver:
   pin: ${rx_pin}
   idle: 4ms
   filter: 50us
-  receive_symbols: 384
+  receive_symbols: 448
   # Original ESP32 only: it cannot refill RMT memory mid-frame. Leave this out on an S3, C3 or C6.
-  rmt_symbols: 384
+  rmt_symbols: 448
 
 rainbird:
   id: rainbird_controller

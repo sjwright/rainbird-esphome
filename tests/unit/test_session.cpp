@@ -321,6 +321,81 @@ TEST_CASE("turning a zone off stops only when that zone is running") {
   CHECK(fake.requests == std::vector<std::string>{"40"});
 }
 
+TEST_CASE("valve off cancels every unsent start for its zone without stopping another zone") {
+  Running live(config_with({Field::ZONES_RUNNING}));
+  Control on;
+  on.op = ControlOp::VALVE_ON;
+  on.zone = 2;
+  on.value = 10;
+  REQUIRE(live.session.control(on, live.now) == ControlResult::QUEUED);
+  REQUIRE(live.session.control(on, live.now) == ControlResult::QUEUED);
+  on.zone = 3;
+  REQUIRE(live.session.control(on, live.now) == ControlResult::QUEUED);
+  Control off;
+  off.op = ControlOp::VALVE_OFF;
+  off.zone = 2;
+  CHECK(live.session.control(off, live.now) == ControlResult::QUEUED);
+  CHECK(live.session.state().running[0] == true);
+  CHECK(live.session.state().running[1] == false);
+  FakeController silent;
+  run_session(live.session, silent, live.now, 5000);
+  CHECK(silent.requests == std::vector<std::string>{"39 00 03 0A"});
+}
+
+TEST_CASE("valve off stops a transmitted start before status arrives, with or without its ACK") {
+  // Off can arrive during transmission, after the ACK, or after its timeout.
+  for (int when = 0; when < 3; when++) {
+    CAPTURE(when);
+    Running live(config_with({Field::ZONES_RUNNING}));
+    Session &session = live.session;
+    Control on;
+    on.op = ControlOp::VALVE_ON;
+    on.zone = 2;
+    on.value = 10;
+    REQUIRE(session.control(on, live.now) == ControlResult::QUEUED);
+    Transmission tx = next_after_gap(session, &live.now);
+    REQUIRE(to_hex(tx.payload.data, tx.payload.size) == "39 00 02 0A");
+    if (when == 1) {
+      auto ack = from_hex("01 39");
+      live.now += tx.first_copy_ms + 30;
+      session.on_frame(ack.data(), ack.size(), live.now);
+    } else if (when == 2) {
+      live.now += tx.first_copy_ms + 400;
+      session.tick(live.now);
+    }
+    Control off;
+    off.op = ControlOp::VALVE_OFF;
+    off.zone = 2;
+    REQUIRE(session.control(off, live.now) == ControlResult::QUEUED);
+    // Pending intent must never be published as the controller's state.
+    CHECK(session.state().running[1] == false);
+    FakeController fake = FakeController::upgraded_tm2();
+    fake.replies["40"] = "01 40";
+    run_session(session, fake, live.now, 5000);
+    REQUIRE_FALSE(fake.requests.empty());
+    CHECK(fake.requests[0] == "40");
+    CHECK(std::count(fake.requests.begin(), fake.requests.end(), "40") == 1);
+  }
+}
+
+TEST_CASE("a refused start or a fresh idle reading leaves nothing to cancel") {
+  for (const char *reply : {"01 39", "00 39 02"}) {
+    Running live(config_with({Field::ZONES_RUNNING}));
+    Control on;
+    on.op = ControlOp::RUN_ZONE;
+    on.zone = 2;
+    on.value = 10;
+    REQUIRE(live.session.control(on, live.now) == ControlResult::QUEUED);
+    FakeController fake = FakeController::upgraded_tm2();
+    fake.replies["39 00 02 0A"] = reply;
+    live.now = run_session(live.session, fake, live.now, 5000);
+    Control off;
+    off.op = ControlOp::VALVE_OFF;
+    off.zone = 2;
+    CHECK(live.session.control(off, live.now) == ControlResult::REFUSED_NOT_RUNNING);
+  }
+}
+
 TEST_CASE("queue mode advances to the next queued zone when that is allowed") {
   for (bool experimental : {true, false}) {
     SessionConfig config = config_with({Field::ZONES_RUNNING, Field::QUEUE});

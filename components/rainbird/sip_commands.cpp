@@ -435,141 +435,73 @@ bool parse_schedule_page(const uint8_t *payload, size_t size, SchedulePage *out)
   return true;
 }
 
+namespace {
+
+// Every reply this component decodes: its opcode, what it parses into, and how many bytes after
+// the opcode echo the request's selector (a page, program, event or command). parse_reply() and
+// reply_matches() both read this table, so a reply added here is parsed and matched alike.
+// BB has two rows, one per page; the parsers tell them apart.
+struct ReplyRow {
+  uint8_t opcode;
+  ReplyKind kind;
+  uint8_t selector;
+  bool (*parse)(const uint8_t *payload, size_t size, Reply *out);
+};
+
+// A row's parser, filling the Reply member that kind names.
+template<auto PARSE, auto MEMBER> bool into(const uint8_t *payload, size_t size, Reply *out) {
+  return PARSE(payload, size, &(out->*MEMBER));
+}
+
+// 87 is the opcode alone.
+bool parse_handshake_done(const uint8_t *, size_t size, Reply *) { return size == 1; }
+
+// clang-format off
+constexpr ReplyRow REPLIES[] = {
+    {0x01, ReplyKind::ACK, 0, into<parse_ack, &Reply::ack>},
+    {0x00, ReplyKind::NAK, 0, into<parse_nak, &Reply::nak>},
+    {0x86, ReplyKind::HANDSHAKE, 0, into<parse_handshake, &Reply::handshake>},
+    {0x87, ReplyKind::HANDSHAKE_DONE, 0, parse_handshake_done},
+    {0x82, ReplyKind::MODEL, 0, into<parse_model, &Reply::model>},
+    {0x83, ReplyKind::STATIONS, 1, into<parse_stations, &Reply::stations>},
+    {0x84, ReplyKind::SUPPORT, 1, into<parse_support, &Reply::support>},
+    {0x85, ReplyKind::SERIAL_NUMBER, 0, into<parse_serial, &Reply::serial>},
+    {0x8B, ReplyKind::FIRMWARE, 0, into<parse_firmware, &Reply::firmware>},
+    {0x90, ReplyKind::TIME, 0, into<parse_time, &Reply::time>},
+    {0x92, ReplyKind::DATE, 0, into<parse_date, &Reply::date>},
+    {0xBF, ReplyKind::ACTIVE, 1, into<parse_active_stations, &Reply::stations>},
+    {0xCC, ReplyKind::COMBINED, 0, into<parse_combined_state, &Reply::combined>},
+    {0xBB, ReplyKind::QUEUE_NOW, 1, into<parse_queue_now, &Reply::queue_now>},
+    {0xBB, ReplyKind::QUEUE_LIST, 1, into<parse_queue_list, &Reply::queue_list>},
+    {0xC8, ReplyKind::IRRIGATION, 0, into<parse_irrigation_state, &Reply::irrigation>},
+    {0xBE, ReplyKind::RAIN_SENSOR, 0, into<parse_rain_sensor, &Reply::rain_sensor>},
+    {0xCA, ReplyKind::EVENT, 1, into<parse_event_timestamp, &Reply::event>},
+    {0xB6, ReplyKind::RAIN_DELAY, 0, into<parse_rain_delay, &Reply::rain_delay>},
+    {0xB0, ReplyKind::BUDGET, 1, into<parse_water_budget, &Reply::budget>},
+    {0xA0, ReplyKind::SCHEDULE, 2, into<parse_schedule_page, &Reply::schedule>},
+};
+// clang-format on
+
+}  // namespace
+
 bool parse_reply(const uint8_t *payload, size_t size, Reply *out) {
   if (out == nullptr || payload == nullptr || size == 0) {
     return false;
   }
   *out = Reply{};
-  switch (payload[0]) {
-    case 0x01:
-      if (!parse_ack(payload, size, &out->ack)) {
-        return false;
-      }
-      out->kind = ReplyKind::ACK;
+  bool known = false;
+  for (const ReplyRow &row : REPLIES) {
+    if (row.opcode != payload[0]) {
+      continue;
+    }
+    known = true;
+    if (row.parse(payload, size, out)) {
+      out->kind = row.kind;
       return true;
-    case 0x00:
-      if (!parse_nak(payload, size, &out->nak)) {
-        return false;
-      }
-      out->kind = ReplyKind::NAK;
-      return true;
-    case 0x86:
-      if (!parse_handshake(payload, size, &out->handshake)) {
-        return false;
-      }
-      out->kind = ReplyKind::HANDSHAKE;
-      return true;
-    case 0x87:
-      if (size != 1) {
-        return false;
-      }
-      out->kind = ReplyKind::HANDSHAKE_DONE;
-      return true;
-    case 0x82:
-      if (!parse_model(payload, size, &out->model)) {
-        return false;
-      }
-      out->kind = ReplyKind::MODEL;
-      return true;
-    case 0x83:
-      if (!parse_stations(payload, size, &out->stations)) {
-        return false;
-      }
-      out->kind = ReplyKind::STATIONS;
-      return true;
-    case 0x84:
-      if (!parse_support(payload, size, &out->support)) {
-        return false;
-      }
-      out->kind = ReplyKind::SUPPORT;
-      return true;
-    case 0x85:
-      if (!parse_serial(payload, size, &out->serial)) {
-        return false;
-      }
-      out->kind = ReplyKind::SERIAL_NUMBER;
-      return true;
-    case 0x8B:
-      if (!parse_firmware(payload, size, &out->firmware)) {
-        return false;
-      }
-      out->kind = ReplyKind::FIRMWARE;
-      return true;
-    case 0x90:
-      if (!parse_time(payload, size, &out->time)) {
-        return false;
-      }
-      out->kind = ReplyKind::TIME;
-      return true;
-    case 0x92:
-      if (!parse_date(payload, size, &out->date)) {
-        return false;
-      }
-      out->kind = ReplyKind::DATE;
-      return true;
-    case 0xBF:
-      if (!parse_active_stations(payload, size, &out->stations)) {
-        return false;
-      }
-      out->kind = ReplyKind::ACTIVE;
-      return true;
-    case 0xCC:
-      if (!parse_combined_state(payload, size, &out->combined)) {
-        return false;
-      }
-      out->kind = ReplyKind::COMBINED;
-      return true;
-    case 0xBB:
-      if (size >= 2 && payload[1] == 0x00 && parse_queue_now(payload, size, &out->queue_now)) {
-        out->kind = ReplyKind::QUEUE_NOW;
-        return true;
-      }
-      if (size >= 2 && payload[1] == 0x01 && parse_queue_list(payload, size, &out->queue_list)) {
-        out->kind = ReplyKind::QUEUE_LIST;
-        return true;
-      }
-      return false;
-    case 0xC8:
-      if (!parse_irrigation_state(payload, size, &out->irrigation)) {
-        return false;
-      }
-      out->kind = ReplyKind::IRRIGATION;
-      return true;
-    case 0xBE:
-      if (!parse_rain_sensor(payload, size, &out->rain_sensor)) {
-        return false;
-      }
-      out->kind = ReplyKind::RAIN_SENSOR;
-      return true;
-    case 0xCA:
-      if (!parse_event_timestamp(payload, size, &out->event)) {
-        return false;
-      }
-      out->kind = ReplyKind::EVENT;
-      return true;
-    case 0xB6:
-      if (!parse_rain_delay(payload, size, &out->rain_delay)) {
-        return false;
-      }
-      out->kind = ReplyKind::RAIN_DELAY;
-      return true;
-    case 0xB0:
-      if (!parse_water_budget(payload, size, &out->budget)) {
-        return false;
-      }
-      out->kind = ReplyKind::BUDGET;
-      return true;
-    case 0xA0:
-      if (!parse_schedule_page(payload, size, &out->schedule)) {
-        return false;
-      }
-      out->kind = ReplyKind::SCHEDULE;
-      return true;
-    default:
-      break;
+    }
   }
-  if (size > sizeof(out->raw.data)) {
-    return false;
+  if (known || size > sizeof(out->raw.data)) {
+    return false;  // a known opcode at the wrong length, or more than a frame holds
   }
   out->kind = ReplyKind::RAW;
   out->raw.opcode = payload[0];
@@ -594,19 +526,23 @@ bool reply_matches(const uint8_t *request, size_t request_size, const uint8_t *r
   if (reply[0] != static_cast<uint8_t>(opcode + 0x80)) {
     return false;
   }
-  switch (opcode) {
-    case 0x03:  // 83 PP
-    case 0x30:  // B0 PP
-    case 0x3B:  // BB PP
-    case 0x3F:  // BF PP
-    case 0x4A:  // CA EE
-    case 0x04:  // 84 CC
-      return request_size >= 2 && reply_size >= 2 && reply[1] == request[1];
-    case 0x20:  // 20 00 PP -> A0 00 PP
-      return request_size >= 3 && reply_size >= 3 && reply[1] == request[1] && reply[2] == request[2];
-    default:
-      return true;
+  // A reply that echoes a selector answers only the request that named it.
+  size_t selector = 0;
+  for (const ReplyRow &row : REPLIES) {
+    if (row.opcode == reply[0]) {
+      selector = row.selector;
+      break;
+    }
   }
+  if (request_size <= selector || reply_size <= selector) {
+    return false;
+  }
+  for (size_t i = 1; i <= selector; i++) {
+    if (reply[i] != request[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace esphome::rainbird

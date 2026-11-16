@@ -12,6 +12,8 @@ static constexpr uint8_t TM2_ZONES = 12;
 static constexpr uint8_t TM2_PROGRAMS = 3;
 // Start slots per program.
 static constexpr uint8_t TM2_STARTS = 4;
+// RMT capacity for escaped queue replies.
+static constexpr uint16_t TM2_RECEIVE_SYMBOLS = 448;
 static constexpr uint16_t TM2_SEASONAL_MIN_PERCENT = 5;
 static constexpr uint16_t TM2_SEASONAL_MAX_PERCENT = 200;
 static constexpr uint16_t TM2_RAIN_DELAY_MAX_DAYS = 14;

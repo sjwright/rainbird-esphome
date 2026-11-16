@@ -16,6 +16,7 @@ COMMITTED = [
     REPO / "tests/components/rainbird/test.esp32-idf.yaml",
     REPO / "tests/components/rainbird/test.esp32-ard.yaml",
     REPO / "tests/components/rainbird/test.esp32-c3-idf.yaml",
+    REPO / "tests/components/rainbird/test.ends-at-only.yaml",
     REPO / "tests/components/rainbird/validate.esp32-idf.yaml",
 ]
 
@@ -39,8 +40,8 @@ def _yaml(
     listen_only: bool = False,
     duty: str = "100%",
     non_blocking: bool | None = True,
-    receive_symbols: int | None = 384,
-    rx_rmt: int | None = 384,
+    receive_symbols: int | None = 448,
+    rx_rmt: int | None = 448,
     tx_rmt: int | None = None,
     idle: str = "4ms",
     filter_us: str = "50us",
@@ -157,13 +158,13 @@ remote_receiver:
     pin: GPIO4
     idle: 4ms
     filter: 50us
-    receive_symbols: 384
+    receive_symbols: 448
     rmt_symbols: 48
   - id: rx_b
     pin: GPIO5
     idle: 4ms
     filter: 50us
-    receive_symbols: 384
+    receive_symbols: 448
     rmt_symbols: 48
 
 rainbird:
@@ -207,15 +208,15 @@ def test_transmitter_must_be_non_blocking(tmp_path: Path):
 
 
 def test_receive_symbols_omitted(tmp_path: Path):
-    _expect_fail(tmp_path, "receive_symbols: 384", receive_symbols=None)
+    _expect_fail(tmp_path, "receive_symbols: 448", receive_symbols=None)
 
 
 def test_receive_symbols_too_small(tmp_path: Path):
-    _expect_fail(tmp_path, "receive_symbols: 384", receive_symbols=192)
+    _expect_fail(tmp_path, "receive_symbols: 448", receive_symbols=384)
 
 
 def test_original_esp32_rmt_symbols(tmp_path: Path):
-    _expect_fail(tmp_path, "rmt_symbols: 384", rx_rmt=64)
+    _expect_fail(tmp_path, "rmt_symbols: 448", rx_rmt=384)
 
 
 def test_idle_too_long_and_too_short(tmp_path: Path):
@@ -393,8 +394,8 @@ def test_clock_sync_is_off_unless_configured(tmp_path: Path):
 
 
 def test_rmt_blocks_round_up(tmp_path: Path):
-    # 390 + 120 symbols is under 512, but ESP-IDF needs 7 + 2 blocks of 64, and there are 8.
-    _expect_fail(tmp_path, "RMT symbol memory", rx_rmt=390, tx_rmt=120)
+    # 449 + 48 symbols is under 512, but ESP-IDF needs 8 + 1 blocks of 64, and there are 8.
+    _expect_fail(tmp_path, "RMT symbol memory", rx_rmt=449, tx_rmt=48)
 
 
 def test_c3_receiver_fits_the_receive_blocks(tmp_path: Path):

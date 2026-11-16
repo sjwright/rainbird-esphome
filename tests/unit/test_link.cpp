@@ -8,6 +8,28 @@
 
 using namespace esphome::rainbird;
 
+TEST_CASE("cancelling a tag drops only unsent matching requests and leaves no completions") {
+  LinkCore link;
+  REQUIRE(link.enqueue(request_run_station(1, 10), Priority::USER, 7, Delivery::ONCE));
+  REQUIRE(link.enqueue(request_run_station(1, 20), Priority::USER, 7, Delivery::ONCE));
+  REQUIRE(link.enqueue(request_stop(), Priority::USER, 8, Delivery::ONCE));
+  Transmission tx;
+  REQUIRE(link.next_transmission(0, &tx));
+  CHECK(link.in_flight(7));
+  CHECK_FALSE(link.in_flight(8));
+  CHECK(link.cancel_queued(7) == 1);
+  CHECK(link.in_flight(7));
+  CHECK(link.cancel_queued(7) == 0);
+  Completion done;
+  CHECK_FALSE(link.pop_completion(&done));
+  const uint8_t ack[] = {0x01, 0x39};
+  REQUIRE(link.on_frame(ack, sizeof(ack), 100));
+  REQUIRE(link.pop_completion(&done));
+  CHECK(done.tag == 7);
+  REQUIRE(link.next_transmission(120, &tx));
+  CHECK(tx.payload.data[0] == 0x40);
+}
+
 static ByteBuf buf(const char *hex) {
   ByteBuf out;
   for (uint8_t byte : from_hex(hex)) {

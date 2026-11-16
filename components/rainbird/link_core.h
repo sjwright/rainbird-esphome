@@ -76,10 +76,13 @@ class LinkCore {
   bool pop_completion(Completion *out);
 
   bool in_flight() const { return this->busy_; }
+  bool in_flight(uint32_t tag) const { return this->busy_ && this->current_.tag == tag; }
   size_t queued() const { return this->count_; }
   size_t queued(Priority priority) const;
   // Drops every queued request of this priority. The one in flight still completes.
   void drop_queued(Priority priority);
+  // Cancel unsent requests with this tag. No completion is produced; the caller owns the cancellation.
+  size_t cancel_queued(uint32_t tag);
   // Nothing queued, nothing in flight, nothing waiting to be collected.
   bool idle() const { return !this->busy_ && this->count_ == 0 && this->done_count_ == 0; }
 

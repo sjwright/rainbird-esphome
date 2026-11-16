@@ -86,9 +86,10 @@ enum class TagKind : uint8_t {
   SCHEDULE = 4,
   POLL = 5,
   RAW = 6,
-  CONTROL = 7,    // a command that may already have been acted on; sent once. The detail is its program.
-  PAGE = 8,       // one schedule edit: read, write, read back
-  HANDSHAKE = 9,  // the detail is the step: 1 for 06, 2 for 07
+  CONTROL = 7,      // a command that may already have been acted on; sent once. The detail is its program.
+  PAGE = 8,         // one schedule edit: read, write, read back
+  HANDSHAKE = 9,    // the detail is the step: 1 for 06, 2 for 07
+  ZONE_START = 10,  // an immediate zone start (39), cancellable by zone in the detail
 };
 
 // A control command. Minutes, percent and days share `value`. Clock fields are separate.
@@ -245,7 +246,7 @@ class Session {
   bool ready_for_command_() const;
   bool link_down_() const;
   ControlResult unsupported_(Capability capability) const;
-  bool enqueue_command_(const ByteBuf &request, uint32_t now_ms, uint8_t program = 0);
+  bool enqueue_command_(const ByteBuf &request, uint32_t now_ms, uint8_t detail = 0, TagKind kind = TagKind::CONTROL);
   void follow_up_(uint32_t now_ms);
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
   bool queued_(uint8_t zone) const;
@@ -265,6 +266,8 @@ class Session {
   SessionStage stage_{SessionStage::IDLE};
 
   bool writes_permitted_{false};
+  // A sent start can have taken effect before 3F reports it, even if its ACK was lost.
+  bool unconfirmed_starts_[STATE_ZONES]{};
   size_t probes_pending_{0};
   bool probe_answered_{false};  // some 04 got an 84 reply
   bool probe_refused_{false};   // some 04 got a NAK

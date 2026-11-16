@@ -50,6 +50,18 @@ void LinkCore::drop_queued(Priority priority) {
   this->count_ = kept;
 }
 
+size_t LinkCore::cancel_queued(uint32_t tag) {
+  size_t kept = 0;
+  for (size_t i = 0; i < this->count_; i++) {
+    if (this->queue_[i].tag != tag) {
+      this->queue_[kept++] = this->queue_[i];
+    }
+  }
+  size_t cancelled = this->count_ - kept;
+  this->count_ = kept;
+  return cancelled;
+}
+
 bool LinkCore::take_next_(Pending *out) {
   if (this->count_ == 0) {
     return false;
