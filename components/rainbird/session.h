@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "capabilities.h"
 #include "controller_state.h"
 #include "link_core.h"
 #include "model_esp_tm2.h"
@@ -251,7 +252,6 @@ class Session {
   bool next_queued_zone_(uint8_t skip, uint8_t *zone) const;
   bool queued_(uint8_t zone) const;
   bool zone_missing_(uint8_t zone) const;
-  void remove_edit_(size_t index);
   void start_next_edit_();
   void fail_edit_(const char *reason);
   void handle_page_(const Completion &done);
@@ -301,12 +301,7 @@ class Session {
   SessionEvent events_[EVENT_CAP]{};
   size_t event_count_{0};
 
-  ScheduleEditor editor_;
-  // Edits waiting for the page in flight, oldest first, one entry per field. A TM2 has 92
-  // schedule fields (2 global, 10 and 8 per program, 36 run times), so this never fills.
-  static constexpr size_t EDIT_CAP = 96;
-  PageChange edits_[EDIT_CAP]{};
-  size_t edit_count_{0};
+  ScheduleEditor editor_;  // the page in flight and the edits waiting behind it
 };
 
 }  // namespace esphome::rainbird

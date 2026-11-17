@@ -10,6 +10,7 @@
 #include <driver/rtc_io.h>
 #endif
 
+#include "automation.h"
 #include "clock_sync.h"
 #include "elapsed.h"
 #include "entity_writes.h"

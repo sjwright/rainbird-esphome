@@ -1,8 +1,21 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+
+#include "capabilities.h"
+#include "controller_state.h"
 #include "model.h"
+#include "sip_commands.h"
 
 namespace esphome::rainbird {
+
+// The logical value of one page field: minutes, days, 0/1 for a day bit or a bypass, -1 for an
+// off start slot. False when the field does not fit in `size`.
+bool read_codec(CodecKind kind, const PageField &field, const uint8_t *data, size_t size, int32_t *value);
+// The inverse. Other bytes and other bits of the same byte are left as they are.
+bool write_codec(CodecKind kind, const PageField &field, int32_t value, uint8_t *data, size_t size);
 
 // The ESP-TM2: its limits, poll plan, page map and reply handling.
 class EspTm2Model {

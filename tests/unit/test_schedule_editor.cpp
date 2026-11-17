@@ -121,3 +121,92 @@ TEST_CASE("a change the page will not take is counted, and the others still go")
   CHECK(alone.on_reply(answer("A0 00 10 6A 06 01 00 64 01"), &request) == ScheduleEditor::Step::FAILED);
   CHECK(alone.refused() == 1);
 }
+
+TEST_CASE("a change starts a page, joins the one being read, or waits its turn") {
+  EspTm2Model model;
+  ScheduleEditor editor(model);
+  ByteBuf request;
+  using Asked = ScheduleEditor::Asked;
+  CHECK(editor.ask(PageChange{Field::RUN_TIME, 13, 0, 0, 10}, &request) == Asked::RANGE);
+  CHECK_FALSE(editor.active());
+
+  REQUIRE(editor.ask(PageChange{Field::WATERING_DAY, 0, 0, 0, 0}, &request) == Asked::READ);
+  CHECK(to_hex(request.data, request.size) == "20 00 10");
+  CHECK(editor.ask(PageChange{Field::FREQUENCY, 0, 0, 0, FREQ_CUSTOM}, &request) == Asked::JOINED);
+  // Zones 1 and 2 share page 80; zone 3 is on page 81.
+  CHECK(editor.ask(PageChange{Field::RUN_TIME, 1, 0, 0, 10}, &request) == Asked::WAITING);
+  CHECK(editor.ask(PageChange{Field::RUN_TIME, 3, 1, 0, 7}, &request) == Asked::WAITING);
+  CHECK(editor.ask(PageChange{Field::RUN_TIME, 2, 2, 0, 5}, &request) == Asked::WAITING);
+  // Zone 3 again: the later value, at the back.
+  CHECK(editor.ask(PageChange{Field::RUN_TIME, 3, 1, 0, 9}, &request) == Asked::WAITING);
+  CHECK(editor.waiting() == 3);
+  CHECK_FALSE(editor.next(&request));  // page 10 is still in flight
+
+  // Once page 10 is read, a change for it waits for its own read.
+  REQUIRE(editor.on_reply(answer("A0 00 10 6A 06 01 00 64 01"), &request) == ScheduleEditor::Step::WRITE);
+  CHECK(editor.ask(PageChange{Field::WATERING_DAY, 0, 0, 2, 0}, &request) == Asked::WAITING);
+  CHECK(editor.waiting() == 4);
+  editor.cancel();
+
+  // The oldest picks the page, and every change for it comes along: zones 1 and 2 on page 80.
+  REQUIRE(editor.next(&request));
+  CHECK(to_hex(request.data, request.size) == "20 00 80");
+  CHECK(editor.waiting() == 2);
+  REQUIRE(editor.on_reply(answer("A0 00 80 00 19 00 01 00 00 00 14 00 02 00 00"), &request) ==
+          ScheduleEditor::Step::WRITE);
+  CHECK(to_hex(request.data, request.size) == "21 00 80 00 0A 00 01 00 00 00 14 00 02 00 05");
+  editor.cancel();
+
+  REQUIRE(editor.next(&request));
+  CHECK(to_hex(request.data, request.size) == "20 00 81");
+  REQUIRE(editor.on_reply(answer("A0 00 81 00 00 00 00 00 00 00 00 00 00 00 00"), &request) ==
+          ScheduleEditor::Step::WRITE);
+  CHECK(to_hex(request.data, request.size) == "21 00 81 00 00 00 09 00 00 00 00 00 00 00 00");
+  editor.cancel();
+
+  REQUIRE(editor.next(&request));
+  CHECK(to_hex(request.data, request.size) == "20 00 10");
+  CHECK(editor.waiting() == 0);
+  editor.cancel();
+  CHECK_FALSE(editor.next(&request));
+}
+
+TEST_CASE("every schedule field can wait at once, and dropping them leaves the page in flight") {
+  EspTm2Model model;
+  ScheduleEditor editor(model);
+  ByteBuf request;
+  size_t asked = 0;
+  auto ask = [&](Field field, uint8_t zone, uint8_t program, uint8_t index) {
+    ScheduleEditor::Asked result = editor.ask(PageChange{field, zone, program, index, 1}, &request);
+    CHECK(result != ScheduleEditor::Asked::FULL);
+    CHECK(result != ScheduleEditor::Asked::RANGE);
+    asked++;
+  };
+  for (uint8_t zone = 1; zone <= 12; zone++) {
+    for (uint8_t program = 0; program < 3; program++) {
+      ask(Field::RUN_TIME, zone, program, 0);
+    }
+  }
+  for (uint8_t program = 0; program < 3; program++) {
+    for (uint8_t day = 0; day < 7; day++) {
+      ask(Field::WATERING_DAY, 0, program, day);
+    }
+    ask(Field::CYCLE_DAYS, 0, program, 0);
+    ask(Field::DAYS_UNTIL_NEXT, 0, program, 0);
+    ask(Field::FREQUENCY, 0, program, 0);
+    for (uint8_t slot = 0; slot < 4; slot++) {
+      ask(Field::START_TIME, 0, program, slot);
+      ask(Field::START_ENABLED, 0, program, slot);
+    }
+  }
+  ask(Field::STATION_DELAY, 0, 0, 0);
+  ask(Field::GLOBAL_SENSOR_BYPASS, 0, 0, 0);
+  CHECK(asked == 92);
+  CHECK(editor.active());
+  CHECK(editor.waiting() > 0);
+
+  editor.drop_waiting();
+  CHECK(editor.active());
+  editor.cancel();
+  CHECK_FALSE(editor.next(&request));
+}

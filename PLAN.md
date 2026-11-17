@@ -300,10 +300,10 @@ rainbird-esphome/
 │   ├── expand.py                # zones/programs → entity declarations (no ESPHome import)
 │   ├── bindings.py              # a platform entry's key → kind, zone, program, index
 │   ├── models.py                # the model: limits and program letters
-│   ├── platform.py, schemas.py  # the platform modules and entity schemas, from the kind table
+│   ├── platform.py, entity_schema.py # the platform modules and entity schemas, from the kind table
 │   ├── wire.py                  # final validation: transmitter, receivers, RMT memory
 │   ├── entity_checks.py         # final validation: duplicate controls, dependencies
-│   ├── automation.h             # on_nak / on_no_reply / on_frame triggers
+│   ├── automation.h             # on_nak / on_no_reply / on_frame triggers; send_raw and zone actions
 │   ├── rainbird.h/.cpp          # hub: ESPHome glue, publishing, logging, clock sync, actions
 │   ├── rainbird_entities.h/.cpp # one class per writeable domain (5.4)
 │   ├── entity_kind.h            # generated: the EntityKind enum and the kind table rows
@@ -312,7 +312,7 @@ rainbird-esphome/
 │   ├── entity_writes.h/.cpp     # pure: what a write from an entity or action becomes
 │   ├── entity_board.h/.cpp      # pure: every entity on the hub, what to publish, what a lost link does
 │   ├── session.h/.cpp           # pure: startup, probes, polls, commands, edits, events
-│   ├── schedule_editor.h/.cpp   # pure: one schedule page edit: read, patch, write, confirm
+│   ├── schedule_editor.h/.cpp   # pure: schedule edits a page at a time: read, patch, write, confirm
 │   ├── link_core.h/.cpp         # pure: transport queue, timeouts, retries, reply matching
 │   ├── controller_state.h/.cpp  # pure: field IDs and one optional cell per value
 │   ├── clock_sync.h/.cpp        # pure: when the controller clock needs setting
@@ -322,8 +322,9 @@ rainbird-esphome/
 │   ├── burst_assembler.h/.cpp   # pure: line edges → bursts (PLAN-GPIO phase 0; not yet used on the device)
 │   ├── sip_frame.h/.cpp         # pure: frame encoder, frame hunter, checksum, escapes
 │   ├── sip_commands.h/.cpp      # pure: request builders, typed reply parsers, quirk helpers
-│   ├── model.h                  # pure: limits, capabilities, page fields and codecs
-│   ├── model_esp_tm2.h/.cpp     # pure: the ESP-TM2
+│   ├── capabilities.h           # pure: the optional commands and what the 04 probes said
+│   ├── model.h                  # pure: limits, request lists, page fields and codec kinds
+│   ├── model_esp_tm2.h/.cpp     # pure: the ESP-TM2 and its page codecs
 │   └── sensor/, binary_sensor/, text_sensor/, number/, switch/, button/, select/,
 │       datetime/                # each an __init__.py generated from the kind table
 ├── packages/
@@ -391,6 +392,8 @@ link_core ◄── session ──► entity_values/_writes  (pure C++: behaviou
      (`locate()`, used for reading pages and editing them) and value codecs.
    - `Session` owns the controller conversation and `ControllerState`, and
      reports what happened through one event queue.
+   - `ScheduleEditor` owns schedule edits: the page in flight and the edits
+     waiting for theirs. The session queues what it asks for.
    - `LinkCore` owns scheduling: queue, timeouts and retries.
    - `entity_values` owns the kind table and what each entity shows and
      polls; `entity_writes` owns what each write becomes. The table itself is
@@ -526,7 +529,7 @@ The table drives everything else:
 
 - the hub's `zone_defaults` / `program_defaults` keys, including their
   `_<domain>` and plural spellings (`hub_key()`);
-- the platform schemas and their keys (`platform.py`, `schemas.py`);
+- the platform schemas and their keys (`platform.py`, `entity_schema.py`);
 - the expansion of zones and programs into entity declarations (`expand.py`);
 - the binding passed to each entity (`kind`, `zone`, `program`, `index`),
   worked out in one place (`bindings.py`) for codegen and for the duplicate
@@ -855,7 +858,8 @@ landed after all.
 **Schedule edits.** Every schedule entity is bound to a *page field*: page,
 byte offset, width and bit mask, plus a value encoding from the model. One
 generic routine (`ScheduleEditor`, driven by the session) handles every
-schedule write, one edit at a time (6.3):
+schedule write, one page at a time, and holds the edits waiting their turn
+(6.3):
 
 1. Re-read the page.
 2. Change only the bits of the edited field. Every other byte is kept from
@@ -943,7 +947,8 @@ The model IDs a TM2 can report (`0005`, `000A`, `010A`, `0014`, `0015`) are in
 - `short_poll()` and `slow_poll()`: the requests for the fields in use (6.4);
 - `locate(field, zone, program, index)`: the page map. Reading a page and
   editing one both use it and nothing else, so the two cannot disagree;
-- `codec(field)` with `read_codec()` / `write_codec()`: the value encodings,
+- `codec(field)` with `read_codec()` / `write_codec()` (also in
+  `model_esp_tm2.h`): the value encodings,
   such as minutes ↔ start slot with `FFFF` for off;
 - `apply_reply()`: maps an already-parsed `Reply` onto `ControllerState`.
   Parsing happens only in `sip_commands` (5.1 rule 1);
@@ -952,7 +957,7 @@ The model IDs a TM2 can report (`0005`, `000A`, `010A`, `0014`, `0015`) are in
 `ControllerState` is sized for the TM2 (`STATE_ZONES`, `STATE_PROGRAMS`,
 `STATE_STARTS`, from `model_limits.h`).
 
-The optional commands are one list in `model.h`: the `Capability` enum and
+The optional commands are one list in `capabilities.h`: the `Capability` enum and
 `CAPABILITY_OPCODES`. `Capabilities` holds yes, no or unknown for each. The
 session probes them in that order, and the log line and every "is it
 supported" check read the same table.
@@ -961,7 +966,7 @@ supported" check read the same table.
 counts, and the LCR family in encodings too (custom/odd/even/cyclic order,
 10-minute start resolution, `0x90` for off). Adding one means a second model
 class and, at that point, an interface over the methods above; `model.h`
-already holds the types they share. No stub exists for a model nobody has
+and `capabilities.h` already hold the types they share. No stub exists for a model nobody has
 tested, in Python or C++: it would encode guesses.
 
 ---
@@ -974,7 +979,7 @@ tested, in Python or C++: it would encode guesses.
 | Manchester codec | Host tests. Synthesise raw timings (+mark / −space) from bytes, add jitter, invert them, add the leading half-bit, then decode. Also round-trip with the encoder. |
 | Replay | `test_replay.cpp` feeds every file in `tests/captures/` (`Received Raw:` bursts from `dump: raw`, converted by `tools/raw_to_fixture.py`) through the full pipeline. Expected payloads are stored beside each capture. |
 | SIP parsers and model | Host tests using the `[test]` and `[wire]` examples in SPEC.md. Also tests that a schedule edit changes only the bits of its field, and that every quirk helper (5.1 rule 5) is right. |
-| Link and session | `test_link.cpp`, `test_session.cpp`, `test_handshake.cpp`: the pure classes against a scripted controller (`fake_controller.h`), with time passed in. |
+| Link and session | `test_link.cpp`, `test_session.cpp`, `test_handshake.cpp`: the pure classes against a scripted controller (`fake_controller.h`), with time passed in. `test_schedule_editor.cpp`: page edits and the edits waiting for their page, on their own. |
 | Entity reads and writes | `test_entity_values.cpp` and `test_entity_writes.cpp`: what each kind shows, and what each write becomes, including every refusal. `test_entity_board.cpp`: which values are published after a reading, and what a lost link does to each kind of entity. |
 | Edges to bursts | `test_burst_assembler.cpp` (PLAN-GPIO phase 0): the assembler's rules, every SPEC frame round the loop, the Saleae capture in `tests/captures/saleae/` decoded from its raw edges, and how much per-edge jitter that capture survives. |
 | Untrusted input | `test_fuzz.cpp`: random and damaged timings, bits and payloads through every decode path, the session and the entity layer, with fixed seeds. |

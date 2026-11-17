@@ -53,10 +53,10 @@ from .const import (
     GENERATED_INDEX,
     GENERATED_KIND,
 )
+from .entity_schema import entity_schema
 from .errors import ConfigError
 from .expand import expand
 from .models import ESP_TM2, resolve_model
-from .schemas import entity_schema
 
 
 def program_letter(value):

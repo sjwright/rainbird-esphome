@@ -46,6 +46,59 @@ bool ScheduleEditor::add(const PageChange &change) {
   return true;
 }
 
+ScheduleEditor::Asked ScheduleEditor::ask(const PageChange &change, ByteBuf *read) {
+  if (!this->model_.locate(change.field, change.zone, change.program, change.index).has_value()) {
+    return Asked::RANGE;
+  }
+  if (!this->active_) {
+    return this->start(change, read) ? Asked::READ : Asked::RANGE;
+  }
+  if (this->add(change)) {
+    return Asked::JOINED;
+  }
+  for (size_t i = 0; i < this->waiting_count_; i++) {
+    if (this->waiting_[i].same_field(change)) {
+      this->remove_waiting_(i);
+      break;
+    }
+  }
+  if (this->waiting_count_ >= MAX_WAITING) {
+    return Asked::FULL;
+  }
+  this->waiting_[this->waiting_count_++] = change;
+  return Asked::WAITING;
+}
+
+bool ScheduleEditor::next(ByteBuf *read) {
+  if (this->active_ || read == nullptr) {
+    return false;
+  }
+  while (this->waiting_count_ > 0) {
+    // The oldest change picks the page.
+    PageChange oldest = this->waiting_[0];
+    this->remove_waiting_(0);
+    if (!this->start(oldest, read)) {
+      continue;  // ask() located it, so this does not happen
+    }
+    for (size_t i = 0; i < this->waiting_count_;) {
+      if (this->add(this->waiting_[i])) {
+        this->remove_waiting_(i);
+      } else {
+        i++;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+void ScheduleEditor::remove_waiting_(size_t index) {
+  for (size_t i = index; i + 1 < this->waiting_count_; i++) {
+    this->waiting_[i] = this->waiting_[i + 1];
+  }
+  this->waiting_count_--;
+}
+
 ScheduleEditor::Step ScheduleEditor::fail_(const char *reason) {
   this->active_ = false;
   this->reason_ = reason;

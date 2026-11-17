@@ -27,9 +27,9 @@ from .classes import RainbirdComponent
 from .codegen import build_entity
 from .const import CONF_DAY, CONF_PROGRAM, CONF_RAINBIRD_ID, CONF_SLOT, CONF_ZONE
 from .entity_kinds import DAYS, KINDS, FanOut, Scope, platform_keys, resolve_kind
+from .entity_schema import entity_schema
 from .hub_schema import program_letter
 from .models import ESP_TM2
-from .schemas import entity_schema
 
 
 def _day_index(value):

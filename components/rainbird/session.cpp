@@ -197,7 +197,7 @@ void Session::handle_handshake_(const Completion &done) {
 void Session::restart_() {
   // What was learned at startup belongs to the controller that answered then, and so does
   // its state: a command after this is decided on what the new controller reports.
-  this->edit_count_ = 0;
+  this->editor_.drop_waiting();
   if (this->editor_.active()) {
     this->fail_edit_("the controller stopped answering");
   }
@@ -446,7 +446,7 @@ void Session::set_connected_(bool connected, uint32_t now_ms) {
       // a different controller. The edit loses its next step with them.
       this->link_.drop_queued(Priority::USER);
       this->date_after_time_ = false;  // its time was dropped with the other commands
-      this->edit_count_ = 0;           // and so are the edits waiting behind the one in flight
+      this->editor_.drop_waiting();    // and so are the edits waiting behind the one in flight
       // What was read is no longer known to be true: a zone shown running may have stopped.
       // Everything is read again when the controller answers, the schedule included.
       this->forget_state_(true);
@@ -892,41 +892,20 @@ void Session::fail_edit_(const char *reason) {
   this->start_next_edit_();
 }
 
-void Session::remove_edit_(size_t index) {
-  for (size_t i = index; i + 1 < this->edit_count_; i++) {
-    this->edits_[i] = this->edits_[i + 1];
-  }
-  this->edit_count_--;
-}
-
 void Session::start_next_edit_() {
-  while (!this->editor_.active() && this->edit_count_ > 0) {
-    // The oldest edit picks the page.
-    ByteBuf read;
-    if (!this->editor_.start(this->edits_[0], &read)) {
-      this->remove_edit_(0);  // edit_schedule() located it, so this does not happen
-      continue;
-    }
-    if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
-      // Reported, because each caller was told its edit was queued. Nothing would start the
-      // rest later either, so they go too.
-      this->editor_.cancel();
-      this->edit_count_ = 0;
-      SessionEvent event;
-      event.kind = SessionEventKind::EDIT_FAILED;
-      event.reason = "the link could not take a page read, and the edits waiting were dropped";
-      this->push_event_(event);
-      return;
-    }
-    this->remove_edit_(0);
-    // Every other edit waiting for that page shares the read and the write, in the order asked.
-    for (size_t i = 0; i < this->edit_count_;) {
-      if (this->editor_.add(this->edits_[i])) {
-        this->remove_edit_(i);
-      } else {
-        i++;
-      }
-    }
+  ByteBuf read;
+  if (!this->editor_.next(&read)) {
+    return;
+  }
+  if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
+    // Reported, because each caller was told its edit was queued. Nothing would start the
+    // rest later either, so they go too.
+    this->editor_.cancel();
+    this->editor_.drop_waiting();
+    SessionEvent event;
+    event.kind = SessionEventKind::EDIT_FAILED;
+    event.reason = "the link could not take a page read, and the edits waiting were dropped";
+    this->push_event_(event);
   }
 }
 
@@ -941,39 +920,23 @@ ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program,
   if (this->link_down_()) {
     return ControlResult::REFUSED_LINK_DOWN;
   }
-  if (!this->model_.locate(field, zone, program, index).has_value()) {
-    return ControlResult::REFUSED_RANGE;
-  }
-  PageChange edit{field, zone, program, index, value};
-  if (!this->editor_.active()) {
-    ByteBuf read;
-    if (!this->editor_.start(edit, &read)) {
-      return ControlResult::REFUSED_RANGE;
-    }
-    if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
-      this->editor_.cancel();
+  ByteBuf read;
+  switch (this->editor_.ask(PageChange{field, zone, program, index, value}, &read)) {
+    case ScheduleEditor::Asked::READ:
+      if (!this->enqueue_(read, Priority::USER, TagKind::PAGE, this->editor_.page())) {
+        this->editor_.cancel();
+        return ControlResult::REFUSED_BUSY;
+      }
+      return ControlResult::QUEUED;
+    case ScheduleEditor::Asked::JOINED:
+    case ScheduleEditor::Asked::WAITING:
+      return ControlResult::QUEUED;
+    case ScheduleEditor::Asked::FULL:
       return ControlResult::REFUSED_BUSY;
-    }
-    return ControlResult::QUEUED;
-  }
-  // Its page is being read right now: it joins that read and that write.
-  if (this->editor_.add(edit)) {
-    return ControlResult::QUEUED;
-  }
-  // One page at a time on the wire, so this one waits. Each page is read afresh, so two edits
-  // to one page do not undo each other. The same field again takes the later value and goes to
-  // the back: it is the latest thing asked for.
-  for (size_t i = 0; i < this->edit_count_; i++) {
-    if (this->edits_[i].same_field(edit)) {
-      this->remove_edit_(i);
+    case ScheduleEditor::Asked::RANGE:
       break;
-    }
   }
-  if (this->edit_count_ >= EDIT_CAP) {
-    return ControlResult::REFUSED_BUSY;
-  }
-  this->edits_[this->edit_count_++] = edit;
-  return ControlResult::QUEUED;
+  return ControlResult::REFUSED_RANGE;
 }
 
 void Session::handle_page_(const Completion &done) {
