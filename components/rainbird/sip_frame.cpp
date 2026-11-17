@@ -62,6 +62,7 @@ uint8_t byte_at(const std::vector<uint8_t> &bits, size_t bit) {
 size_t read_frame(const std::vector<uint8_t> &bits, size_t bit, bool unescape, Frame *frame) {
   size_t at = bit;
   uint8_t escaped = 0;
+  uint8_t plain = 0;
   auto next = [&](uint8_t *out) {
     if (at + 8 > bits.size()) {
       return false;
@@ -79,6 +80,8 @@ size_t read_frame(const std::vector<uint8_t> &bits, size_t bit, bool unescape, F
         return false;  // 1B followed by something that is not 01, 02 or 03
       }
       escaped |= frame_escape_bit(byte);
+    } else if (frame_needs_escape(byte)) {
+      plain |= frame_escape_bit(byte);
     }
     *out = byte;
     return true;
@@ -103,6 +106,7 @@ size_t read_frame(const std::vector<uint8_t> &bits, size_t bit, bool unescape, F
   }
   at += 8;
   frame->escaped = escaped;
+  frame->plain = plain;
   return at - bit;
 }
 

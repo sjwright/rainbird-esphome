@@ -39,6 +39,7 @@ struct Frame {
   uint8_t payload[MAX_PAYLOAD]{};
   uint8_t length{0};
   uint8_t escaped{0};  // frame_escape_bit() of each byte that arrived escaped
+  uint8_t plain{0};    // frame_escape_bit() of each 1B, 1C or 1D that arrived as itself
 };
 
 // Request: F5 F5 1C. Reply: F5 F5 F5 1C. Length, payload and checksum bytes are escaped.

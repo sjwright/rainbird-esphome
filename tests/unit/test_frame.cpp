@@ -302,6 +302,7 @@ TEST_CASE("escaped frames decode, checked by their checksum") {
   REQUIRE(frames.size() == 1);
   check_payload(frames[0], from_hex("CC 0C 38 1D 0D B7 EA 00 00 01 01 FF FF 00 00 00"));
   CHECK(frames[0].escaped == frame_escape_bit(0x1D));
+  CHECK(frames[0].plain == 0);
 
   // What encode_frame writes, find_frames reads back.
   const uint8_t all[] = {0x1B, 0x1C, 0x1D, 0x00, 0x1B};
@@ -317,6 +318,15 @@ TEST_CASE("escaped frames decode, checked by their checksum") {
   frames = frames_from_bytes(plain.data(), plain.size());
   REQUIRE(frames.size() == 1);
   CHECK(frames[0].escaped == 0);
+  CHECK(frames[0].plain == 0);
+
+  // A 1C sent as itself still decodes, and is noted as unescaped.
+  auto raw = from_hex("F5 F5 F5 1C 03 4C 1C 00 6B 1D");
+  frames = frames_from_bytes(raw.data(), raw.size());
+  REQUIRE(frames.size() == 1);
+  check_payload(frames[0], from_hex("4C 1C 00"));
+  CHECK(frames[0].escaped == 0);
+  CHECK(frames[0].plain == frame_escape_bit(0x1C));
 
   // A wrong checksum is still refused, escaped or not.
   auto bad = from_hex("F5 F5 F5 1C 10 CC 0C 38 1B 03 0D B7 EA 00 00 01 01 FF FF 00 00 00 EC 1D");

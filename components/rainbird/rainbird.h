@@ -193,8 +193,8 @@ class RainbirdComponent final : public PollingComponent, private BoardSink {
   void show_text(void *entity, const std::string &text) override;
   void show_unknown(Domain domain, void *entity) override;
 
-  void note_escapes_(const ByteBuf &payload, bool sent);
-  void note_escapes_(uint8_t escapes, bool sent);
+  void note_escapes_(const ByteBuf &payload);
+  void note_escapes_(const Frame &frame, const char *which);
   void deliver_frame_(const Frame &frame, const char *which, bool controller);
   void transmit_(const Transmission &tx);
   void release_receiver_pads_();
@@ -253,8 +253,6 @@ class RainbirdComponent final : public PollingComponent, private BoardSink {
   bool allow_writes_{false};
   bool experimental_{false};
   bool handshake_{true};
-  uint8_t escapes_sent_logged_{0};
-  uint8_t escapes_received_logged_{0};
   // What the controller's receiver has heard since boot: every burst, and those with a valid frame.
   // Bursts with no frames is a signal that does not decode; no bursts is nothing on the wire.
   uint32_t bursts_heard_{0};

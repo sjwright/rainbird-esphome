@@ -116,7 +116,11 @@ does not, the log now says "No reply to 38" and `on_no_reply` runs.
 Both now follow pyrainbird's later commits rather than a capture (SPEC 2.4 and
 5.4). The hub escapes `1C` as `1B 01` and `1B` as `1B 02`, the other way
 round from before, and refuses manual runs and the zone test over 100
-minutes. The log notes the first `1B` or `1C` the controller escapes, which
-settles the table. If instead `4C` gets no reply at :27 or :28 seconds, the old
-order was right. A 101-minute `39` with `send_raw` would settle the limit.
+minutes. On 17 November at 19:28, firmware built from `292a179` decoded every
+`4C` while the controller's minute was 28 (`1C`). That rules out the old order
+for a `1C` in a reply, unless the controller sent it unescaped. The log now
+names every `1B`, `1C` or `1D` in every frame, escaped or not, so the next
+xx:27–xx:29 shows which. Requests are still unproven: no request with one of
+those bytes has been sent. A 101-minute `39` with `send_raw` would settle the
+limit.
 

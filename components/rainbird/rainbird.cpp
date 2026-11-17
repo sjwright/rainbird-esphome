@@ -358,7 +358,7 @@ void RainbirdComponent::transmit_(const Transmission &tx) {
   }
   char pretty[format_hex_pretty_size(MAX_PAYLOAD)];
   ESP_LOGD(TAG, "Send %s", format_hex_pretty_to(pretty, tx.payload.data, tx.payload.size));
-  this->note_escapes_(tx.payload, true);
+  this->note_escapes_(tx.payload);
   // The transmitter pin's inverted: flag is the electrical polarity. Bytes stay normal.
   std::vector<int32_t> timings = manchester_encode(tx.bytes, tx.size, Polarity::NORMAL, Phase::ALIGNED);
   auto call = this->transmitter_->transmit();
@@ -397,7 +397,9 @@ bool RainbirdReceiver::on_receive(remote_base::RemoteReceiveData data) {
   return true;
 }
 
-void RainbirdComponent::note_escapes_(const ByteBuf &payload, bool sent) {
+// Every 1B, 1C or 1D in a frame is logged, each time, both ways: they settle the escape table
+// (SPEC 2.4), and a request or reply that goes wrong right after one points there.
+void RainbirdComponent::note_escapes_(const ByteBuf &payload) {
   // The length and checksum are escaped too, so recompute what encode_frame escaped.
   uint8_t used = 0;
   auto note = [&used](uint8_t byte) {
@@ -408,32 +410,29 @@ void RainbirdComponent::note_escapes_(const ByteBuf &payload, bool sent) {
   for (uint8_t i = 0; i < payload.size; i++)
     note(payload.data[i]);
   note(frame_checksum(payload.size, payload.data));
-  this->note_escapes_(used, sent);
-}
-
-void RainbirdComponent::note_escapes_(uint8_t escapes, bool sent) {
-  // Logged once per byte and direction: only 1D -> 1B 03 in a reply has been seen (SPEC 2.4).
-  // The first 1B or 1C either way settles the rest of the table.
-  uint8_t &logged = sent ? this->escapes_sent_logged_ : this->escapes_received_logged_;
-  uint8_t fresh = escapes & static_cast<uint8_t>(~logged);
+  const uint8_t opcode = payload.size > 0 ? payload.data[0] : 0;
   for (uint8_t byte = FRAME_ESCAPE; byte <= FRAME_END; byte++) {
-    if ((fresh & frame_escape_bit(byte)) == 0)
-      continue;
-    if (sent) {
-      ESP_LOGI(TAG,
-               "Sending %02X escaped as 1B %02X for the first time. A NAK or no answer to this request "
-               "would mean requests are not escaped.",
+    if ((used & frame_escape_bit(byte)) != 0) {
+      ESP_LOGI(TAG, "Send %02X: %02X escaped as 1B %02X. A NAK or no answer would point at the escape table.", opcode,
                byte, frame_escape_code(byte));
-    } else {
-      ESP_LOGI(TAG, "The controller escaped %02X as 1B %02X (first time seen)", byte, frame_escape_code(byte));
     }
   }
-  logged |= fresh;
+}
+
+void RainbirdComponent::note_escapes_(const Frame &frame, const char *which) {
+  const uint8_t opcode = frame.length > 0 ? frame.payload[0] : 0;
+  for (uint8_t byte = FRAME_ESCAPE; byte <= FRAME_END; byte++) {
+    const uint8_t bit = frame_escape_bit(byte);
+    if ((frame.escaped & bit) != 0)
+      ESP_LOGI(TAG, "%s %02X: %02X arrived as 1B %02X", which, opcode, byte, frame_escape_code(byte));
+    if ((frame.plain & bit) != 0)
+      ESP_LOGI(TAG, "%s %02X: %02X arrived unescaped", which, opcode, byte);
+  }
 }
 
 void RainbirdComponent::deliver_frame_(const Frame &frame, const char *which, bool controller) {
   char pretty[format_hex_pretty_size(MAX_PAYLOAD)];
-  this->note_escapes_(frame.escaped, false);
+  this->note_escapes_(frame, which);
   if (!controller) {
     // The monitor hears another master's requests. They are logged for protocol work and go
     // nowhere else: on_frame and on_nak report the controller's replies (PLAN 4.5).

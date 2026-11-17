@@ -279,8 +279,9 @@ payload with `1D`, not of the bytes on the wire. One sample also fits another ru
 XOR with `1E` gives `1D → 03` and `1C → 02`, but `1B → 05`.
 
 Unknown: whether requests must be escaped too. The hub escapes them, with the
-same table, and logs the first time it sends each escape, so a NAK or a timeout
-right after that log line points here. It decodes a reply plain first, then
+same table. It logs every `1B`, `1C` or `1D` in every frame, both ways: each
+escape it sends, each one it receives, and any of the three that arrives
+unescaped. A NAK or a timeout right after a send line points here. It decodes a reply plain first, then
 with escapes undone, and takes either only with a good checksum and end byte.
 
 **Relevance:** `4C` carries the time, so without this its reply fails at
