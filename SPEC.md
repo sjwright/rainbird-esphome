@@ -28,7 +28,12 @@ Four sources feed this document:
   commands to the LNK2 over WiFi, wrapped in JSON-RPC (`tunnelSip`). Its
   command schema (`pyrainbird/resources/sipcommands.yaml`), decoders
   (`pyrainbird/rainbird.py`), docs (`docs/*.md`) and test captures of real
-  device replies (`tests/testdata/*.yaml`) supply the command set.
+  device replies (`tests/testdata/*.yaml`) supply the command set. Later
+  commits, read up to `2b23d42` (17 November 2026), add a device emulator
+  (`pyrainbird/testing/`). Cited where used: the escape table (2.4), the manual
+  run limit (5.4), the program frequency codes (pages `10`–`12`) and the queue
+  program bits (5.3). The emulator's own defaults are not evidence of what a
+  TM2 does.
 
 The LNK2 is a bridge. The hex string pyrainbird puts in a `tunnelSip` request
 is exactly the payload the LNK2 sends down the wire inside a serial frame, and
@@ -230,17 +235,36 @@ These were computed from the rule above, not captured.
 - Keep one request in flight at a time. pyrainbird notes that controllers only
   handle one client request at a time. **[doc]**
 
-### 2.4 Byte stuffing [wire] [inferred]
+### 2.4 Byte stuffing [wire] [code] [ME3]
 
 After the `1C` start byte, the controller sends a `1B`, `1C` or `1D` as `1B`
-followed by the byte minus `1A`. The length and checksum count the original
-bytes.
+followed by a code. The length and checksum count the original bytes.
 
 | Byte | On the wire | Seen |
 |------|-------------|------|
-| `1B` | `1B 01` | not yet: inferred |
-| `1C` | `1B 02` | not yet: inferred |
+| `1C` | `1B 01` | pyrainbird and the ME3; not yet from a TM2 |
+| `1B` | `1B 02` | pyrainbird and the ME3; not yet from a TM2 |
 | `1D` | `1B 03` | **[wire]** 13 Nov 2026 |
+
+⚠ **Conflict** with this section's earlier reading, "the byte minus `1A`",
+which swaps the first two (`1B → 1B 01`, `1C → 1B 02`). That rule was fitted
+to the one `1D` sample and nothing else. Three things favour the table above:
+
+- pyrainbird's frame code (`pyrainbird/testing/crypto.py`, #650) has it. The
+  commits that later corrected that file's preamble from the LNK2 firmware
+  (#667) and aligned its docs with the firmware left it as it was. Their
+  firmware details include the controller's three `F5` bytes, which match
+  our captures.
+- 9.2 has the same table for the ME3's UART link, from adidooo's captures.
+  pyrainbird says the LNK2's UART mode uses the same stuffing as its
+  Manchester mode.
+- An arbitrary order is an odd thing to make up. Someone inventing a rule
+  would more likely have picked the arithmetic one.
+
+The hub uses the table above both ways. With one escaped byte in a frame, the
+wrong table fails the checksum, so the first escaped `1B` or `1C` in a reply
+settles it: `4C` at :27 or :28 seconds does it. With a `1B` and a `1C` both
+in a frame, the two readings give the same checksum.
 
 Seen once, in a `4C` reply with the clock at 12:56:29
 (`tests/captures/tm2-escaped-reply.txt`):
@@ -254,8 +278,8 @@ The frame is one byte longer than `len` says, and `EB` is the checksum of the
 payload with `1D`, not of the bytes on the wire. One sample also fits another rule:
 XOR with `1E` gives `1D → 03` and `1C → 02`, but `1B → 05`.
 
-Unknown: whether requests must be escaped too. The hub escapes them, by the
-same rule, and logs the first time it sends each escape, so a NAK or a timeout
+Unknown: whether requests must be escaped too. The hub escapes them, with the
+same table, and logs the first time it sends each escape, so a NAK or a timeout
 right after that log line points here. It decodes a reply plain first, then
 with escapes undone, and takes either only with a good checksum and end byte.
 
@@ -311,7 +335,9 @@ The controller accepted the command `<echo>`. Example: `01 39`.
 
 The controller rejected `<echo>`. `<code>` is a bitmask. The frame layout is
 in pyrainbird's schema, but the bit meanings below come only from its docs
-(open question 15):
+(open question 15). One real log backs code `04`: a `39` with a run time too
+long, NAKed with `04` (pyrainbird issue #178, controller not stated).
+pyrainbird's emulator uses `01`, `02` and `04` the same way.
 
 | Bit | Value | Meaning |
 |-----|-------|---------|
@@ -352,7 +378,7 @@ From `models.yaml` and `docs/PROTOCOL_ESP_ME_TM2.md`:
 | Start times per program | 4 |
 | Run-time schedule pages | 6 (`0x80`–`0x85`, 2 stations each) |
 | Rain delay | 0–14 days |
-| Max run time | 21 600 s (6 h). The manual run command `39` can only carry 1–255 minutes. |
+| Max run time | 21 600 s (6 h). The manual run command `39` carries 1–255 minutes, but a manual run stops at 100 (5.4). |
 | Seasonal adjust (water budget) | per program. `models.yaml` sets a maximum of 200 %. The only stated minimum is 10 %, in the docstring of pyrainbird's `set_water_budget`; nothing enforces it (open question 14). |
 
 ### 4.3 Feature flags [doc]
@@ -633,12 +659,16 @@ pyrainbird maps any program number above 4 to 0, which loses the
 | Part | Meaning |
 |------|---------|
 | `QZ & 0x1F` | Zone number. Zone 0 ends the list. |
-| `QZ & 0xE0` | Always `0x20` in the capture of program A. It may encode the program. **[inferred]** |
+| `QZ >> 5` | The program plus 1: `1` is A, `2` B, `3` C, `0` a manual run **[code]** |
 | `TT TT` | Run time in seconds, big-endian |
 
 Example **[test]**: `BB 01 21 05 D0 22 04 B0 23 01 A4 24 04 B0 25 02 58 00…`
 = zone 1 for 1488 s (running), zone 2 for 1200 s, zone 3 for 420 s, zone 4 for
 1200 s, zone 5 for 600 s.
+
+The top three bits come from the Rain Bird app's queue parser, as cited in
+pyrainbird #670 (`((program + 1) & 7) << 5 | zone`). The capture above, all
+`0x20`, is program A, which fits. A manual-run entry has not been captured.
 
 ⚠ **Conflict:** `docs/PROTOCOL_ESP_ME_TM2.md` says the upgraded TM2 uses a
 byte-swapped, 4-byte-per-entry queue format. The TM2 test captures and
@@ -742,8 +772,20 @@ Example: `B6 00 03` = 3 days.
 Example: `39 00 01 06` runs zone 1 for 6 minutes.
 
 The run replaces whatever is running now; pyrainbird describes it as
-overriding the current program. **[doc]** Runs are limited to 1–255 minutes
-by the one-byte field.
+overriding the current program. **[doc]** The one-byte field holds 255
+minutes, but a manual run stops at **100** **[reported]**:
+
+- On an ESP-RZXe with an LNK2, 100 minutes works and 101 fails (pyrainbird
+  issue #618). Home Assistant core issue #105007 reports the same limit, with
+  the controller not stated.
+- The Rain Bird app's manual run picker stops at 1 h 40 min.
+- pyrainbird now refuses a `39` over 6000 seconds for every mains controller,
+  the three TM2 model IDs included (`max_manual_run_seconds` in
+  `models.yaml`, #658).
+
+Not yet tried on a TM2. The hub caps `39`, `4B` and `3A` at 100 minutes; a
+101-minute `39` with `send_raw` would settle it, expecting NAK code `04`
+(3.3).
 
 **Relevance:** Zone switches. Turning a zone on sends `39`, and turning it off
 sends `40`. Pair each zone with a "run duration" number entity.
@@ -949,7 +991,13 @@ switch.
 | 2 | synchro | Days left until the next cyclic run |
 | 3 | permanentDaysOff | Days-of-week mask of days never to water, for odd, even and cyclic programs **[doc]** |
 | 4 | ? | See below |
-| 5 | frequency | `0` custom days, `1` cyclic, `2` odd days, `3` even days |
+| 5 | frequency | `0` custom days, `1` cyclic, `2` odd days, `3` even days. pyrainbird's decoder adds `4` off and `5` odd days **[code]** |
+
+Codes `4` and `5` come from pyrainbird #660, which reads them for every
+program-based SIP controller, the TM2 included. It gives `2` as "odd, or odd
+excluding the 31st", so one of the two odd codes may skip the 31st. Neither
+has been seen from a TM2, and the TM2 front panel may not offer "off". The
+hub shows both and writes them only with `experimental: true`.
 
 Example: `A0 00 10 6A 06 01 00 64 01` = program A, cyclic every 6 days, next
 run in 1 day. Its days mask `0x6A` (Mon, Wed, Fri, Sat) is ignored because
@@ -1124,7 +1172,8 @@ component's debug log will settle most of them.
 8. **Schedule writes** (`21`) for pages `00`, `1P`, `6P`, `8N` and `20`: test
    one page at a time and read back.
 9. **Program page byte 4**: what is it?
-10. **Queue page 1 high bits** (`QZ & 0xE0`): is it the program number?
+10. ~~**Queue page 1 high bits**~~: answered from the app's parser (5.3). A
+    capture of a queued manual run (top bits `0`) would confirm it.
 11. **`4A`**: other event IDs, whether event 1 really changes when the
     schedule is edited at the front panel, and whether the timestamp is
     controller local time or UTC.
@@ -1133,13 +1182,19 @@ component's debug log will settle most of them.
 14. **Seasonal adjust minimum** (`31`): does the controller accept values below
     10 %, and what does 0 % do?
 15. **NAK code bits**: do the codes the TM2 actually returns match the
-    documented bit meanings (3.3)? Record every NAK seen while probing.
+    documented bit meanings (3.3)? Record every NAK seen while probing. `04`
+    for an out-of-range value has been seen on some controller (3.3).
 16. **TM2 idle levels** (1.1, 1.4): with the LNK2 fitted and idle, measure J2
     and J4 against J3 with a meter. Does J4 sit at J3, as inferred, or at about
     3.2 V, as on the ME3?
 17. **Receive LED current** (1.3): how much current does J2 deliver into an
     LED? Measure it with a meter in series with optocoupler 1's LED. It
     decides which optocoupler grade and load resistor give clean edges.
+18. **Escape table** (2.4): capture a reply with an escaped `1B` or `1C`, such
+    as `4C` at :27 or :28 seconds.
+19. **Manual run limit** (5.4): does a TM2 refuse a 101-minute `39`?
+20. **Frequency codes `4` and `5`** (pages `10`–`12`): can the TM2 set or
+    report them, and which odd code skips the 31st?
 
 ---
 

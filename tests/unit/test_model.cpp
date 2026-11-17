@@ -123,7 +123,7 @@ TEST_CASE("queue FF is idle or manual, and seconds are big-endian") {
   REQUIRE(list.queue.has_value());
   CHECK(list.queue->count == 5);
   CHECK(list.queue->slots[0].zone == 1);
-  CHECK(list.queue->slots[0].flags == 0x20);
+  CHECK(list.queue->slots[0].program == 0);
   CHECK(list.queue->slots[0].seconds == 1488);
   CHECK(list.queue->slots[2].zone == 3);
   CHECK(list.queue->slots[2].seconds == 420);

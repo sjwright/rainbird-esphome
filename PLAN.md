@@ -228,7 +228,7 @@ comes from:
 | `start` | → `38` |
 | `seasonal_adjust` | `30` → `31`. 5–200 %, from the TM2 manual. |
 | `running` | `3B 00` byte 9 |
-| `frequency` | page `1P` byte 5. The option index is the wire byte. |
+| `frequency` | page `1P` byte 5. The option index is the wire byte. Options 4 and 5 (off, odd) are pyrainbird's; writing them needs `experimental`. |
 | `watering_day` (+ `day:`) | page `1P` byte 0, one bit each. Used by `Custom days`. |
 | `cycle_days` | page `1P` byte 1 |
 | `days_until_next` | page `1P` byte 2 |
@@ -257,9 +257,10 @@ argument that no entity can take:
 | `rainbird.send_raw` | `data` (templatable bytes) | Any payload; the reply arrives through `on_frame`. **Experimental only.** Validation fails without `experimental: true`. |
 
 Durations are rounded **up** to whole minutes. A zone outside 1–255 or a
-duration outside 1 ms to 255 minutes is refused, never clamped: a negative
+duration outside 1 ms to 100 minutes is refused, never clamped: a negative
 minutes value in a template wraps to a huge duration, and clamping that would
-water for over four hours (`plan_zone_run()` in `entity_writes.cpp`).
+water for the longest run allowed (`plan_zone_run()` in `entity_writes.cpp`).
+The 100-minute cap is the manual run limit in SPEC 5.4, not the byte's 255.
 
 **Everything else uses ESPHome's own automations:**
 
@@ -929,7 +930,7 @@ through an interface nobody else implements.
 
 `ESP_TM2` is a `Model`: its name, 12 zones, 4 start slots, program letters
 `ABC`, and the value ranges from the manual (seasonal adjust 5–200 %, rain
-delay up to 14 days, runs up to 255 minutes). It is used to:
+delay up to 14 days, manual runs up to 100 minutes). It is used to:
 
 - reject any other `model:` value, with a link to the issue tracker;
 - check zone numbers, program letters and number ranges at validation;

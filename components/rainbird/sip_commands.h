@@ -33,8 +33,10 @@ uint16_t be16(uint8_t hi, uint8_t lo);
 static constexpr uint8_t QUEUE_PROGRAM_NONE = 0xFF;
 
 // NAK code bit 0, from the pyrainbird docs: the command is not supported. SPEC question 15
-// is still open: the TM2 may not use the other bits the same way, so nothing reads them.
+// is still open for the TM2, so only the log reads the other codes.
 bool nak_is_unsupported(uint8_t code);
+// A value out of range (SPEC 3.3). pyrainbird has a real 39 NAKed with it; no TM2 one yet.
+static constexpr uint8_t NAK_OUT_OF_RANGE = 0x04;
 
 // Run-time pages 0x80–0x85 hold two 1-based zones each. Zone 1 is page 0x80.
 // Zone 0 has no page; the functions return 0.
@@ -57,6 +59,10 @@ static constexpr uint8_t FREQ_CUSTOM = 0;
 static constexpr uint8_t FREQ_CYCLIC = 1;
 static constexpr uint8_t FREQ_ODD = 2;
 static constexpr uint8_t FREQ_EVEN = 3;
+// 4 and 5 are from pyrainbird's decoder, not a TM2 capture: off, and odd days again. One of
+// the two odd codes may skip the 31st. Writing either needs experimental (SPEC pages 10-12).
+static constexpr uint8_t FREQ_OFF = 4;
+static constexpr uint8_t FREQ_ODD_ALT = 5;
 
 static constexpr uint16_t START_TIME_OFF = 0xFFFF;
 
@@ -193,8 +199,8 @@ struct QueueNow {
 };
 
 struct QueueSlot {
-  uint8_t zone{0};   // low 5 bits
-  uint8_t flags{0};  // high 3 bits, 0x20 in the program A capture
+  uint8_t zone{0};                      // low 5 bits
+  uint8_t program{QUEUE_PROGRAM_NONE};  // high 3 bits less 1, so 0 is A; 0 there is a manual run
   uint16_t seconds{0};
 };
 

@@ -16,7 +16,7 @@ struct ModelLimits {
   uint16_t seasonal_min_percent;
   uint16_t seasonal_max_percent;
   uint16_t rain_delay_max_days;
-  uint8_t run_max_minutes;  // 39, 4B and 3A take minutes in one byte
+  uint8_t run_max_minutes;  // 39, 4B and 3A: manual runs and the zone test
 };
 
 struct RequestList {

@@ -101,7 +101,7 @@ class RainbirdComponent final : public PollingComponent, private BoardSink {
   // Every write from an entity. `value` is the switch state, number, option index or minutes.
   bool submit(const EntityBinding &binding, float value);
   // rainbird.zone.start / queue. The values come straight from the action, so they may come from a
-  // template: anything outside zone 1-255 or 1 ms to 255 minutes is refused, never clamped.
+  // template: anything outside zone 1-255 or 1 ms to 100 minutes is refused, never clamped.
   bool run_zone(int32_t zone, uint32_t duration_ms, bool queue);
   // Controller clock entity and the sync button. Sends 11 and 13.
   bool set_controller_clock(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second);

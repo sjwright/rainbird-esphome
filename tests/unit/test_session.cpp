@@ -305,6 +305,26 @@ TEST_CASE("a zone run is sent once, then a short poll follows the ack") {
   CHECK(fake.requests[1] == "3F 00");
 }
 
+TEST_CASE("manual runs and the zone test stop at 100 minutes") {
+  SessionConfig config = config_with({Field::ZONES_RUNNING});
+  config.experimental = true;
+  Running live(config);
+  Control run;
+  run.op = ControlOp::RUN_ZONE;
+  run.zone = 1;
+  run.value = 101;
+  CHECK(live.session.control(run, live.now) == ControlResult::REFUSED_RANGE);
+  run.op = ControlOp::QUEUE_ZONE;
+  CHECK(live.session.control(run, live.now) == ControlResult::REFUSED_RANGE);
+  Control test_all;
+  test_all.op = ControlOp::TEST_ZONES;
+  test_all.value = 101;
+  CHECK(live.session.control(test_all, live.now) == ControlResult::REFUSED_RANGE);
+  run.op = ControlOp::RUN_ZONE;
+  run.value = 100;
+  CHECK(live.session.control(run, live.now) == ControlResult::QUEUED);
+}
+
 TEST_CASE("turning a zone off stops only when that zone is running") {
   Running live(config_with({Field::ZONES_RUNNING}));
   Session &session = live.session;
@@ -562,6 +582,22 @@ TEST_CASE("experimental commands stay off until the config and the probe allow t
   REQUIRE(session.control(test_all, now) == ControlResult::QUEUED);
   run_session(session, fake, now, 5000);
   CHECK(fake.requests == std::vector<std::string>{"3A 02"});
+}
+
+TEST_CASE("frequencies 4 and 5, seen only in pyrainbird, need experimental to write") {
+  SessionConfig config = config_with({Field::FREQUENCY});
+  config.allow_writes = true;
+  config.pages.add(0x10);
+  Running plain(config);
+  CHECK(plain.session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_OFF, plain.now) ==
+        ControlResult::REFUSED_EXPERIMENTAL);
+  CHECK(plain.session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_ODD_ALT, plain.now) ==
+        ControlResult::REFUSED_EXPERIMENTAL);
+  CHECK(plain.session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_EVEN, plain.now) == ControlResult::QUEUED);
+
+  config.experimental = true;
+  Running trying(config);
+  CHECK(trying.session.edit_schedule(Field::FREQUENCY, 0, 0, 0, FREQ_OFF, trying.now) == ControlResult::QUEUED);
 }
 
 TEST_CASE("a schedule edit changes one field and checks the page that comes back") {

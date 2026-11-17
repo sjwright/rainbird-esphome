@@ -171,7 +171,7 @@ Set under a zone or in `zone_defaults` by hub key, or written by hand as a
 | Hub key | Platform key | Type | By default | Default name | Writes | Notes |
 |---|---|---|---|---|---|---|
 | `valve_switch` | `valve` | switch | yes | `{zone}` | command | On runs the zone for its run duration. Off stops all watering. |
-| `run_duration_number` | `run_duration` | number, 1 to 255 min | yes | `{zone} duration` | kept on the device | Minutes the valve switch and queue button run the zone for. |
+| `run_duration_number` | `run_duration` | number, 1 to 100 min | yes | `{zone} duration` | kept on the device | Minutes the valve switch and queue button run the zone for. |
 | `running_binary_sensor` | `running` | binary_sensor |  | `{zone} running` | read-only | The same state as the valve switch, read-only. |
 | `queue_button` | `queue` | button |  | `Queue {zone}` | command | Adds the zone to the queue for its run duration. |
 | `run_time_numbers` | `run_time` | number, 0 to 65535 min |  | `{zone} {program} run time` | schedule page | One per program; a platform entry also takes `program:`. |
@@ -190,7 +190,7 @@ Set under a program or in `program_defaults` by hub key, or written by hand with
 | `days_until_next_number` | `days_until_next` | number, 0 to 255 d |  | `{program} days until next run` | schedule page |  |
 | `watering_day_switches` | `watering_day` | switch |  | `{program} {day}` | schedule page | One per day; a platform entry also takes `day:`. |
 | `start_time_switches` | `start_time_enabled` | switch |  | `{program} start {slot} enabled` | schedule page | One per start slot; a platform entry also takes `slot:`. Turning one on writes the time its `start_time` shows. |
-| `frequency_select` | `frequency` | select |  | `{program} frequency` | schedule page | `Custom days`, `Cyclic`, `Odd days` or `Even days`. |
+| `frequency_select` | `frequency` | select |  | `{program} frequency` | schedule page | `Custom days`, `Cyclic`, `Odd days` or `Even days`. `Off` and `Odd days (code 5)` show what pyrainbird says the controller can report; choosing either needs `experimental: true`. |
 | `start_time_datetimes` | `start_time` | datetime |  | `{program} start {slot}` | schedule page | One per start slot; a platform entry also takes `slot:`. |
 
 ### Controller entities
@@ -221,7 +221,7 @@ These are only written by hand, as `platform: rainbird` entries under the type's
 | `refresh` | button | `Refresh from controller` | command | Reads everything again, the schedule included. |
 | `rain_delay` | number, 0 to 14 d | `Rain delay` | command |  |
 | `station_delay` | number, 0 to 32400 s | `Delay between zones` | schedule page |  |
-| `test_duration` | number, 1 to 255 min | `Test duration` | kept on the device | Minutes per zone for the test button. |
+| `test_duration` | number, 1 to 100 min | `Test duration` | kept on the device | Minutes per zone for the test button. |
 | `irrigation_enabled` | switch | `Irrigation enabled` | command | Needs `experimental: true`. |
 | `rain_sensor_bypass` | switch | `Ignore rain sensor` | schedule page |  |
 | `ends_at` | text_sensor | `Watering ends` | read-only | When the time remaining runs out. Changes once per zone. Needs `time_id`. |
@@ -242,8 +242,9 @@ Three actions take arguments no entity can:
 | `rainbird.send_raw` | `data` (a list of bytes) | Sends any request once. The reply arrives through `on_frame`. Needs `experimental: true`. |
 
 Both zone arguments can be templates. A duration is rounded up to whole minutes.
-A zone outside 1 to 255 or a duration outside 1 ms to 255 minutes is refused,
-never clamped.
+A zone outside 1 to 255 or a duration outside 1 ms to 100 minutes is refused,
+never clamped. Other Rain Bird controllers refuse a manual run over 100 minutes,
+and the TM2 probably does too.
 
 [packages/ha-actions.yaml](packages/ha-actions.yaml) defines Home Assistant
 actions (`run_zone`, `queue_zone`, `set_rain_delay`, `stop_watering`) on top of

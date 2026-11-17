@@ -17,7 +17,7 @@ static constexpr uint16_t TM2_RECEIVE_SYMBOLS = 448;
 static constexpr uint16_t TM2_SEASONAL_MIN_PERCENT = 5;
 static constexpr uint16_t TM2_SEASONAL_MAX_PERCENT = 200;
 static constexpr uint16_t TM2_RAIN_DELAY_MAX_DAYS = 14;
-// 39, 4B and 3A take minutes in one byte.
-static constexpr uint8_t TM2_RUN_MAX_MINUTES = 255;
+// Manual runs (39, 4B) and the zone test (3A), SPEC 5.4.
+static constexpr uint8_t TM2_RUN_MAX_MINUTES = 100;
 
 }  // namespace esphome::rainbird

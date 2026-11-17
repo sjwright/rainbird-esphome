@@ -55,7 +55,7 @@ bool whole_minutes(float value, uint8_t *minutes);
 // Every write from an entity. `value` is the switch state, number, option index or minutes.
 WritePlan plan_write(const EntityBinding &binding, float value, const WriteContext &context);
 // rainbird.zone.start / queue. The values may come from a template: anything outside zone
-// 1-255 or 1 ms to 255 minutes is refused, never clamped. A part minute rounds up.
+// 1-255 or 1 ms to 100 minutes is refused, never clamped. A part minute rounds up.
 WritePlan plan_zone_run(int32_t zone, uint32_t duration_ms, bool queue);
 
 }  // namespace esphome::rainbird

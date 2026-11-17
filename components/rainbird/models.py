@@ -23,7 +23,9 @@ class Model:
     seasonal_min_percent: int
     seasonal_max_percent: int
     rain_delay_max_days: int
-    # 39, 4B and 3A take minutes in one byte.
+    # Manual runs (39, 4B) and the zone test (3A), in minutes. The byte holds 255, but
+    # pyrainbird caps manual runs at 100 on every mains controller, the TM2 included, and an
+    # ESP-RZXe refuses 101 (SPEC 5.4).
     run_max_minutes: int
     # Escaped queue replies, including Manchester phase and the idle tail, fit this many symbols.
     receive_symbols: int
@@ -37,7 +39,7 @@ ESP_TM2 = Model(
     seasonal_min_percent=5,  # "from 5% up to 200%"
     seasonal_max_percent=200,
     rain_delay_max_days=14,  # "Suspend watering for up to 14 days"
-    run_max_minutes=255,
+    run_max_minutes=100,  # the Rain Bird app's manual run stops at 1 h 40 min
     receive_symbols=448,
 )
 

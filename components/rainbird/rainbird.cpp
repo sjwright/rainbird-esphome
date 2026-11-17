@@ -250,10 +250,13 @@ void RainbirdComponent::handle_events_() {
         this->show_unknown_();
         break;
       case SessionEventKind::NAK:
-        // Bit 0 is "not supported", and the session has dropped that capability. Any other code
-        // is more likely a request this component got wrong (SPEC 3.3, question 15).
+        // Bit 0 is "not supported", and the session has dropped that capability. Bit 2 is a value
+        // out of range, which a real 39 NAK has shown. Any other code is more likely a request this
+        // component got wrong (SPEC 3.3, question 15).
         if (nak_is_unsupported(event.code)) {
           ESP_LOGI(TAG, "The controller does not support %02X", event.opcode);
+        } else if (event.code == NAK_OUT_OF_RANGE) {
+          ESP_LOGW(TAG, "The controller refused %02X with code 04: a value is out of range", event.opcode);
         } else {
           ESP_LOGW(TAG, "The controller refused %02X with code %02X", event.opcode, event.code);
         }
@@ -410,6 +413,7 @@ void RainbirdComponent::note_escapes_(const ByteBuf &payload, bool sent) {
 
 void RainbirdComponent::note_escapes_(uint8_t escapes, bool sent) {
   // Logged once per byte and direction: only 1D -> 1B 03 in a reply has been seen (SPEC 2.4).
+  // The first 1B or 1C either way settles the rest of the table.
   uint8_t &logged = sent ? this->escapes_sent_logged_ : this->escapes_received_logged_;
   uint8_t fresh = escapes & static_cast<uint8_t>(~logged);
   for (uint8_t byte = FRAME_ESCAPE; byte <= FRAME_END; byte++) {
@@ -419,9 +423,9 @@ void RainbirdComponent::note_escapes_(uint8_t escapes, bool sent) {
       ESP_LOGI(TAG,
                "Sending %02X escaped as 1B %02X for the first time. A NAK or no answer to this request "
                "would mean requests are not escaped.",
-               byte, byte - FRAME_ESCAPE_OFFSET);
+               byte, frame_escape_code(byte));
     } else {
-      ESP_LOGI(TAG, "The controller escaped %02X as 1B %02X (first time seen)", byte, byte - FRAME_ESCAPE_OFFSET);
+      ESP_LOGI(TAG, "The controller escaped %02X as 1B %02X (first time seen)", byte, frame_escape_code(byte));
     }
   }
   logged |= fresh;

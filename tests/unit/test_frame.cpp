@@ -51,7 +51,7 @@ TEST_CASE("escaped TM2 queue replies fit the configured RMT capacity") {
     size_t count = 1;
     if (frame_needs_escape(byte)) {
       bytes[0] = FRAME_ESCAPE;
-      bytes[1] = byte - FRAME_ESCAPE_OFFSET;
+      bytes[1] = frame_escape_code(byte);
       count = 2;
     }
     return manchester_encode(bytes, count, Polarity::NORMAL, Phase::ALIGNED).size();
@@ -287,7 +287,7 @@ TEST_CASE("1B, 1C and 1D are escaped on the way out") {
   const uint8_t all[] = {0x1B, 0x1C, 0x1D};
   size = encode_frame(all, sizeof(all), false, frame, sizeof(frame));
   // Checksum 03 + 1B + 1C + 1D = 57.
-  CHECK(to_hex(frame, size) == "F5 F5 1C 03 1B 01 1B 02 1B 03 57 1D");
+  CHECK(to_hex(frame, size) == "F5 F5 1C 03 1B 02 1B 01 1B 03 57 1D");
 
   // A length of 1D is escaped as well.
   uint8_t long_payload[0x1D] = {};
@@ -321,6 +321,15 @@ TEST_CASE("escaped frames decode, checked by their checksum") {
   // A wrong checksum is still refused, escaped or not.
   auto bad = from_hex("F5 F5 F5 1C 10 CC 0C 38 1B 03 0D B7 EA 00 00 01 01 FF FF 00 00 00 EC 1D");
   CHECK(frames_from_bytes(bad.data(), bad.size()).empty());
+  // 1B 01 is 1C and 1B 02 is 1B, the table pyrainbird and the ME3 captures give. A 27-minute
+  // run of zone 3 (1B in the payload) as a reply: 1C 04 39 00 03 1B 02 5B 1D.
+  auto run27 = from_hex("F5 F5 F5 1C 04 39 00 03 1B 02 5B 1D");
+  frames = frames_from_bytes(run27.data(), run27.size());
+  REQUIRE(frames.size() == 1);
+  check_payload(frames[0], from_hex("39 00 03 1B"));
+  // With 1B 01 there, the byte is 1C and the checksum fails.
+  auto swapped = from_hex("F5 F5 F5 1C 04 39 00 03 1B 01 5B 1D");
+  CHECK(frames_from_bytes(swapped.data(), swapped.size()).empty());
   // 1B followed by anything but 01, 02 or 03 is not an escape.
   auto odd = from_hex("F5 F5 F5 1C 02 01 1B 05 21 1D");
   CHECK(frames_from_bytes(odd.data(), odd.size()).empty());

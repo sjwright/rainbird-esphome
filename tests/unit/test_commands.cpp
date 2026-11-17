@@ -200,9 +200,17 @@ TEST_CASE("ack, nak and live status") {
   const uint16_t seconds[] = {1488, 1200, 420, 1200, 600};
   for (int i = 0; i < 5; i++) {
     CHECK(list.slots[i].zone == zones[i]);
-    CHECK(list.slots[i].flags == 0x20);
+    CHECK(list.slots[i].program == 0);  // program A
     CHECK(list.slots[i].seconds == seconds[i]);
   }
+  // The top 3 bits are the program plus 1: 0 is a manual run, 0x60 is program C.
+  bytes = from_hex("BB 01 03 00 3C 62 00 78 00 00 00");
+  REQUIRE(parse_queue_list(bytes.data(), bytes.size(), &list));
+  REQUIRE(list.count == 2);
+  CHECK(list.slots[0].zone == 3);
+  CHECK(list.slots[0].program == QUEUE_PROGRAM_NONE);
+  CHECK(list.slots[1].zone == 2);
+  CHECK(list.slots[1].program == 2);
   // No slot at all, or a slot cut short, is not a queue: an empty queue is a slot of zone 0.
   bytes = from_hex("BB 01");
   CHECK_FALSE(parse_queue_list(bytes.data(), bytes.size(), &list));

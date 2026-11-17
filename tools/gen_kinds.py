@@ -107,7 +107,7 @@ def render_model_limits() -> str:
             "uint8_t",
             "TM2_RUN_MAX_MINUTES",
             model.run_max_minutes,
-            "39, 4B and 3A take minutes in one byte",
+            "manual runs (39, 4B) and the zone test (3A), SPEC 5.4",
         ),
     ]
     lines = [_HEADER.format(source="models.py")]

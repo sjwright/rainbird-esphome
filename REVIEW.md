@@ -1,13 +1,18 @@
 # REVIEW: a living document of issues
 
-Last assessed on 17 November 2026. HEAD is `c6da245`, with uncommitted work
-on top of it: valve off cancelling a pending start, `receive_symbols` raised
-to 448, `ends_at` publishing without a numeric sensor, and `parse_reply` and
-`reply_matches` reading one table of replies.
+Last assessed on 17 November 2026 at `6fb6b47`, with nothing uncommitted.
+That commit is a refactor with no change in behaviour: the edits waiting for a
+schedule page moved from `Session` into `ScheduleEditor`, `Capabilities` into
+its own `capabilities.h`, the codec declarations into `model_esp_tm2.h`, the
+`send_raw` and zone actions into `automation.h`, and `schemas.py` became
+`entity_schema.py`. Every issue below was checked again against it and still
+stands; the one under "To confirm on hardware" still needs the controller.
 
-At that state the 172 host tests pass, plain and under ASan and UBSan, and the
-82 pytest cases pass against ESPHome 2026.10.2. Of the firmware configs, only
-`test.ends-at-only.yaml` was compiled.
+At that state the 174 host tests pass, plain and under ASan and UBSan, and the
+82 pytest cases pass against ESPHome 2026.10.2, as do ruff, clang-format and
+yamllint. `test.esp32-idf.yaml` and `test.esp32-ard.yaml` compile, and
+`validate.esp32-idf.yaml` passes `esphome config`. `test.esp32-c3-idf.yaml`
+and `test.ends-at-only.yaml` were not compiled this time.
 
 ## Big
 
@@ -105,3 +110,13 @@ controller may act on each copy. That leaves `38` (run program), a default
 entity, going out as a single 2-byte frame, along with `42`, `3A` and `49`.
 Nothing in the repo records the controller answering one sent that way. If it
 does not, the log now says "No reply to 38" and `on_no_reply` runs.
+
+### The escape table and the 100-minute run limit
+
+Both now follow pyrainbird's later commits rather than a capture (SPEC 2.4 and
+5.4). The hub escapes `1C` as `1B 01` and `1B` as `1B 02`, the other way
+round from before, and refuses manual runs and the zone test over 100
+minutes. The log notes the first `1B` or `1C` the controller escapes, which
+settles the table. If instead `4C` gets no reply at :27 or :28 seconds, the old
+order was right. A 101-minute `39` with `send_raw` would settle the limit.
+

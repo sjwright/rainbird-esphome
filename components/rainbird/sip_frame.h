@@ -11,11 +11,19 @@ namespace esphome::rainbird {
 static constexpr uint8_t FRAME_PREAMBLE = 0xF5;
 static constexpr uint8_t FRAME_START = 0x1C;
 static constexpr uint8_t FRAME_END = 0x1D;
-// Byte stuffing (SPEC 2.4): 1B, 1C and 1D after the start byte go out as 1B followed by
-// the byte minus 1A, so 1B 01, 1B 02 and 1B 03. Only 1D -> 1B 03 has been seen on the wire.
+// Byte stuffing (SPEC 2.4): after the start byte, 1C goes out as 1B 01, 1B as 1B 02 and
+// 1D as 1B 03. Only 1D -> 1B 03 has been seen from a TM2. The other two are pyrainbird's
+// and the ME3 captures' table, not "the byte minus 1A", which would swap them.
 static constexpr uint8_t FRAME_ESCAPE = 0x1B;
-static constexpr uint8_t FRAME_ESCAPE_OFFSET = 0x1A;
 inline bool frame_needs_escape(uint8_t byte) { return byte >= FRAME_ESCAPE && byte <= FRAME_END; }
+// The code after 1B for a byte that frame_needs_escape().
+inline uint8_t frame_escape_code(uint8_t byte) {
+  return byte == FRAME_START ? 0x01 : byte == FRAME_ESCAPE ? 0x02 : 0x03;
+}
+// The byte a code after 1B stands for, or 0 when the code is not 01, 02 or 03.
+inline uint8_t frame_unescape(uint8_t code) {
+  return code == 0x01 ? FRAME_START : code == 0x02 ? FRAME_ESCAPE : code == 0x03 ? FRAME_END : 0;
+}
 // Bit n set: byte 1B + n was escaped (bit 0 for 1B, bit 1 for 1C, bit 2 for 1D).
 inline uint8_t frame_escape_bit(uint8_t byte) { return static_cast<uint8_t>(1u << (byte - FRAME_ESCAPE)); }
 static constexpr size_t MAX_PAYLOAD = 64;

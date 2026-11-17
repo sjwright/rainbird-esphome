@@ -132,11 +132,11 @@ WritePlan plan_write(const EntityBinding &binding, float value, const WriteConte
 
 WritePlan plan_zone_run(int32_t zone, uint32_t duration_ms, bool queue) {
   // Refused, not clamped. A negative minutes value in a template wraps to a huge duration,
-  // and clamping that would water for over four hours.
+  // and clamping that would water for the longest run the controller takes.
   if (zone < 1 || zone > 255)
     return refused("that is not a zone number");
   if (duration_ms == 0 || duration_ms > MAX_RUN_MINUTES * 60000u)
-    return refused("the duration is outside 1 ms to 255 minutes");
+    return refused("the duration is outside 1 ms to 100 minutes");
   // Whole minutes, so a part minute rounds up.
   return control(queue ? ControlOp::QUEUE_ZONE : ControlOp::RUN_ZONE, static_cast<uint8_t>(zone), 0,
                  static_cast<uint16_t>((duration_ms + 59999u) / 60000u));

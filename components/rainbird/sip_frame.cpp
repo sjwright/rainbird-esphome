@@ -28,7 +28,7 @@ size_t encode_frame(const uint8_t *payload, size_t length, bool reply, uint8_t *
   auto put_escaped = [&](uint8_t byte) {
     if (frame_needs_escape(byte)) {
       put(FRAME_ESCAPE);
-      put(static_cast<uint8_t>(byte - FRAME_ESCAPE_OFFSET));
+      put(frame_escape_code(byte));
     } else {
       put(byte);
     }
@@ -74,8 +74,8 @@ size_t read_frame(const std::vector<uint8_t> &bits, size_t bit, bool unescape, F
       }
       uint8_t code = byte_at(bits, at);
       at += 8;
-      byte = static_cast<uint8_t>(code + FRAME_ESCAPE_OFFSET);
-      if (!frame_needs_escape(byte)) {
+      byte = frame_unescape(code);
+      if (byte == 0) {
         return false;  // 1B followed by something that is not 01, 02 or 03
       }
       escaped |= frame_escape_bit(byte);

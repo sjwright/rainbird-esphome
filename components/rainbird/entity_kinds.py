@@ -101,8 +101,9 @@ _DOMAIN_SUFFIX = {
     "datetime": "datetime",
 }
 
-# The select index is the wire byte: FREQ_CUSTOM to FREQ_EVEN in sip_commands.h.
-FREQUENCY_OPTIONS = ("Custom days", "Cyclic", "Odd days", "Even days")
+# The select index is the wire byte: FREQ_CUSTOM to FREQ_ODD_ALT in sip_commands.h. The last
+# two are pyrainbird's, unseen on a TM2, and writing them needs experimental.
+FREQUENCY_OPTIONS = ("Custom days", "Cyclic", "Odd days", "Even days", "Off", "Odd days (code 5)")
 
 _PLURAL_SUFFIX = {
     "switch": "switches",
@@ -570,7 +571,11 @@ KINDS = (
         "{program} frequency",
         write=Write.SCHEDULE_PAGE,
         field="FREQUENCY",
-        doc="`Custom days`, `Cyclic`, `Odd days` or `Even days`.",
+        doc=(
+            "`Custom days`, `Cyclic`, `Odd days` or `Even days`. `Off` and `Odd days (code 5)` "
+            "show what pyrainbird says the controller can report; choosing either needs "
+            "`experimental: true`."
+        ),
     ),
     EntityKind(
         KindId.START_TIME,

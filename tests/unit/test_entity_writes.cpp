@@ -83,7 +83,7 @@ TEST_CASE("a minutes setting is rounded and held to the one byte the command tak
   CHECK(whole_minutes(-5.0f, &minutes));
   CHECK(minutes == 1);
   CHECK(whole_minutes(1e12f, &minutes));
-  CHECK(minutes == 255);
+  CHECK(minutes == 100);  // the manual run limit, not the byte's 255
   CHECK_FALSE(whole_minutes(NAN, &minutes));
 }
 
@@ -175,8 +175,9 @@ TEST_CASE("a zone run from an action is refused outside its ranges, never clampe
   // A part minute rounds up.
   CHECK(plan_zone_run(1, 1, false).control.value == 1);
   CHECK(plan_zone_run(1, 60001, false).control.value == 2);
-  CHECK(plan_zone_run(1, 255u * 60000u, false).control.value == 255);
-  CHECK(plan_zone_run(1, 255u * 60000u + 1, false).action == WriteAction::REFUSED);
+  // Manual runs stop at 100 minutes: an ESP-RZXe refuses 101 (SPEC 5.4).
+  CHECK(plan_zone_run(1, 100u * 60000u, false).control.value == 100);
+  CHECK(plan_zone_run(1, 100u * 60000u + 1, false).action == WriteAction::REFUSED);
   CHECK(plan_zone_run(1, 0, false).action == WriteAction::REFUSED);
   // -1 minutes in a template, as uint32 milliseconds.
   CHECK(plan_zone_run(1, static_cast<uint32_t>(-60000), false).action == WriteAction::REFUSED);

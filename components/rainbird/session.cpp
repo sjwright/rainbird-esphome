@@ -920,6 +920,10 @@ ControlResult Session::edit_schedule(Field field, uint8_t zone, uint8_t program,
   if (this->link_down_()) {
     return ControlResult::REFUSED_LINK_DOWN;
   }
+  // Off and the second odd code are pyrainbird's reading, not seen on a TM2 (SPEC pages 10-12).
+  if (field == Field::FREQUENCY && value > FREQ_EVEN && !this->config_.experimental) {
+    return ControlResult::REFUSED_EXPERIMENTAL;
+  }
   ByteBuf read;
   switch (this->editor_.ask(PageChange{field, zone, program, index, value}, &read)) {
     case ScheduleEditor::Asked::READ:

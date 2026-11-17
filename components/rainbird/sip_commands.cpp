@@ -368,7 +368,9 @@ bool parse_queue_list(const uint8_t *payload, size_t size, QueueList *out) {
     }
     QueueSlot &slot = out->slots[out->count];
     slot.zone = raw & 0x1F;
-    slot.flags = raw & 0xE0;
+    // The app's queue parser reads the top 3 bits as the program plus 1 (SPEC 5.3).
+    uint8_t tag = static_cast<uint8_t>(raw >> 5);
+    slot.program = tag == 0 ? QUEUE_PROGRAM_NONE : static_cast<uint8_t>(tag - 1);
     slot.seconds = be16(payload[index + 1], payload[index + 2]);
     out->count++;
     index += 3;
